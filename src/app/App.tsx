@@ -59,6 +59,8 @@ import { Sidebar } from "./shell/Sidebar";
 import { ApprovalToasts } from "../features/sessions/ui/ApprovalToasts";
 import { WhatsNewDialog } from "./shell/WhatsNewDialog";
 import { ProviderSignInDialog } from "../features/sessions/ui/ProviderSignInDialog";
+import { ImportClaudeSessionDialog } from "../features/sessions/ui/ImportClaudeSessionDialog";
+import { CLAUDE_SESSION_IMPORT_EVENT } from "../features/sessions/model/claudeSessionImport";
 import { TitleBar, type Tab as TitleTab } from "./shell/TitleBar";
 import { MenuBar } from "./shell/MenuBar";
 import { FilePicker } from "../features/files/ui/FilePicker";
@@ -811,6 +813,7 @@ export default function App({
     unusedWorktree: string;
     resolve: (choice: SessionDeleteChoice) => void;
   }>();
+  const [claudeImportCwd, setClaudeImportCwd] = useState<string | null>(null);
   const switchingWorktrees = useRef(new Map<string, string>());
   const removingWorktreePaths = useRef(new Set<string>());
   const deleteConfirmationPending = useRef(false);
@@ -3813,6 +3816,29 @@ export default function App({
       await onSelectHistorySession(sessionId);
     },
     [ensureOpenSession, onSelectHistorySession],
+  );
+
+  useEffect(() => {
+    const onRequest = (event: Event) => {
+      const cwd = (event as CustomEvent<string>).detail;
+      if (typeof cwd === "string" && cwd) setClaudeImportCwd(cwd);
+    };
+    window.addEventListener(CLAUDE_SESSION_IMPORT_EVENT, onRequest);
+    return () =>
+      window.removeEventListener(CLAUDE_SESSION_IMPORT_EVENT, onRequest);
+  }, []);
+
+  const onClaudeSessionImported = useCallback(
+    (sessionId: string) => {
+      const cwd = claudeImportCwd;
+      setClaudeImportCwd(null);
+      void openReminderSession(sessionId)
+        .then(() => {
+          if (cwd) void refreshHistory(cwd);
+        })
+        .catch(() => undefined);
+    },
+    [claudeImportCwd, openReminderSession, refreshHistory],
   );
 
   const ensureReminderSessionsSaved = useCallback(
@@ -9527,6 +9553,13 @@ export default function App({
               }}
             />
           )}
+          {claudeImportCwd ? (
+            <ImportClaudeSessionDialog
+              cwd={claudeImportCwd}
+              onClose={() => setClaudeImportCwd(null)}
+              onImported={onClaudeSessionImported}
+            />
+          ) : null}
           <ApprovalToasts
             notices={hiddenApprovalToasts}
             topOffset={
