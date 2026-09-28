@@ -53,3 +53,6 @@ lerna-debug.log*
 Thumbs.db
 ehthumbs.db
 Desktop.ini
+
+# Local git worktrees (see CONTRIBUTING.md)
+.worktrees/

@@ -39,6 +39,18 @@ One provider is enough. MonoCode probes for each CLI at startup and disables the
 
 `src/integrations/harness/` is the most useful place to start if you want to fix something real. Each folder under `providers/` has an adapter (`claudeAdapter.ts`) that implements the shared `HarnessAdapter` lifecycle from `core/registry.ts`, and a protocol module (`claudeProtocol.ts`) that translates the CLI’s output into MonoCode’s own event types. The protocol modules are pure functions with unit tests beside them, so you can fix a Codex parsing bug with only Claude Code installed. That’s for the providers we already ship - please don’t add a new one yet.
 
+## Git worktrees
+
+Create every new worktree under the main checkout's `.worktrees/` folder, named after the branch or task. `.worktrees/` is git-ignored, so worktrees never show up as untracked files.
+
+```bash
+git worktree add .worktrees/<name> -b <branch>   # new branch
+git worktree add .worktrees/<name> <branch>      # existing branch
+git worktree move <old-path> .worktrees/<name>   # relocate an existing worktree
+```
+
+Run these from the main checkout, not from inside another worktree, and don't create worktrees as sibling folders next to the repo. Each worktree needs its own `npm install`.
+
 ## Before you push
 
 ```bash
