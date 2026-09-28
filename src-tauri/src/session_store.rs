@@ -34,6 +34,16 @@ pub struct SessionStore {
 }
 
 impl SessionStore {
+    /// MonoCode sessions (archived included) bound to a `harness` conversation,
+    /// keyed by the provider's own session id.
+    pub(crate) fn provider_session_ids(
+        &self,
+        harness: &str,
+    ) -> Result<HashMap<String, String>, String> {
+        let conn = self.conn.lock().map_err(|_| "Session store is locked")?;
+        provider_session_ids(&conn, harness).map_err(|e| e.to_string())
+    }
+
     pub fn open(path: PathBuf) -> Result<Self, String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -1610,6 +1620,18 @@ fn list_by_project(conn: &Connection, cwd: &str) -> rusqlite::Result<Vec<Session
             automation_id: nonempty(row.get(17)?),
         })
     })?;
+    rows.collect()
+}
+
+fn provider_session_ids(
+    conn: &Connection,
+    harness: &str,
+) -> rusqlite::Result<HashMap<String, String>> {
+    let mut statement = conn.prepare(
+        "SELECT provider_session_id, id FROM sessions
+         WHERE harness = ?1 AND provider_session_id IS NOT NULL AND provider_session_id != ''",
+    )?;
+    let rows = statement.query_map([harness], |row| Ok((row.get(0)?, row.get(1)?)))?;
     rows.collect()
 }
 

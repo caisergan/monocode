@@ -1,4 +1,9 @@
-import { RefreshCw, Search } from "../../../shared/ui/icons";
+import {
+  FolderInput,
+  RefreshCw,
+  Search,
+  type IconComponent,
+} from "../../../shared/ui/icons";
 import {
   useEffect,
   useMemo,
@@ -26,6 +31,7 @@ import { MOD, SHIFT } from "../../../platform/tauri/platform";
 type Action = {
   id: string;
   label: string;
+  icon: IconComponent;
   hint?: string;
 };
 
@@ -35,7 +41,13 @@ export function reloadActionHint(mod = MOD, shift = SHIFT) {
 }
 
 const ACTIONS: Action[] = [
-  { id: "reload", label: "Reload MonoCode", hint: reloadActionHint() },
+  {
+    id: "reload",
+    label: "Reload MonoCode",
+    icon: RefreshCw,
+    hint: reloadActionHint(),
+  },
+  { id: "import-session", label: "Import session…", icon: FolderInput },
 ];
 
 type Props = {
@@ -335,7 +347,7 @@ function ActionList({
               highlighted ? "bg-selection text-content" : "text-content"
             }`}
           >
-            <RefreshCw
+            <action.icon
               className="size-4 shrink-0 text-content/50"
               strokeWidth={1.75}
             />

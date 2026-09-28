@@ -45,6 +45,7 @@ import FilterIcon from "@hugeicons/core-free-icons/FilterIcon";
 import FlashIcon from "@hugeicons/core-free-icons/FlashIcon";
 import Folder01Icon from "@hugeicons/core-free-icons/Folder01Icon";
 import FolderAddIcon from "@hugeicons/core-free-icons/FolderAddIcon";
+import FolderImportIcon from "@hugeicons/core-free-icons/FolderImportIcon";
 import FolderOpenIcon from "@hugeicons/core-free-icons/FolderOpenIcon";
 import FolderTreeIcon from "@hugeicons/core-free-icons/FolderTreeIcon";
 import GaugeIcon from "@hugeicons/core-free-icons/GaugeIcon";
@@ -193,6 +194,7 @@ export const Folder = wrap(Folder01Icon, "Folder");
 export const FolderOpen = wrap(FolderOpenIcon, "FolderOpen");
 export const Eye = wrap(ViewIcon, "Eye");
 export const FolderPlus = wrap(FolderAddIcon, "FolderPlus");
+export const FolderInput = wrap(FolderImportIcon, "FolderInput");
 export const FolderTree = wrap(FolderTreeIcon, "FolderTree");
 export const Gauge = wrap(GaugeIcon, "Gauge");
 export const ChartBreakoutSquare = wrap(

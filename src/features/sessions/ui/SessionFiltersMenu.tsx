@@ -19,6 +19,9 @@ type Props = {
   filters: SessionSidebarFilters;
   onChange: (filters: SessionSidebarFilters) => void;
   onClose: () => void;
+  /** Sessions outside MonoCode have no archive or run status to filter on. */
+  archivedOption?: boolean;
+  statusOptions?: boolean;
 };
 
 const TIME_OPTIONS: { id: SessionTimeFilter; label: string }[] = [
@@ -35,6 +38,8 @@ export function SessionFiltersMenu({
   filters,
   onChange,
   onClose,
+  archivedOption = true,
+  statusOptions = true,
 }: Props) {
   const hiddenHarnesses = new Set(filters.hiddenHarnesses);
 
@@ -73,28 +78,34 @@ export function SessionFiltersMenu({
       onContextMenu={(event) => event.preventDefault()}
       className="overflow-y-auto overscroll-none p-1"
     >
-      <FilterItem
-        label="Archived"
-        checked={filters.showArchived}
-        onClick={toggleArchived}
-      />
+      {archivedOption ? (
+        <FilterItem
+          label="Archived"
+          checked={filters.showArchived}
+          onClick={toggleArchived}
+        />
+      ) : null}
 
-      <SectionLabel>Status</SectionLabel>
-      <FilterItem
-        label="Working"
-        checked={filters.status.working}
-        onClick={() => toggleStatus("working")}
-      />
-      <FilterItem
-        label="Needs approval"
-        checked={filters.status.needsApproval}
-        onClick={() => toggleStatus("needsApproval")}
-      />
-      <FilterItem
-        label="Done"
-        checked={filters.status.done}
-        onClick={() => toggleStatus("done")}
-      />
+      {statusOptions ? (
+        <>
+          <SectionLabel>Status</SectionLabel>
+          <FilterItem
+            label="Working"
+            checked={filters.status.working}
+            onClick={() => toggleStatus("working")}
+          />
+          <FilterItem
+            label="Needs approval"
+            checked={filters.status.needsApproval}
+            onClick={() => toggleStatus("needsApproval")}
+          />
+          <FilterItem
+            label="Done"
+            checked={filters.status.done}
+            onClick={() => toggleStatus("done")}
+          />
+        </>
+      ) : null}
 
       <SectionLabel>Time</SectionLabel>
       {TIME_OPTIONS.map((option) => (
