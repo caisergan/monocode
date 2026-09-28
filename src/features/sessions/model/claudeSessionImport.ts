@@ -56,10 +56,18 @@ export async function importClaudeSession(
 
 export const CLAUDE_SESSION_IMPORT_EVENT = "monocode:import-claude-session";
 
-/** Ask the app to show the Claude Code session picker for a project. */
-export function requestClaudeSessionImport(cwd: string): void {
-  if (typeof window === "undefined" || !cwd) return;
+/**
+ * Ask the app to open the import sheet, scoped to `cwd` when given. The
+ * scope is only a starting point; the sheet can show every folder.
+ */
+export function requestClaudeSessionImport(cwd?: string): void {
+  if (typeof window === "undefined") return;
   window.dispatchEvent(
-    new CustomEvent<string>(CLAUDE_SESSION_IMPORT_EVENT, { detail: cwd }),
+    new CustomEvent<SessionImportRequest>(CLAUDE_SESSION_IMPORT_EVENT, {
+      detail: { cwd: cwd || undefined },
+    }),
   );
 }
+
+/** Which sessions the import sheet opens on: one project's, or every folder's. */
+export type SessionImportRequest = { cwd?: string };

@@ -174,4 +174,20 @@ describe("file picker command mode", () => {
       expect(callbacks.onOpenFile).not.toHaveBeenCalled();
     },
   );
+
+  it("offers importing a session started in the terminal", () => {
+    const callbacks = renderPicker(">");
+    const dialog = document.querySelector<HTMLElement>("[data-file-picker]")!;
+    const input = dialog.querySelector<HTMLInputElement>("input")!;
+
+    inputText(input, "> import");
+    const option = dialog.querySelector<HTMLButtonElement>(
+      '[role="option"][aria-selected="true"]',
+    )!;
+    expect(option.textContent).toContain("Import session…");
+    act(() => option.click());
+    expect(callbacks.onRunAction).toHaveBeenCalledExactlyOnceWith(
+      "import-session",
+    );
+  });
 });

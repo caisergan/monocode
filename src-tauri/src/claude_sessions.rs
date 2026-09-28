@@ -1,17 +1,21 @@
 //! Read Claude Code's own session transcripts (`~/.claude/projects`) so a
-//! conversation started in the terminal can be continued in MonoCode.
+//! conversation started in the terminal can be continued in MonoCode. The
+//! listing covers every folder, or one project's folder when scoped.
 //!
 //! Only the default Claude config directory is scanned. Named MonoCode
 //! account profiles keep their sessions elsewhere and already resume natively.
 
-use std::io::{BufRead, BufReader};
+use std::collections::HashMap;
+use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
+use tauri::State;
 
 use crate::dirs_home;
+use crate::session_store::SessionStore;
 
 /// Claude caps the encoded project directory name and appends a hash.
 const MAX_ENCODED_DIR_LEN: usize = 200;
@@ -20,6 +24,15 @@ const MAX_SESSION_FILE_BYTES: u64 = 256 * 1024 * 1024;
 /// Tool output is shown as a collapsed detail; the model keeps the full text.
 const MAX_TOOL_RESULT_CHARS: usize = 16 * 1024;
 const MAX_PROMPT_PREVIEW_CHARS: usize = 200;
+/// A summary reads the start of a transcript (cwd, first prompt) and its end
+/// (titles, last prompt), never the middle of a long session.
+const SUMMARY_HEAD_BYTES: u64 = 64 * 1024;
+const SUMMARY_TAIL_BYTES: u64 = 256 * 1024;
+const MAX_SUMMARY_TAIL_BYTES: u64 = 4 * 1024 * 1024;
+const DEFAULT_LIST_LIMIT: usize = 15;
+const MAX_LIST_LIMIT: usize = 200;
+/// Newest transcripts summarized per listing; a search looks no further back.
+const MAX_SUMMARIZED: usize = 500;
 
 /// Record keys the importer reads. Everything else — notably `toolUseResult`,
 /// which duplicates tool output in structured form — is dropped before IPC.
@@ -41,6 +54,29 @@ const KEPT_KEYS: &[&str] = &[
     "customTitle",
 ];
 
+#[derive(Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub struct ClaudeSessionQuery {
+    /// Only sessions started in this folder; every folder when absent.
+    cwd: Option<String>,
+    /// Case-insensitive match on the title, prompts and folder name.
+    query: Option<String>,
+    limit: Option<usize>,
+    /// Also list conversations MonoCode already has.
+    include_imported: bool,
+}
+
+/// Whether a session's folder can hold a MonoCode chat.
+#[derive(Serialize, Debug, PartialEq, Eq, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+pub enum SessionFolder {
+    Ok,
+    /// Started in the home folder, which is not a project.
+    Home,
+    /// The folder was moved or deleted.
+    Missing,
+}
+
 #[derive(Serialize, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ClaudeSessionSummary {
@@ -48,19 +84,41 @@ pub struct ClaudeSessionSummary {
     cwd: String,
     /// Claude's generated or user-set title, when the transcript has one.
     title: Option<String>,
-    first_prompt: Option<String>,
-    prompt_count: usize,
+    first_prompt: String,
+    last_prompt: String,
     git_branch: Option<String>,
     updated_at: u64,
     size_bytes: u64,
+    folder: SessionFolder,
+    /// The MonoCode session already bound to this conversation.
+    monocode_session_id: Option<String>,
+}
+
+#[derive(Serialize, Debug, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ClaudeSessionListing {
+    sessions: Vec<ClaudeSessionSummary>,
+    /// Conversations left out because MonoCode already has them.
+    imported_count: usize,
+    /// Older sessions exist past `limit`.
+    has_more: bool,
 }
 
 #[tauri::command(async)]
-pub fn claude_list_sessions(cwd: String) -> Result<Vec<ClaudeSessionSummary>, String> {
+pub fn claude_list_sessions(
+    store: State<'_, SessionStore>,
+    request: ClaudeSessionQuery,
+) -> Result<ClaudeSessionListing, String> {
     let Some(root) = claude_projects_root() else {
-        return Ok(Vec::new());
+        return Ok(ClaudeSessionListing::default());
     };
-    list_sessions(&root, &cwd)
+    let known = store.provider_session_ids("claude")?;
+    Ok(list_sessions(
+        &root,
+        &request,
+        &known,
+        dirs_home().as_deref(),
+    ))
 }
 
 #[tauri::command(async)]
@@ -139,9 +197,30 @@ fn same_cwd(left: &str, right: &str) -> bool {
     left.trim_end_matches(['/', '\\']) == right.trim_end_matches(['/', '\\'])
 }
 
-fn list_sessions(root: &Path, cwd: &str) -> Result<Vec<ClaudeSessionSummary>, String> {
-    let mut sessions = Vec::new();
-    for dir in project_dirs(root, cwd) {
+struct Candidate {
+    path: PathBuf,
+    id: String,
+    updated_at: u64,
+    size_bytes: u64,
+}
+
+/// Transcripts under `root`, newest first. Only top-level files count;
+/// subagent transcripts live in nested directories.
+fn candidates(root: &Path, cwd: Option<&str>) -> Vec<Candidate> {
+    let dirs = match cwd {
+        Some(cwd) => project_dirs(root, cwd),
+        None => std::fs::read_dir(root)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| path.is_dir())
+                    .collect()
+            })
+            .unwrap_or_default(),
+    };
+    let mut found = Vec::new();
+    for dir in dirs {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -156,84 +235,258 @@ fn list_sessions(root: &Path, cwd: &str) -> Result<Vec<ClaudeSessionSummary>, St
             if validate_session_id(id).is_err() {
                 continue;
             }
-            if let Some(summary) = summarize_session(&path, id) {
-                if same_cwd(&summary.cwd, cwd) {
-                    sessions.push(summary);
-                }
-            }
-        }
-    }
-    sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    Ok(sessions)
-}
-
-/// Cheap single pass: only title records and prompt-bearing user lines are
-/// parsed. Sessions without a real prompt (a cancelled `/resume`, say) are
-/// skipped because there is nothing to continue.
-fn summarize_session(path: &Path, id: &str) -> Option<ClaudeSessionSummary> {
-    let metadata = std::fs::metadata(path).ok()?;
-    let updated_at = metadata
-        .modified()
-        .ok()
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0);
-    let file = std::fs::File::open(path).ok()?;
-    let mut cwd = None;
-    let mut git_branch = None;
-    let mut ai_title = None;
-    let mut custom_title = None;
-    let mut first_prompt = None;
-    let mut prompt_count = 0;
-    for line in BufReader::new(file).lines() {
-        let Ok(line) = line else { break };
-        if line.contains("\"type\":\"ai-title\"") || line.contains("\"type\":\"custom-title\"") {
-            let Ok(record) = serde_json::from_str::<Value>(&line) else {
+            let Ok(metadata) = entry.metadata() else {
                 continue;
             };
-            if let Some(title) = non_empty_str(&record, "aiTitle") {
-                ai_title = Some(title);
+            if !metadata.is_file() {
+                continue;
             }
-            if let Some(title) = non_empty_str(&record, "customTitle") {
-                custom_title = Some(title);
-            }
+            let updated_at = metadata
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_millis() as u64)
+                .unwrap_or(0);
+            found.push(Candidate {
+                id: id.to_string(),
+                path,
+                updated_at,
+                size_bytes: metadata.len(),
+            });
+        }
+    }
+    found.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    found
+}
+
+/// Newest sessions first. Conversations MonoCode already has are skipped
+/// before their transcript is opened, and counted instead.
+fn list_sessions(
+    root: &Path,
+    request: &ClaudeSessionQuery,
+    known: &HashMap<String, String>,
+    home: Option<&str>,
+) -> ClaudeSessionListing {
+    let limit = request
+        .limit
+        .unwrap_or(DEFAULT_LIST_LIMIT)
+        .clamp(1, MAX_LIST_LIMIT);
+    let cwd = request
+        .cwd
+        .as_deref()
+        .map(|cwd| cwd.trim_end_matches(['/', '\\']))
+        .filter(|cwd| !cwd.is_empty());
+    let query = request
+        .query
+        .as_deref()
+        .map(str::trim)
+        .filter(|query| !query.is_empty())
+        .map(str::to_lowercase);
+    let mut listing = ClaudeSessionListing::default();
+    let mut summarized = 0;
+    for candidate in candidates(root, cwd) {
+        let monocode_session_id = known.get(&candidate.id).cloned();
+        if monocode_session_id.is_some() && !request.include_imported {
+            listing.imported_count += 1;
             continue;
         }
-        if !line.contains("\"type\":\"user\"") || line.contains("\"tool_result\"") {
-            continue;
+        if summarized == MAX_SUMMARIZED {
+            break;
         }
-        let Ok(record) = serde_json::from_str::<Value>(&line) else {
+        summarized += 1;
+        let Some(summary) = summarize_session(&candidate, monocode_session_id, home) else {
             continue;
         };
-        if record.get("type").and_then(Value::as_str) != Some("user") {
+        if cwd.is_some_and(|cwd| !same_cwd(&summary.cwd, cwd)) {
             continue;
         }
-        if cwd.is_none() {
-            cwd = non_empty_str(&record, "cwd");
+        if query
+            .as_deref()
+            .is_some_and(|query| !matches_query(&summary, query))
+        {
+            continue;
+        }
+        if listing.sessions.len() == limit {
+            listing.has_more = true;
+            break;
+        }
+        listing.sessions.push(summary);
+    }
+    listing
+}
+
+fn matches_query(summary: &ClaudeSessionSummary, query: &str) -> bool {
+    let folder = summary
+        .cwd
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or("");
+    [
+        summary.title.as_deref().unwrap_or(""),
+        &summary.first_prompt,
+        &summary.last_prompt,
+        folder,
+    ]
+    .iter()
+    .any(|text| text.to_lowercase().contains(query))
+}
+
+fn folder_state(cwd: &str, home: Option<&str>) -> SessionFolder {
+    if home.is_some_and(|home| same_cwd(home, cwd)) {
+        SessionFolder::Home
+    } else if Path::new(cwd).is_dir() {
+        SessionFolder::Ok
+    } else {
+        SessionFolder::Missing
+    }
+}
+
+/// Only title records and prompt-bearing user lines are parsed. Sessions
+/// without a real prompt (a cancelled `/resume`, say) are skipped because
+/// there is nothing to continue.
+fn summarize_session(
+    candidate: &Candidate,
+    monocode_session_id: Option<String>,
+    home: Option<&str>,
+) -> Option<ClaudeSessionSummary> {
+    // A long run of tool output can push the last prompt out of the tail, so
+    // the tail widens until it holds one.
+    let mut tail_bytes = SUMMARY_TAIL_BYTES;
+    let scan = loop {
+        let mut scan = SummaryScan::default();
+        visit_summary_lines(
+            &candidate.path,
+            candidate.size_bytes,
+            tail_bytes,
+            |line, in_tail| scan.visit(line, in_tail),
+        )
+        .ok()?;
+        if scan.tail_prompt
+            || tail_bytes >= MAX_SUMMARY_TAIL_BYTES
+            || candidate.size_bytes <= SUMMARY_HEAD_BYTES + tail_bytes
+        {
+            break scan;
+        }
+        tail_bytes *= 4;
+    };
+    let cwd = scan.cwd?;
+    Some(ClaudeSessionSummary {
+        id: candidate.id.clone(),
+        folder: folder_state(&cwd, home),
+        cwd,
+        title: scan.custom_title.or(scan.ai_title),
+        first_prompt: scan.first_prompt?,
+        last_prompt: scan.last_prompt?,
+        git_branch: scan.git_branch,
+        updated_at: candidate.updated_at,
+        size_bytes: candidate.size_bytes,
+        monocode_session_id,
+    })
+}
+
+#[derive(Default)]
+struct SummaryScan {
+    cwd: Option<String>,
+    git_branch: Option<String>,
+    ai_title: Option<String>,
+    custom_title: Option<String>,
+    first_prompt: Option<String>,
+    last_prompt: Option<String>,
+    /// The last prompt came from the tail rather than the head.
+    tail_prompt: bool,
+}
+
+impl SummaryScan {
+    fn visit(&mut self, line: &str, in_tail: bool) {
+        if line.contains("\"type\":\"ai-title\"") || line.contains("\"type\":\"custom-title\"") {
+            let Ok(record) = serde_json::from_str::<Value>(line) else {
+                return;
+            };
+            if let Some(title) = non_empty_str(&record, "aiTitle") {
+                self.ai_title = Some(title);
+            }
+            if let Some(title) = non_empty_str(&record, "customTitle") {
+                self.custom_title = Some(title);
+            }
+            return;
+        }
+        if !line.contains("\"type\":\"user\"") || line.contains("\"tool_result\"") {
+            return;
+        }
+        let Ok(record) = serde_json::from_str::<Value>(line) else {
+            return;
+        };
+        if record.get("type").and_then(Value::as_str) != Some("user") {
+            return;
+        }
+        if self.cwd.is_none() {
+            self.cwd = non_empty_str(&record, "cwd");
         }
         if let Some(branch) = non_empty_str(&record, "gitBranch") {
-            git_branch = Some(branch);
+            self.git_branch = Some(branch);
         }
         if let Some(prompt) = user_prompt_text(&record) {
-            prompt_count += 1;
-            if first_prompt.is_none() {
-                first_prompt = Some(truncate_chars(prompt.trim(), MAX_PROMPT_PREVIEW_CHARS));
+            let preview = prompt_preview(&prompt);
+            if self.first_prompt.is_none() {
+                self.first_prompt = Some(preview.clone());
             }
+            self.last_prompt = Some(preview);
+            self.tail_prompt = in_tail;
         }
     }
-    if prompt_count == 0 {
-        return None;
+}
+
+/// Feeds `visit` the first `SUMMARY_HEAD_BYTES` and the last `tail_bytes` of
+/// a transcript, line by line, flagging tail lines. Small transcripts are read
+/// whole and count as tail.
+fn visit_summary_lines(
+    path: &Path,
+    size: u64,
+    tail_bytes: u64,
+    mut visit: impl FnMut(&str, bool),
+) -> std::io::Result<()> {
+    let mut reader = BufReader::new(std::fs::File::open(path)?);
+    let mut line = Vec::new();
+    let whole = size <= SUMMARY_HEAD_BYTES + tail_bytes;
+    let mut offset = 0u64;
+    while whole || offset < SUMMARY_HEAD_BYTES {
+        line.clear();
+        let read = reader.read_until(b'\n', &mut line)?;
+        if read == 0 {
+            return Ok(());
+        }
+        offset += read as u64;
+        visit(&String::from_utf8_lossy(&line), whole);
     }
-    Some(ClaudeSessionSummary {
-        id: id.to_string(),
-        cwd: cwd?,
-        title: custom_title.or(ai_title),
-        first_prompt,
-        prompt_count,
-        git_branch,
-        updated_at,
-        size_bytes: metadata.len(),
-    })
+    let tail_start = size - tail_bytes;
+    if tail_start > offset {
+        reader.seek(SeekFrom::Start(tail_start))?;
+        // The seek lands mid-line; that fragment is not a record.
+        line.clear();
+        reader.read_until(b'\n', &mut line)?;
+    }
+    loop {
+        line.clear();
+        if reader.read_until(b'\n', &mut line)? == 0 {
+            return Ok(());
+        }
+        visit(&String::from_utf8_lossy(&line), true);
+    }
+}
+
+/// One line of prompt text for a list row.
+fn prompt_preview(prompt: &str) -> String {
+    let collapsed = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+    truncate_chars(&collapsed, MAX_PROMPT_PREVIEW_CHARS)
+}
+
+/// Text between `<tag>` and `</tag>`.
+fn tag_text<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
+    let open = format!("<{tag}>");
+    let start = text.find(&open)? + open.len();
+    let end = start + text[start..].find(&format!("</{tag}>"))?;
+    Some(text[start..end].trim())
 }
 
 fn non_empty_str(record: &Value, key: &str) -> Option<String> {
@@ -245,8 +498,9 @@ fn non_empty_str(record: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-/// Text the user actually typed. Mirrors the importer's prompt filter closely
-/// enough for a count; the TypeScript side decides what is rendered.
+/// Text the user actually typed, with slash commands shown as `/name args`.
+/// Mirrors the importer's prompt filter closely enough for a preview; the
+/// TypeScript side decides what is rendered.
 fn user_prompt_text(record: &Value) -> Option<String> {
     if record.get("isSidechain").and_then(Value::as_bool) == Some(true)
         || record.get("isMeta").and_then(Value::as_bool) == Some(true)
@@ -272,6 +526,11 @@ fn user_prompt_text(record: &Value) -> Option<String> {
         || trimmed.starts_with("<task-notification>")
     {
         return None;
+    }
+    if trimmed.starts_with("<command-") {
+        let name = tag_text(trimmed, "command-name")?;
+        let args = tag_text(trimmed, "command-args").unwrap_or("");
+        return Some(format!("{name} {args}").trim_end().to_string());
     }
     Some(text)
 }
@@ -449,14 +708,172 @@ mod tests {
             &[json!({ "type": "mode", "mode": "normal" })],
         );
 
-        let sessions = list_sessions(&root, cwd).unwrap();
-        assert_eq!(sessions.len(), 1);
-        let session = &sessions[0];
+        let listing = list_sessions(&root, &scoped(cwd), &HashMap::new(), None);
+        assert_eq!(listing.sessions.len(), 1);
+        let session = &listing.sessions[0];
         assert_eq!(session.id, "one");
         assert_eq!(session.title.as_deref(), Some("Fix build"));
-        assert_eq!(session.first_prompt.as_deref(), Some("fix the build"));
-        assert_eq!(session.prompt_count, 2);
+        assert_eq!(session.first_prompt, "fix the build");
+        assert_eq!(session.last_prompt, "and add tests");
         assert_eq!(session.git_branch.as_deref(), Some("main"));
+        assert_eq!(session.folder, SessionFolder::Missing);
+        assert!(!listing.has_more);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn scoped(cwd: &str) -> ClaudeSessionQuery {
+        ClaudeSessionQuery {
+            cwd: Some(cwd.into()),
+            ..Default::default()
+        }
+    }
+
+    fn touch(dir: &Path, id: &str, seconds: u64) {
+        std::fs::File::options()
+            .write(true)
+            .open(dir.join(format!("{id}.jsonl")))
+            .unwrap()
+            .set_modified(UNIX_EPOCH + std::time::Duration::from_secs(seconds))
+            .unwrap();
+    }
+
+    #[test]
+    fn lists_every_folder_newest_first_and_leaves_out_known_sessions() {
+        let root = temp_root("all");
+        let app = root.join(encode_project_dir("/work/app"));
+        let site = root.join(encode_project_dir("/work/site"));
+        write_session(&app, "old", &[user("/work/app", json!("old work"))]);
+        write_session(
+            &site,
+            "known",
+            &[user("/work/site", json!("from MonoCode"))],
+        );
+        write_session(&site, "new", &[user("/work/site", json!("new work"))]);
+        touch(&app, "old", 100);
+        touch(&site, "known", 200);
+        touch(&site, "new", 300);
+        let known = HashMap::from([("known".to_string(), "mono-1".to_string())]);
+
+        let listing = list_sessions(&root, &ClaudeSessionQuery::default(), &known, None);
+        let ids: Vec<_> = listing.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["new", "old"]);
+        assert_eq!(listing.imported_count, 1);
+
+        let all = ClaudeSessionQuery {
+            include_imported: true,
+            ..Default::default()
+        };
+        let listing = list_sessions(&root, &all, &known, None);
+        assert_eq!(listing.sessions.len(), 3);
+        assert_eq!(
+            listing.sessions[1].monocode_session_id.as_deref(),
+            Some("mono-1")
+        );
+        assert_eq!(listing.imported_count, 0);
+
+        let first = ClaudeSessionQuery {
+            limit: Some(1),
+            ..Default::default()
+        };
+        let listing = list_sessions(&root, &first, &known, None);
+        assert_eq!(listing.sessions.len(), 1);
+        assert!(listing.has_more);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn search_matches_title_prompts_and_folder_name() {
+        let root = temp_root("search");
+        let dir = root.join(encode_project_dir("/work/billing"));
+        write_session(
+            &dir,
+            "s",
+            &[
+                user("/work/billing", json!("first ask")),
+                user("/work/billing", json!("Then Add Tests")),
+                json!({ "type": "custom-title", "customTitle": "Invoice export" }),
+            ],
+        );
+        let search = |query: &str| {
+            let request = ClaudeSessionQuery {
+                query: Some(query.into()),
+                ..Default::default()
+            };
+            list_sessions(&root, &request, &HashMap::new(), None)
+                .sessions
+                .len()
+        };
+        assert_eq!(search("invoice"), 1);
+        assert_eq!(search("first"), 1);
+        assert_eq!(search("add tests"), 1);
+        assert_eq!(search("billing"), 1);
+        assert_eq!(search("  "), 1);
+        assert_eq!(search("payroll"), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn long_transcripts_are_summarized_from_their_ends() {
+        let root = temp_root("long");
+        let cwd = "/work/long";
+        let dir = root.join(encode_project_dir(cwd));
+        let filler = json!({ "type": "assistant", "message": { "content": "y".repeat(4096) } });
+        let mut records = vec![user(cwd, json!("start here"))];
+        records.extend(std::iter::repeat_n(filler, 200));
+        records.push(user(cwd, json!("finish up")));
+        records.push(json!({ "type": "ai-title", "aiTitle": "Long one" }));
+        write_session(&dir, "long", &records);
+        let size = std::fs::metadata(dir.join("long.jsonl")).unwrap().len();
+        assert!(size > SUMMARY_HEAD_BYTES + SUMMARY_TAIL_BYTES);
+
+        let listing = list_sessions(&root, &scoped(cwd), &HashMap::new(), None);
+        let session = &listing.sessions[0];
+        assert_eq!(session.first_prompt, "start here");
+        assert_eq!(session.last_prompt, "finish up");
+        assert_eq!(session.title.as_deref(), Some("Long one"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn tail_widens_past_long_tool_output_to_find_the_last_prompt() {
+        let root = temp_root("wide");
+        let cwd = "/work/wide";
+        let dir = root.join(encode_project_dir(cwd));
+        let filler = json!({ "type": "assistant", "message": { "content": "z".repeat(4096) } });
+        let mut records = vec![user(cwd, json!("start here"))];
+        records.extend(std::iter::repeat_n(filler.clone(), 50));
+        records.push(user(cwd, json!("the real last ask")));
+        records.extend(std::iter::repeat_n(filler, 100));
+        write_session(&dir, "wide", &records);
+
+        let listing = list_sessions(&root, &scoped(cwd), &HashMap::new(), None);
+        assert_eq!(listing.sessions[0].last_prompt, "the real last ask");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn previews_show_slash_commands_as_typed() {
+        let record = user(
+            "/w",
+            json!("<command-message>model</command-message>\n<command-name>/model</command-name>\n<command-args>opus</command-args>"),
+        );
+        assert_eq!(user_prompt_text(&record).as_deref(), Some("/model opus"));
+        assert_eq!(prompt_preview("  fix\n\n the   build "), "fix the build");
+    }
+
+    #[test]
+    fn home_and_missing_folders_are_flagged() {
+        let root = temp_root("folders");
+        let home = root.to_str().unwrap();
+        assert_eq!(
+            folder_state(&format!("{home}/"), Some(home)),
+            SessionFolder::Home
+        );
+        assert_eq!(folder_state(home, None), SessionFolder::Ok);
+        assert_eq!(
+            folder_state(&format!("{home}/gone"), Some(home)),
+            SessionFolder::Missing
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -3,10 +3,10 @@ import {
   AppWindow,
   Archive,
   BellOff,
+  FolderInput,
   FolderOpen,
   FolderTree,
   ImagePlus,
-  MessageSquarePlus,
   Pin,
   PinOff,
   Settings,
@@ -129,8 +129,8 @@ function projectMenuExtraItems(
     { id: "reveal", label: REVEAL_LABEL, icon: FolderOpen },
     {
       id: "import-claude-session",
-      label: "Continue Claude Code session…",
-      icon: MessageSquarePlus,
+      label: "Import session…",
+      icon: FolderInput,
     },
     {
       id: "external-editor",

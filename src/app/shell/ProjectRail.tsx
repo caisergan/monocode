@@ -2,6 +2,7 @@ import {
   BellOff,
   ChevronDown,
   ChevronRight,
+  FolderInput,
   FolderPlus,
   Inbox,
   MoreHorizontal,
@@ -66,6 +67,7 @@ import {
 } from "../../features/projects/model/projectGroups";
 import type { LiveAgent } from "../../features/sessions/model/liveAgents";
 import { LiveAgentsPreview } from "../../features/sessions/ui/LiveAgentsPreview";
+import { requestClaudeSessionImport } from "../../features/sessions/model/claudeSessionImport";
 import { ProjectLogoIcon } from "../../features/projects/ui/ProjectLogoIcon";
 import { ProjectMascot } from "../../features/projects/ui/ProjectMascot";
 import { RailAction, RailSearch } from "./RailAction";
@@ -487,6 +489,7 @@ export function ProjectRail({
                   : undefined
               }
               onAdd={onOpenProject}
+              onImport={() => requestClaudeSessionImport()}
               cwd={cwd}
               busy={busy}
               statsEnabled={visible}
@@ -569,6 +572,7 @@ function ProjectSection({
   muteStatuses,
   emptyLabel,
   onAdd,
+  onImport,
   cwd,
   busy,
   statsEnabled,
@@ -590,6 +594,7 @@ function ProjectSection({
   muteStatuses: ReadonlyMap<string, string | null>;
   emptyLabel?: string;
   onAdd?: () => void;
+  onImport?: () => void;
   cwd: string;
   busy: Set<string>;
   statsEnabled: boolean;
@@ -608,7 +613,7 @@ function ProjectSection({
 }) {
   return (
     <div className="shrink-0 mb-2">
-      <ProjectSectionHeader label={label} onAdd={onAdd} />
+      <ProjectSectionHeader label={label} onAdd={onAdd} onImport={onImport} />
       {items.length === 0 && emptyLabel ? (
         <p className="px-4 pb-1 text-[11px] leading-tight text-content/40">
           {emptyLabel}
@@ -644,10 +649,12 @@ function ProjectSection({
 function ProjectSectionHeader({
   label,
   onAdd,
+  onImport,
   onAddGroup,
 }: {
   label: string;
   onAdd?: () => void;
+  onImport?: () => void;
   onAddGroup?: (x: number, y: number) => void;
 }) {
   return (
@@ -667,6 +674,17 @@ function ProjectSectionHeader({
           className="grid size-5 shrink-0 place-items-center rounded-md text-content/50 hover:bg-content/8 hover:text-content"
         >
           <FolderPlus className="size-3.5" strokeWidth={1.75} />
+        </button>
+      ) : null}
+      {onImport ? (
+        <button
+          type="button"
+          title="Import session"
+          aria-label="Import session"
+          onClick={onImport}
+          className="grid size-5 shrink-0 place-items-center rounded-md text-content/50 hover:bg-content/8 hover:text-content"
+        >
+          <FolderInput className="size-3.5" strokeWidth={1.75} />
         </button>
       ) : null}
       {onAdd ? (

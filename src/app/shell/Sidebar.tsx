@@ -46,6 +46,13 @@ import {
   type SidebarTabId,
 } from "../../features/settings/model/appearance";
 import { formatInteger } from "../../shared/lib/numbers";
+import { formatRelative } from "../../shared/lib/relativeTime";
+import {
+  SessionsHeaderButton,
+  SessionsSearchField,
+} from "../../features/sessions/ui/SessionsSearchBar";
+import { useImportableSessionCount } from "../../features/sessions/ui/useImportableSessionCount";
+import { requestClaudeSessionImport } from "../../features/sessions/model/claudeSessionImport";
 import { type GitFileDiffKind, type GitHistoryCommit } from "../../platform/tauri/fs";
 import { IS_MAC, MOD } from "../../platform/tauri/platform";
 import { resolveModel } from "../../features/sessions/model/models";
@@ -429,6 +436,10 @@ function SidebarComponent({
   const [sessionListLimit, setSessionListLimit] = useState(LIST_PAGE_SIZE);
   const loadMoreRef = useRef<HTMLLIElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const importable = useImportableSessionCount(
+    tab === "sessions" ? cwd : undefined,
+    sessions.length,
+  );
   const pendingFolderSessionIds = useRef(new Set<string>());
   const busyIdsRef = useRef(busySessionIds);
   const focusedSessionIdRef = useRef(activeSessionId);
@@ -1285,30 +1296,6 @@ function SidebarComponent({
     });
   };
 
-  const sessionSearchInput = (
-    <input
-      ref={searchInputRef}
-      type="text"
-      value={searchQuery}
-      placeholder="Search conversations..."
-      aria-label="Search conversations"
-      spellCheck={false}
-      autoComplete="off"
-      autoCorrect="off"
-      autoCapitalize="off"
-      onChange={(event) => setSearchQuery(event.target.value)}
-      onKeyDown={(event) => {
-        if (event.key !== "Escape") return;
-        event.preventDefault();
-        event.stopPropagation();
-        if (searchQuery) {
-          setSearchQuery("");
-        }
-      }}
-      className="h-full w-full min-w-0 rounded-md bg-transparent py-0 pl-7 pr-2 text-[12px] text-content outline-none placeholder:text-content/35"
-    />
-  );
-
   const onTabPick = (itemId: SidebarTab) => {
     onTabChange(itemId);
   };
@@ -1484,10 +1471,11 @@ function SidebarComponent({
         </div>
         {tab === "sessions" && cwd && cwd !== "~" ? (
           <div className="flex h-9 shrink-0 items-center gap-1 border-b border-stroke px-2">
-            <div className="relative flex h-7 min-w-0 flex-1 items-center">
-              <Search className="pointer-events-none absolute left-2 size-3 shrink-0 opacity-50" />
-              {sessionSearchInput}
-            </div>
+            <SessionsSearchField
+              inputRef={searchInputRef}
+              value={searchQuery}
+              onChange={setSearchQuery}
+            />
             <SessionsHeaderButton
               label="Filter sessions"
               active={filtersActive}
@@ -1498,6 +1486,21 @@ function SidebarComponent({
               <ListFilter className="size-3" strokeWidth={1.75} />
             </SessionsHeaderButton>
           </div>
+        ) : null}
+        {tab === "sessions" && cwd && cwd !== "~" && importable.count > 0 ? (
+          <p className="shrink-0 px-3 pt-2 text-[12px] text-content/50">
+            {importable.count}
+            {importable.more ? "+" : ""}{" "}
+            {importable.count === 1 && !importable.more ? "session" : "sessions"}{" "}
+            from the terminal ·{" "}
+            <button
+              type="button"
+              onClick={() => requestClaudeSessionImport(cwd)}
+              className="text-content/70 hover:text-content"
+            >
+              Import
+            </button>
+          </p>
         ) : null}
         <div
           ref={(el) => {
@@ -2435,39 +2438,6 @@ function WorkspaceTitleActions({
   );
 }
 
-function SessionsHeaderButton({
-  label,
-  active = false,
-  open = false,
-  hasPopup = false,
-  onClick,
-  children,
-}: {
-  label: string;
-  active?: boolean;
-  open?: boolean;
-  hasPopup?: boolean;
-  onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      title={label}
-      aria-label={label}
-      aria-expanded={open}
-      aria-haspopup={hasPopup ? "menu" : undefined}
-      onPointerDown={(event) => event.stopPropagation()}
-      onClick={onClick}
-      className={`relative z-50 grid size-6 place-items-center rounded-md text-content/50 hover:bg-content/10 hover:text-content ${
-        open || active ? "bg-selection text-content" : ""
-      }`}
-    >
-      {children}
-    </button>
-  );
-}
-
 function sessionListDropFromPoint(
   x: number,
   y: number,
@@ -3394,25 +3364,3 @@ function formatGitLabel(repo?: string, branch?: string): string {
   return branch || repo || "";
 }
 
-function formatRelative(value: number, now: number): string {
-  if (!Number.isFinite(value) || value <= 0) return "";
-  const seconds = Math.max(0, Math.round((now - value) / 1000));
-  if (seconds < 60) return "now";
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) {
-    const rest = minutes % 60;
-    return rest ? `${hours}h ${rest}m` : `${hours}h`;
-  }
-  const days = Math.floor(hours / 24);
-  if (days < 7) return `${days}d`;
-  try {
-    return new Intl.DateTimeFormat(undefined, {
-      month: "short",
-      day: "numeric",
-    }).format(new Date(value));
-  } catch {
-    return "";
-  }
-}

@@ -65,8 +65,11 @@ import { Sidebar } from "./shell/Sidebar";
 import { ApprovalToasts } from "../features/sessions/ui/ApprovalToasts";
 import { WhatsNewDialog } from "./shell/WhatsNewDialog";
 import { ProviderSignInDialog } from "../features/sessions/ui/ProviderSignInDialog";
-import { ImportClaudeSessionDialog } from "../features/sessions/ui/ImportClaudeSessionDialog";
-import { CLAUDE_SESSION_IMPORT_EVENT } from "../features/sessions/model/claudeSessionImport";
+import { ImportSessionDialog } from "../features/sessions/ui/ImportSessionDialog";
+import {
+  CLAUDE_SESSION_IMPORT_EVENT,
+  type SessionImportRequest,
+} from "../features/sessions/model/claudeSessionImport";
 import { TitleBar, type Tab as TitleTab } from "./shell/TitleBar";
 import { MenuBar } from "./shell/MenuBar";
 import { FilePicker } from "../features/files/ui/FilePicker";
@@ -879,7 +882,12 @@ export default function App({
     unusedWorktree: string;
     resolve: (choice: SessionDeleteChoice) => void;
   }>();
-  const [claudeImportCwd, setClaudeImportCwd] = useState<string | null>(null);
+  const [sessionImport, setSessionImport] =
+    useState<SessionImportRequest | null>(null);
+  const recentProjectPaths = useMemo(
+    () => recents.map((project) => project.path),
+    [recents],
+  );
   const switchingWorktrees = useRef(new Map<string, string>());
   const removingWorktreePaths = useRef(new Set<string>());
   const deleteConfirmationPending = useRef(false);
@@ -3944,25 +3952,22 @@ export default function App({
 
   useEffect(() => {
     const onRequest = (event: Event) => {
-      const cwd = (event as CustomEvent<string>).detail;
-      if (typeof cwd === "string" && cwd) setClaudeImportCwd(cwd);
+      const cwd = (event as CustomEvent<SessionImportRequest>).detail?.cwd;
+      setSessionImport({ cwd: typeof cwd === "string" && cwd ? cwd : undefined });
     };
     window.addEventListener(CLAUDE_SESSION_IMPORT_EVENT, onRequest);
     return () =>
       window.removeEventListener(CLAUDE_SESSION_IMPORT_EVENT, onRequest);
   }, []);
 
-  const onClaudeSessionImported = useCallback(
-    (sessionId: string) => {
-      const cwd = claudeImportCwd;
-      setClaudeImportCwd(null);
+  const onImportedSessionOpen = useCallback(
+    (sessionId: string, cwd: string) => {
+      setSessionImport(null);
       void openReminderSession(sessionId)
-        .then(() => {
-          if (cwd) void refreshHistory(cwd);
-        })
+        .then(() => refreshHistory(cwd))
         .catch(() => undefined);
     },
-    [claudeImportCwd, openReminderSession, refreshHistory],
+    [openReminderSession, refreshHistory],
   );
 
   const ensureReminderSessionsSaved = useCallback(
@@ -10739,6 +10744,10 @@ export default function App({
               onOpenFile={onOpenFile}
               onRunAction={(id) => {
                 if (id === "reload") actions.current.onReload();
+                else if (id === "import-session") {
+                  setFilePickerOpen(false);
+                  setSessionImport({});
+                }
               }}
               onClose={() => setFilePickerOpen(false)}
             />
@@ -10754,11 +10763,12 @@ export default function App({
               }}
             />
           )}
-          {claudeImportCwd ? (
-            <ImportClaudeSessionDialog
-              cwd={claudeImportCwd}
-              onClose={() => setClaudeImportCwd(null)}
-              onImported={onClaudeSessionImported}
+          {sessionImport ? (
+            <ImportSessionDialog
+              cwd={sessionImport.cwd}
+              projects={recentProjectPaths}
+              onClose={() => setSessionImport(null)}
+              onOpen={onImportedSessionOpen}
             />
           ) : null}
           <ApprovalToasts
