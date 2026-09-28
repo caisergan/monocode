@@ -6,6 +6,7 @@ import {
   FolderOpen,
   FolderTree,
   ImagePlus,
+  MessageSquarePlus,
   Pin,
   PinOff,
   Settings,
@@ -74,6 +75,7 @@ import {
 } from "../../features/notifications/ui/notificationMuteActions";
 import { useProjectNotificationPreferences } from "../../features/notifications/hooks/useProjectNotificationPreferences";
 import { useNotificationProjects } from "../../features/notifications/hooks/useNotificationProjects";
+import { requestClaudeSessionImport } from "../../features/sessions/model/claudeSessionImport";
 import { updateNotificationPreferences } from "../../features/notifications/model/notificationPreferences";
 import type { ExplorerMenuItem } from "../../features/files/ui/ExplorerMenu";
 
@@ -125,6 +127,11 @@ function projectMenuExtraItems(
       ? { id: "unpin", label: "Unpin project", icon: PinOff }
       : { id: "pin", label: "Pin project", icon: Pin },
     { id: "reveal", label: REVEAL_LABEL, icon: FolderOpen },
+    {
+      id: "import-claude-session",
+      label: "Continue Claude Code session…",
+      icon: MessageSquarePlus,
+    },
     {
       id: "external-editor",
       label: "Open in editor",
@@ -378,6 +385,9 @@ export function useProjectMenu({
         name: resolveTabGroupLabel(key, groupLabels, basename(path)),
       });
     } else if (action === "reveal") void revealPath(path);
+    else if (action === "import-claude-session") {
+      requestClaudeSessionImport(path);
+    }
     else if (action === "archive") {
       onRemoveProject?.(path, { purgeData: false });
     } else if (action === "delete") {

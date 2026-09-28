@@ -5,6 +5,7 @@ mod automations;
 mod azure_devops;
 mod chat_background;
 mod checkpoint;
+mod claude_sessions;
 mod control;
 pub mod control_cli;
 mod cursor_store;
@@ -285,6 +286,8 @@ pub fn run() {
             automations::automations_claim_due,
             automations::automations_claim_event,
             automations::automation_run_update,
+            claude_sessions::claude_list_sessions,
+            claude_sessions::claude_read_session,
             external_editor::list_external_editors,
             external_editor::open_in_external_editor,
             fs::resolve_project_location,
