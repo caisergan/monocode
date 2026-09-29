@@ -263,6 +263,9 @@ type Props = {
   /** Chats that belong to no project, listed in the project rail. */
   chats?: ProjectlessChat[];
   onSelectChat?: (sessionId: string) => void;
+  onRenameChat?: (sessionId: string, title: string) => void;
+  onArchiveChat?: (sessionId: string) => void;
+  onDeleteChat?: (sessionId: string) => void;
   onSelectProject?: (path: string) => void;
   onOpenProject?: () => void;
   onRemoveProject?: (path: string, options: { purgeData: boolean }) => void;
@@ -352,6 +355,9 @@ function SidebarComponent({
   onSelectAgent,
   chats,
   onSelectChat,
+  onRenameChat,
+  onArchiveChat,
+  onDeleteChat,
   onSelectProject,
   onOpenProject,
   onRemoveProject,
@@ -1960,6 +1966,9 @@ function SidebarComponent({
           onSelectAgent={onSelectAgent}
           chats={chats}
           onSelectChat={onSelectChat}
+          onRenameChat={onRenameChat}
+          onArchiveChat={onArchiveChat}
+          onDeleteChat={onDeleteChat}
           canGoBack={canGoBack}
           canGoForward={canGoForward}
           onGoBack={onGoBack}

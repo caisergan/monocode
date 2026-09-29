@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   listProjectlessSessions,
+  onProjectlessSessionsChange,
   type SessionSummary,
 } from "../data/sessionStore";
 import {
@@ -9,19 +10,40 @@ import {
 } from "../model/projectlessChats";
 import type { Session } from "../model/session";
 
+/** Saves arrive in bursts while a chat streams; one reload covers a burst. */
+const RELOAD_DEBOUNCE_MS = 300;
+
 /**
  * Chats that belong to no project. The saved list reloads whenever one opens
- * or closes: a closed chat is only in the store, a new one is only open.
+ * or closes (a closed chat is only in the store, a new one is only open) and
+ * after a write changes one: a save moves it up, a rename, archive or delete
+ * can come from its row while it is closed.
  */
 export function useProjectlessChats(
   sessions: readonly Session[],
 ): ProjectlessChat[] {
   const [saved, setSaved] = useState<SessionSummary[]>([]);
+  const [changes, setChanges] = useState(0);
   const openKey = sessions
     .filter((session) => session.cwd === "~")
     .map((session) => session.id)
     .sort()
     .join(",");
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const unsubscribe = onProjectlessSessionsChange(() => {
+      clearTimeout(timer);
+      timer = setTimeout(
+        () => setChanges((count) => count + 1),
+        RELOAD_DEBOUNCE_MS,
+      );
+    });
+    return () => {
+      clearTimeout(timer);
+      unsubscribe();
+    };
+  }, []);
 
   useEffect(() => {
     let active = true;
@@ -33,7 +55,7 @@ export function useProjectlessChats(
     return () => {
       active = false;
     };
-  }, [openKey]);
+  }, [openKey, changes]);
 
   // Sessions change on every streamed token; hand the rail the same array
   // until a row it shows actually changes.

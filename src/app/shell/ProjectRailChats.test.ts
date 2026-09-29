@@ -51,6 +51,9 @@ async function renderRail(props: {
   chats: ProjectlessChat[];
   activeSessionId?: string;
   onSelectChat?: (id: string) => void;
+  onRenameChat?: (id: string, title: string) => void;
+  onArchiveChat?: (id: string) => void;
+  onDeleteChat?: (id: string) => void;
 }) {
   await act(async () =>
     root.render(
@@ -60,6 +63,9 @@ async function renderRail(props: {
         onSelectProject: vi.fn(),
         onOpenProject: vi.fn(),
         onSelectChat: props.onSelectChat ?? vi.fn(),
+        onRenameChat: props.onRenameChat,
+        onArchiveChat: props.onArchiveChat,
+        onDeleteChat: props.onDeleteChat,
         chats: props.chats,
         activeSessionId: props.activeSessionId,
       }),
@@ -76,7 +82,9 @@ function chatRows(): HTMLButtonElement[] {
 }
 
 function button(label: string): HTMLButtonElement {
-  const found = [...container.querySelectorAll<HTMLButtonElement>("button")].find(
+  const found = [
+    ...container.querySelectorAll<HTMLButtonElement>("button"),
+  ].find(
     (item) =>
       item.getAttribute("aria-label") === label || item.textContent === label,
   );
@@ -134,5 +142,67 @@ describe("ProjectRail chats", () => {
 
     await act(async () => button("Show chats").click());
     expect(chatRows()).toHaveLength(2);
+  });
+
+  it("shows titles without the harness prefix they are stored with", async () => {
+    await renderRail({
+      chats: [{ ...chats(1)[0], title: "claude · Tidy dotfiles" }],
+    });
+    expect(chatRows()[0].getAttribute("aria-label")).toBe("Tidy dotfiles");
+  });
+
+  it("renames, archives and deletes a chat from its menu", async () => {
+    const rename = vi.fn();
+    const archive = vi.fn();
+    const remove = vi.fn();
+    await renderRail({
+      chats: chats(2),
+      onRenameChat: rename,
+      onArchiveChat: archive,
+      onDeleteChat: remove,
+    });
+    const openMenu = async (index: number) => {
+      await act(async () => {
+        chatRows()[index].dispatchEvent(
+          new MouseEvent("contextmenu", { bubbles: true, cancelable: true }),
+        );
+      });
+    };
+    const pick = async (label: string) => {
+      const item = [
+        ...document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+      ].find((element) => element.textContent?.includes(label));
+      expect(item, label).toBeDefined();
+      await act(async () => item!.click());
+    };
+
+    await openMenu(0);
+    await pick("Archive");
+    expect(archive).toHaveBeenCalledWith("chat-0");
+
+    await openMenu(1);
+    await pick("Delete");
+    expect(remove).toHaveBeenCalledWith("chat-1");
+
+    await openMenu(1);
+    await pick("Rename");
+    const field = container.querySelector<HTMLInputElement>(
+      'input[aria-label="Chat name"]',
+    )!;
+    expect(field.value).toBe("Chat 1");
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )!.set!.call(field, "Renamed");
+      field.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      field.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+      );
+    });
+    expect(rename).toHaveBeenCalledWith("chat-1", "Renamed");
+    expect(container.querySelector('input[aria-label="Chat name"]')).toBeNull();
   });
 });

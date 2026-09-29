@@ -74,6 +74,11 @@ import {
   type ProjectlessChat,
 } from "../../features/sessions/model/projectlessChats";
 import { HarnessIcon } from "../../features/sessions/ui/HarnessIcon";
+import { sessionDisplayTitle } from "../../features/sessions/model/session";
+import {
+  ExplorerMenu,
+  type ExplorerMenuItem,
+} from "../../features/files/ui/ExplorerMenu";
 import { formatRelative } from "../../shared/lib/relativeTime";
 import { ProjectLogoIcon } from "../../features/projects/ui/ProjectLogoIcon";
 import { ProjectMascot } from "../../features/projects/ui/ProjectMascot";
@@ -120,6 +125,9 @@ type Props = {
   /** Chats that belong to no project. */
   chats?: ProjectlessChat[];
   onSelectChat?: (sessionId: string) => void;
+  onRenameChat?: (sessionId: string, title: string) => void;
+  onArchiveChat?: (sessionId: string) => void;
+  onDeleteChat?: (sessionId: string) => void;
   settingsOpen?: boolean;
   settingsSection?: SettingsSectionId;
   onOpenSettings?: () => void;
@@ -159,6 +167,9 @@ export function ProjectRail({
   onSelectAgent,
   chats = [],
   onSelectChat,
+  onRenameChat,
+  onArchiveChat,
+  onDeleteChat,
   settingsOpen = false,
   settingsSection = "general",
   onOpenSettings,
@@ -533,6 +544,9 @@ export function ProjectRail({
                     : activeSessionId
                 }
                 onSelect={onSelectChat}
+                onRename={onRenameChat}
+                onArchive={onArchiveChat}
+                onDelete={onDeleteChat}
               />
             ) : null}
           </div>
@@ -907,6 +921,52 @@ function ProjectGroupSection({
 const nameClassName =
   "min-w-0 flex-1 truncate text-sm font-medium leading-tight";
 
+/** Inline title editor for a chat row. Enter or blur saves; Escape cancels. */
+function ChatRenameField({
+  initial,
+  harness,
+  onDone,
+}: {
+  initial: string;
+  harness: ProjectlessChat["harness"];
+  onDone: (title: string) => void;
+}) {
+  const [value, setValue] = useState(initial);
+  const done = useRef(false);
+  const finish = (title: string) => {
+    if (done.current) return;
+    done.current = true;
+    onDone(title === initial ? "" : title);
+  };
+  return (
+    <div className="flex h-8 items-center gap-2 rounded-md bg-content/5 px-2">
+      <span className="grid size-4 shrink-0 place-items-center">
+        <HarnessIcon harness={harness} className="size-3.5" />
+      </span>
+      <input
+        autoFocus
+        value={value}
+        aria-label="Chat name"
+        spellCheck={false}
+        onFocus={(event) => event.currentTarget.select()}
+        onChange={(event) => setValue(event.target.value)}
+        onBlur={() => finish(value.trim())}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            finish(value.trim());
+          } else if (event.key === "Escape") {
+            event.preventDefault();
+            event.stopPropagation();
+            finish("");
+          }
+        }}
+        className={`${nameClassName} bg-transparent outline-none`}
+      />
+    </div>
+  );
+}
+
 /** Chats shown before "Show more". */
 const CHATS_PREVIEW = 5;
 
@@ -918,15 +978,55 @@ function ChatsSection({
   chats,
   activeSessionId,
   onSelect,
+  onRename,
+  onArchive,
+  onDelete,
 }: {
   chats: ProjectlessChat[];
   activeSessionId?: string;
   onSelect: (sessionId: string) => void;
+  onRename?: (sessionId: string, title: string) => void;
+  onArchive?: (sessionId: string) => void;
+  onDelete?: (sessionId: string) => void;
 }) {
   const [hidden, setHidden] = useState(loadChatsHidden);
   const [showAll, setShowAll] = useState(false);
+  const [menu, setMenu] = useState<{
+    x: number;
+    y: number;
+    chatId: string;
+  } | null>(null);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
   const now = Date.now();
   const shown = showAll ? chats : chats.slice(0, CHATS_PREVIEW);
+  const menuItems: ExplorerMenuItem[] = [
+    ...(onRename
+      ? [{ kind: "item" as const, id: "rename", label: "Rename" }]
+      : []),
+    ...(onRename && (onArchive || onDelete) ? [{ kind: "sep" as const }] : []),
+    ...(onArchive
+      ? [{ kind: "item" as const, id: "archive", label: "Archive" }]
+      : []),
+    ...(onDelete
+      ? [
+          {
+            kind: "item" as const,
+            id: "delete",
+            label: "Delete",
+            danger: true,
+          },
+        ]
+      : []),
+  ];
+
+  const onMenuPick = (id: string) => {
+    if (!menu) return;
+    const chatId = menu.chatId;
+    setMenu(null);
+    if (id === "rename") setRenamingId(chatId);
+    else if (id === "archive") onArchive?.(chatId);
+    else if (id === "delete") onDelete?.(chatId);
+  };
 
   return (
     <div className="mb-2 shrink-0">
@@ -946,7 +1046,25 @@ function ChatsSection({
               chat={chat}
               now={now}
               selected={chat.id === activeSessionId}
+              renaming={chat.id === renamingId}
               onSelect={onSelect}
+              onContextMenu={
+                menuItems.length > 0
+                  ? (event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setMenu({
+                        x: event.clientX,
+                        y: event.clientY,
+                        chatId: chat.id,
+                      });
+                    }
+                  : undefined
+              }
+              onRename={(title) => {
+                setRenamingId(null);
+                if (title) onRename?.(chat.id, title);
+              }}
             />
           ))}
           {chats.length > CHATS_PREVIEW ? (
@@ -962,6 +1080,16 @@ function ChatsSection({
           ) : null}
         </div>
       )}
+      {menu ? (
+        <ExplorerMenu
+          x={menu.x}
+          y={menu.y}
+          items={menuItems}
+          ariaLabel="Chat actions"
+          onPick={onMenuPick}
+          onClose={() => setMenu(null)}
+        />
+      ) : null}
     </div>
   );
 }
@@ -970,15 +1098,32 @@ function ChatRow({
   chat,
   now,
   selected,
+  renaming,
   onSelect,
+  onContextMenu,
+  onRename,
 }: {
   chat: ProjectlessChat;
   now: number;
   selected: boolean;
+  renaming: boolean;
   onSelect: (sessionId: string) => void;
+  onContextMenu?: (event: MouseEvent<HTMLButtonElement>) => void;
+  /** Ends a rename; an empty title keeps the old one. */
+  onRename: (title: string) => void;
 }) {
-  const title = chat.title.trim() || "New chat";
+  const title =
+    sessionDisplayTitle(chat.title, chat.harness).trim() || "New chat";
   const age = chat.updatedAt ? formatRelative(chat.updatedAt, now) : "";
+  if (renaming) {
+    return (
+      <ChatRenameField
+        initial={title}
+        harness={chat.harness}
+        onDone={onRename}
+      />
+    );
+  }
   return (
     <button
       type="button"
@@ -986,6 +1131,7 @@ function ChatRow({
       aria-current={selected ? "true" : undefined}
       aria-label={chat.busy ? `${title}, working` : title}
       onClick={() => onSelect(chat.id)}
+      onContextMenu={onContextMenu}
       className={`project-reorder-item flex h-8 cursor-default items-center gap-2 rounded-md px-2 text-left ${
         selected ? "bg-selection-strong text-content" : "opacity-65"
       }`}

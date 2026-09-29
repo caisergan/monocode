@@ -4723,6 +4723,11 @@ export default function App({
     [onRemoveHistorySession],
   );
 
+  const onArchiveChat = useCallback(
+    (sessionId: string) => void onArchiveHistorySession(sessionId, true),
+    [onArchiveHistorySession],
+  );
+
   const onDeleteHistorySessions = useCallback(
     async (sessionIds: readonly string[]) => {
       if (sessionIds.length === 0) return;
@@ -10378,6 +10383,9 @@ export default function App({
               onSelectAgent={onSelectLiveAgent}
               chats={projectlessChats}
               onSelectChat={onSelectLiveAgent}
+              onRenameChat={onRenameHistorySession}
+              onArchiveChat={onArchiveChat}
+              onDeleteChat={onDeleteHistorySession}
               onSelectProject={onSelectProject}
               onOpenProject={pickProject}
               onRemoveProject={onRemoveProject}
