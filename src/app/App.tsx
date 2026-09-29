@@ -10622,6 +10622,7 @@ export default function App({
                   recents={recents}
                   history={projectHistory}
                   sessions={sessions.filter((session) => !session.inboxAsk)}
+                  chats={projectlessChats}
                   focusToken={searchViewFocusToken}
                   besideRail={projectRailOpen || compactProjectRail}
                   compactRail={compactRailActive}

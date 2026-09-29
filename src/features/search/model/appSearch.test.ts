@@ -246,6 +246,30 @@ describe("conversationRowsFrom", () => {
       expect.objectContaining({ id: "s1", title: "cursor · Live title" }),
     ]);
   });
+
+  it("finds an imported chat without a project by a loose title match", () => {
+    const rows = conversationRowsFrom(
+      [summary("s1", "/tmp/a", "cursor · Project chat", 5)],
+      [],
+      [
+        {
+          id: "imported",
+          title: "claude · Invoice export",
+          harness: "claude",
+          updatedAt: 9,
+          busy: false,
+        },
+      ],
+    );
+    const hits = searchConversationTitles(rows, "inv exp");
+    expect(hits).toEqual([
+      expect.objectContaining({
+        sessionId: "imported",
+        cwd: "~",
+        title: "Invoice export",
+      }),
+    ]);
+  });
 });
 
 describe("filterHitsByProject", () => {
