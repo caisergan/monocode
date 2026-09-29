@@ -22,6 +22,8 @@ type Props = {
   /** Sessions outside MonoCode have no archive or run status to filter on. */
   archivedOption?: boolean;
   statusOptions?: boolean;
+  /** Stacking layer; a menu opened inside a modal dialog must sit above it. */
+  layer?: number;
 };
 
 const TIME_OPTIONS: { id: SessionTimeFilter; label: string }[] = [
@@ -40,6 +42,7 @@ export function SessionFiltersMenu({
   onClose,
   archivedOption = true,
   statusOptions = true,
+  layer,
 }: Props) {
   const hiddenHarnesses = new Set(filters.hiddenHarnesses);
 
@@ -72,6 +75,7 @@ export function SessionFiltersMenu({
       gap={0}
       width={MENU_WIDTH}
       maxHeight={480}
+      layer={layer}
       onDismiss={onClose}
       role="menu"
       aria-label="Filter sessions"

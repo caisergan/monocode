@@ -463,4 +463,24 @@ describe("ImportSessionDialog", () => {
       "omp",
     ]);
   });
+
+  it("opens the filter menu above the dialog", async () => {
+    api.listAgentSessions.mockResolvedValue(listing([summary({ id: "a" })]));
+    await render({});
+    await act(async () => button("Filter sessions").click());
+
+    const layerOf = (element: Element | null) => {
+      for (let node = element; node; node = node.parentElement) {
+        const z = (node as HTMLElement).style?.zIndex;
+        if (z) return Number(z);
+      }
+      return 0;
+    };
+    const menu = document.querySelector(
+      '[role="menu"][aria-label="Filter sessions"]',
+    );
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(menu).not.toBeNull();
+    expect(layerOf(menu)).toBeGreaterThan(layerOf(dialog));
+  });
 });
