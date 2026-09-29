@@ -139,7 +139,11 @@ export function Modal(props: Props) {
   const host = useContext(NativePopupHost);
   if (host) return createPortal(<ModalPanel {...props} />, host);
   return createPortal(
-    <div className="fixed inset-0" style={{ zIndex: LAYER.dialog }}>
+    <div
+      data-dialog-layer
+      className="fixed inset-0"
+      style={{ zIndex: LAYER.dialog }}
+    >
       <div
         className="modal-backdrop absolute inset-0 bg-black/40"
         onMouseDown={props.onClose}

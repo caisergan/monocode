@@ -2927,6 +2927,17 @@ html.theme-light .btw-burst {
   }
 }
 
+/* A full-screen dialog covers the app with its own dim and glass. WebKit
+   re-renders a backdrop-filter whenever what it samples changes, and glass
+   sampling another glass that is itself re-rendering (the composer's blur over
+   a streaming transcript) paints stale, unblurred frames: the dialog flickers
+   where it overlaps the composer. Under the dialog's dim and blur the
+   composer's own light blur can't be seen, so it pauses while one is open. */
+body:has(> [data-dialog-layer]) [data-composer-box] {
+  -webkit-backdrop-filter: none;
+  backdrop-filter: none;
+}
+
 /* Centered modals: lift the content inside the stationary glass frame. */
 @keyframes modal-backdrop-in {
   from {
