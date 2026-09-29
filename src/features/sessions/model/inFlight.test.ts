@@ -87,6 +87,13 @@ describe("inFlightRefs", () => {
     expect(hasInFlightSessions([blank])).toBe(true);
   });
 
+  it("resumes a chat without a project like any other", () => {
+    const projectless = chat("~", { busy: true });
+    expect(inFlightRefs([projectless], [newTab(projectless.id)])).toEqual([
+      { sessionId: projectless.id, cwd: "~" },
+    ]);
+  });
+
   it("does not resume a session whose worktree was removed", () => {
     const removed = chat("/tmp/a", {
       busy: true,
@@ -221,6 +228,13 @@ describe("workspaceFromResumed", () => {
     expect(workspace?.tabs).toHaveLength(2);
     expect(workspace?.tabs[0]?.focusedId).toBe(first.id);
     expect(workspace?.activeTabId).toBe(workspace?.tabs[0]?.id);
+  });
+
+  it("shows a project rather than a chat without one", () => {
+    const workspace = workspaceFromResumed([chat("~"), chat("/tmp/b")]);
+    expect(workspace?.projectCwd).toBe("/tmp/b");
+    expect(workspace?.tabs).toHaveLength(2);
+    expect(workspaceFromResumed([chat("~")])?.projectCwd).toBe("~");
   });
 
   it("returns null when there is nothing to restore", () => {

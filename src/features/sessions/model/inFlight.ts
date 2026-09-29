@@ -101,7 +101,9 @@ export function workspaceFromResumed(
     sessions,
     tabs,
     activeTabId: tabs[0].id,
-    projectCwd: sessions[0].cwd,
+    // A chat without a project has no project to open; show one that does.
+    projectCwd:
+      sessions.find((session) => session.cwd !== "~")?.cwd ?? sessions[0].cwd,
   };
 }
 
@@ -147,10 +149,10 @@ export function shouldWriteInFlightSnapshot(
   return true;
 }
 
+/** Chats without a project ("~") are saved too, so they resume like any other. */
 function canResumeAfterQuit(session: Session): boolean {
   return (
     !session.worktreeRemoved &&
-    session.cwd !== "~" &&
     session.blocks.some((block) => block.role === "user")
   );
 }
