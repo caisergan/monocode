@@ -1,14 +1,12 @@
-import {
-  appendUser,
-  applyHarnessEvent,
-  stopStreaming,
-} from "../../core/apply";
 import { isAgentToolName } from "../../core/preview";
 import type { HarnessEvent } from "../../core/types";
 import {
+  recordTimestamp,
+  TranscriptReplay,
+  type TranscriptImportInput,
+} from "../../core/transcriptImport";
+import {
   newSession,
-  titleFromPrompt,
-  formatSessionTitle,
   type Session,
 } from "../../../../features/sessions/model/session";
 import {
@@ -28,9 +26,6 @@ import {
 } from "./claudeProtocol";
 
 type ClaudeRecord = Record<string, unknown>;
-
-const INTERRUPTED_BY_USER = "Interrupted by user.";
-const COMPACTED = "Conversation compacted.";
 
 /**
  * Records on the conversation's current branch, oldest first. Claude keeps
@@ -111,7 +106,11 @@ export function classifyClaudeUserRecord(record: ClaudeRecord): UserEntry {
   ) {
     return { kind: "skip" };
   }
-  const command = unwrapTag(trimmed, "command-name");
+  // Only a record that starts with the wrapper is a slash command; a typed
+  // prompt can quote one. Keep in step with `user_prompt_text` in Rust.
+  const command = trimmed.startsWith("<command-")
+    ? unwrapTag(trimmed, "command-name")
+    : undefined;
   if (command) {
     const args = unwrapTag(trimmed, "command-args");
     return {
@@ -122,13 +121,6 @@ export function classifyClaudeUserRecord(record: ClaudeRecord): UserEntry {
   }
   if (!trimmed && imageCount === 0) return { kind: "skip" };
   return { kind: "prompt", text: trimmed, imageCount };
-}
-
-function timestampMs(record: ClaudeRecord): number | undefined {
-  const value = stringField(record, "timestamp");
-  if (!value) return undefined;
-  const ms = Date.parse(value);
-  return Number.isFinite(ms) ? ms : undefined;
 }
 
 function lastModelId(chain: ClaudeRecord[]): string | undefined {
@@ -144,14 +136,19 @@ function lastModelId(chain: ClaudeRecord[]): string | undefined {
 function transcriptTitle(records: ClaudeRecord[]): string | undefined {
   let ai: string | undefined;
   let custom: string | undefined;
+  // Older Claude Code versions wrote a `summary` record instead.
+  let summary: string | undefined;
   for (const record of records) {
     const type = stringField(record, "type");
     if (type === "ai-title") ai = stringField(record, "aiTitle")?.trim() || ai;
     if (type === "custom-title") {
       custom = stringField(record, "customTitle")?.trim() || custom;
     }
+    if (type === "summary") {
+      summary = stringField(record, "summary")?.trim() || summary;
+    }
   }
-  return custom ?? ai;
+  return custom ?? ai ?? summary;
 }
 
 type ImportedTool = {
@@ -160,66 +157,35 @@ type ImportedTool = {
   title: string;
 };
 
-export type ClaudeImportInput = {
-  records: ClaudeRecord[];
-  providerSessionId: string;
-  cwd: string;
-};
+export type ClaudeImportInput = TranscriptImportInput;
 
 /**
  * Rebuild a MonoCode session from a Claude Code transcript. Every record is
  * replayed through the same events the live adapter emits, so an imported chat
  * renders exactly like one that ran here. `providerSessionId` makes the next
- * turn `--resume` the original Claude conversation.
+ * turn `--resume` the original Claude conversation, which only works from
+ * the folder it ran in (`worktreeCwd`, else `cwd`).
  */
 export function claudeTranscriptToSession({
   records,
-  providerSessionId,
-  cwd,
+  ...target
 }: ClaudeImportInput): Session {
   const chain = activeClaudeChain(records);
-  let session: Session = {
-    ...newSession("claude", cwd, lastModelId(chain)),
-    providerSessionId,
-  };
+  const replay = new TranscriptReplay(
+    newSession("claude", target.cwd, lastModelId(chain)),
+    target,
+  );
   const tools = new Map<string, ImportedTool>();
-  let firstPrompt: string | undefined;
-  let turnStart: number | undefined;
-  let turnEnd: number | undefined;
-  let turnOpen = false;
-  let lastContext: number | undefined;
-
-  const emit = (event: HarnessEvent) => {
-    session = applyHarnessEvent(session, event);
-  };
-
-  const closeTurn = () => {
-    if (!turnOpen) return;
-    turnOpen = false;
-    const blocks = session.blocks.slice();
-    for (let i = blocks.length - 1; i >= 0; i--) {
-      if (blocks[i].role !== "user") continue;
-      blocks[i] = {
-        ...blocks[i],
-        ...(turnStart != null ? { startedAt: turnStart } : {}),
-        ...(turnStart != null && turnEnd != null
-          ? { durationMs: Math.max(0, turnEnd - turnStart) }
-          : {}),
-      };
-      break;
-    }
-    session = stopStreaming({ ...session, blocks });
-  };
+  const emit = (event: HarnessEvent) => replay.emit(event);
 
   for (const record of chain) {
     if (record.isSidechain === true) continue;
     const type = stringField(record, "type");
-    const at = timestampMs(record);
+    const at = recordTimestamp(record);
 
     if (type === "system") {
       if (stringField(record, "subtype") === "compact_boundary") {
-        closeTurn();
-        emit({ type: "status", text: COMPACTED });
+        replay.compacted();
       }
       continue;
     }
@@ -227,38 +193,15 @@ export function claudeTranscriptToSession({
     if (type === "user") {
       const entry = classifyClaudeUserRecord(record);
       if (entry.kind === "prompt") {
-        closeTurn();
-        const text =
-          entry.imageCount > 0
-            ? `${entry.text}${entry.text ? "\n\n" : ""}_${entry.imageCount} image${entry.imageCount === 1 ? "" : "s"} not imported_`
-            : entry.text;
-        session = appendUser(session, text);
-        firstPrompt ??= entry.text;
-        turnOpen = true;
-        turnStart = at;
-        turnEnd = at;
+        replay.prompt(entry.text, entry.imageCount, at);
         continue;
       }
       if (entry.kind === "interrupt") {
-        if (turnOpen) {
-          closeTurn();
-          session = {
-            ...session,
-            blocks: [
-              ...session.blocks,
-              {
-                id: crypto.randomUUID(),
-                role: "system",
-                text: INTERRUPTED_BY_USER,
-                notice: "interrupt",
-              },
-            ],
-          };
-        }
+        replay.interrupt();
         continue;
       }
-      if (!turnOpen) continue;
-      if (at != null) turnEnd = at;
+      if (!replay.inTurn) continue;
+      replay.touch(at);
       for (const result of toolResultsFromUserMessage(record)) {
         const tool = tools.get(result.toolUseId);
         if (!tool) continue;
@@ -271,7 +214,11 @@ export function claudeTranscriptToSession({
           detail: result.text || undefined,
           preview: previewFromTool(tool.name, tool.input, result.text),
         });
-        if (isAgentToolName(tool.name) && result.text.trim() && !result.isError) {
+        if (
+          isAgentToolName(tool.name) &&
+          result.text.trim() &&
+          !result.isError
+        ) {
           emit({
             type: "agent.step",
             callId: result.toolUseId,
@@ -284,9 +231,9 @@ export function claudeTranscriptToSession({
       continue;
     }
 
-    if (type !== "assistant" || !turnOpen) continue;
-    if (at != null) turnEnd = at;
-    lastContext = contextUsedFromAssistant(record) ?? lastContext;
+    if (type !== "assistant" || !replay.inTurn) continue;
+    replay.touch(at);
+    replay.context(contextUsedFromAssistant(record));
 
     const thinking = assistantThinkingBlocks(record).join("").trim();
     if (thinking) {
@@ -327,15 +274,5 @@ export function claudeTranscriptToSession({
       }
     }
   }
-  closeTurn();
-
-  if (lastContext !== undefined) emit({ type: "context", used: lastContext });
-  const title = transcriptTitle(records);
-  return {
-    ...session,
-    busy: false,
-    title: title
-      ? formatSessionTitle("claude", title)
-      : titleFromPrompt(firstPrompt ?? "", "claude"),
-  };
+  return replay.finish("claude", transcriptTitle(records));
 }

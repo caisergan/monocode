@@ -71,7 +71,9 @@ export function SessionsHeaderButton({
       type="button"
       title={label}
       aria-label={label}
-      aria-expanded={open}
+      // Only a button that opens a menu has an expanded state; Refresh has
+      // none and must not be read as "collapsed".
+      aria-expanded={hasPopup ? open : undefined}
       aria-haspopup={hasPopup ? "menu" : undefined}
       disabled={disabled}
       onPointerDown={(event) => event.stopPropagation()}

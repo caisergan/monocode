@@ -1,11 +1,11 @@
 use tauri::Manager;
 
 mod account_identity;
+mod agent_sessions;
 mod automations;
 mod azure_devops;
 mod chat_background;
 mod checkpoint;
-mod claude_sessions;
 mod control;
 pub mod control_cli;
 mod cursor_store;
@@ -277,6 +277,8 @@ pub fn run() {
             reminders::reminder_take_open,
             reminders::reminder_register_window,
             reminders::reminder_open,
+            agent_sessions::agent_list_sessions,
+            agent_sessions::agent_read_session,
             automations::automations_list,
             automations::automations_upsert,
             automations::automations_delete,
@@ -286,8 +288,6 @@ pub fn run() {
             automations::automations_claim_due,
             automations::automations_claim_event,
             automations::automation_run_update,
-            claude_sessions::claude_list_sessions,
-            claude_sessions::claude_read_session,
             external_editor::list_external_editors,
             external_editor::open_in_external_editor,
             fs::resolve_project_location,

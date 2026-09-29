@@ -67,7 +67,7 @@ import {
 } from "../../features/projects/model/projectGroups";
 import type { LiveAgent } from "../../features/sessions/model/liveAgents";
 import { LiveAgentsPreview } from "../../features/sessions/ui/LiveAgentsPreview";
-import { requestClaudeSessionImport } from "../../features/sessions/model/claudeSessionImport";
+import { requestSessionImport } from "../../features/sessions/model/agentSessionImport";
 import {
   loadChatsHidden,
   saveChatsHidden,
@@ -512,7 +512,7 @@ export function ProjectRail({
                   : undefined
               }
               onAdd={onOpenProject}
-              onImport={() => requestClaudeSessionImport()}
+              onImport={() => requestSessionImport()}
               cwd={cwd}
               busy={busy}
               statsEnabled={visible}

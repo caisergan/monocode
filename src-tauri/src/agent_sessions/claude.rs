@@ -1,38 +1,20 @@
-//! Read Claude Code's own session transcripts (`~/.claude/projects`) so a
-//! conversation started in the terminal can be continued in MonoCode. The
-//! listing covers every folder, or one project's folder when scoped.
-//!
-//! Only the default Claude config directory is scanned. Named MonoCode
-//! account profiles keep their sessions elsewhere and already resume natively.
+//! Claude Code keeps one JSONL transcript per session under
+//! `~/.claude/projects/<cwd with every non-alphanumeric character as ->/`,
+//! or `$CLAUDE_CONFIG_DIR/projects`. Subagent transcripts sit in nested
+//! directories and are not listed.
 
-use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
 
-use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use tauri::State;
 
+use super::{
+    non_empty_str, prompt_preview, scan_ends, subdirs, truncate_chars, truncate_strings, Candidate,
+    Harness, SummaryScan, TranscriptInfo, MAX_TOOL_INPUT_CHARS, MAX_TOOL_RESULT_CHARS,
+};
 use crate::dirs_home;
-use crate::session_store::SessionStore;
 
 /// Claude caps the encoded project directory name and appends a hash.
 const MAX_ENCODED_DIR_LEN: usize = 200;
-/// Beyond this a transcript is not worth replaying into the UI.
-const MAX_SESSION_FILE_BYTES: u64 = 256 * 1024 * 1024;
-/// Tool output is shown as a collapsed detail; the model keeps the full text.
-const MAX_TOOL_RESULT_CHARS: usize = 16 * 1024;
-const MAX_PROMPT_PREVIEW_CHARS: usize = 200;
-/// A summary reads the start of a transcript (cwd, first prompt) and its end
-/// (titles, last prompt), never the middle of a long session.
-const SUMMARY_HEAD_BYTES: u64 = 64 * 1024;
-const SUMMARY_TAIL_BYTES: u64 = 256 * 1024;
-const MAX_SUMMARY_TAIL_BYTES: u64 = 4 * 1024 * 1024;
-const DEFAULT_LIST_LIMIT: usize = 15;
-const MAX_LIST_LIMIT: usize = 200;
-/// Newest transcripts summarized per listing; a search looks no further back.
-const MAX_SUMMARIZED: usize = 500;
 
 /// Record keys the importer reads. Everything else — notably `toolUseResult`,
 /// which duplicates tool output in structured form — is dropped before IPC.
@@ -52,6 +34,7 @@ const KEPT_KEYS: &[&str] = &[
     "content",
     "aiTitle",
     "customTitle",
+    "summary",
 ];
 
 /// All that is kept of a record the transcript doesn't show.
@@ -63,105 +46,13 @@ const LINK_KEYS: &[&str] = &[
     "isSidechain",
 ];
 
-#[derive(Deserialize, Debug, Default)]
-#[serde(rename_all = "camelCase", default)]
-pub struct ClaudeSessionQuery {
-    /// Only sessions started in this folder; every folder when absent.
-    cwd: Option<String>,
-    /// Case-insensitive match on the title, prompts and folder name.
-    query: Option<String>,
-    limit: Option<usize>,
-    /// Also list conversations MonoCode already has.
-    include_imported: bool,
-}
-
-/// Whether a session's folder can hold a MonoCode chat.
-#[derive(Serialize, Debug, PartialEq, Eq, Clone, Copy)]
-#[serde(rename_all = "camelCase")]
-pub enum SessionFolder {
-    Ok,
-    /// Started in the home folder, which is not a project.
-    Home,
-    /// The folder was moved or deleted.
-    Missing,
-}
-
-#[derive(Serialize, Debug, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct ClaudeSessionSummary {
-    id: String,
-    cwd: String,
-    /// Claude's generated or user-set title, when the transcript has one.
-    title: Option<String>,
-    first_prompt: String,
-    last_prompt: String,
-    git_branch: Option<String>,
-    updated_at: u64,
-    size_bytes: u64,
-    folder: SessionFolder,
-    /// The MonoCode session already bound to this conversation.
-    monocode_session_id: Option<String>,
-}
-
-#[derive(Serialize, Debug, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct ClaudeSessionListing {
-    sessions: Vec<ClaudeSessionSummary>,
-    /// Conversations left out because MonoCode already has them.
-    imported_count: usize,
-    /// Older sessions exist past `limit`.
-    has_more: bool,
-}
-
-#[tauri::command(async)]
-pub fn claude_list_sessions(
-    store: State<'_, SessionStore>,
-    request: ClaudeSessionQuery,
-) -> Result<ClaudeSessionListing, String> {
-    let Some(root) = claude_projects_root() else {
-        return Ok(ClaudeSessionListing::default());
-    };
-    let known = store.provider_session_ids("claude")?;
-    Ok(list_sessions(
-        &root,
-        &request,
-        &known,
-        dirs_home().as_deref(),
-    ))
-}
-
-#[tauri::command(async)]
-pub fn claude_read_session(cwd: String, session_id: String) -> Result<Vec<Value>, String> {
-    validate_session_id(&session_id)?;
-    let root = claude_projects_root().ok_or("Claude Code's config directory was not found")?;
-    let path = project_dirs(&root, &cwd)
-        .into_iter()
-        .map(|dir| dir.join(format!("{session_id}.jsonl")))
-        .find(|path| path.is_file())
-        .ok_or("That Claude Code session no longer exists")?;
-    read_session(&path)
-}
-
-fn claude_projects_root() -> Option<PathBuf> {
+pub(super) fn root() -> Option<PathBuf> {
     let base = std::env::var_os("CLAUDE_CONFIG_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| dirs_home().map(|home| Path::new(&home).join(".claude")))?;
     let root = base.join("projects");
     root.is_dir().then_some(root)
-}
-
-fn validate_session_id(id: &str) -> Result<(), String> {
-    if !id.is_empty()
-        && id.len() <= 128
-        && id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
-    {
-        Ok(())
-    } else {
-        Err("Invalid Claude session id".into())
-    }
 }
 
 /// Claude names a project directory by replacing every non-alphanumeric
@@ -172,61 +63,50 @@ fn encode_project_dir(cwd: &str) -> String {
         .collect()
 }
 
-/// Candidate directories for `cwd`. Encoding is lossy (`a-b` and `a/b` collide)
-/// and long names are truncated, so callers still check each record's `cwd`.
-fn project_dirs(root: &Path, cwd: &str) -> Vec<PathBuf> {
-    let cwd = cwd.trim_end_matches(['/', '\\']);
-    let encoded = encode_project_dir(cwd);
-    let exact = root.join(&encoded);
-    if encoded.len() <= MAX_ENCODED_DIR_LEN {
-        return if exact.is_dir() {
-            vec![exact]
-        } else {
-            Vec::new()
-        };
-    }
-    let prefix = &encoded[..MAX_ENCODED_DIR_LEN];
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return Vec::new();
-    };
-    entries
-        .flatten()
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.is_dir()
-                && path
-                    .file_name()
+/// The transcript of `session_id`, which ran in `cwd`. Encoding is lossy
+/// (`a-b` and `a/b` collide) and long names are truncated, so more than one
+/// directory can match.
+pub(super) fn find(root: &Path, cwd: &str, session_id: &str) -> Option<PathBuf> {
+    let encoded = encode_project_dir(cwd.trim_end_matches(['/', '\\']));
+    let dirs = if encoded.len() <= MAX_ENCODED_DIR_LEN {
+        vec![root.join(&encoded)]
+    } else {
+        let prefix = &encoded[..MAX_ENCODED_DIR_LEN];
+        subdirs(root)
+            .into_iter()
+            .filter(|path| {
+                path.file_name()
                     .and_then(|name| name.to_str())
                     .is_some_and(|name| name.starts_with(prefix))
+            })
+            .collect()
+    };
+    dirs.into_iter()
+        .map(|dir| dir.join(format!("{session_id}.jsonl")))
+        .find(|path| path.is_file())
+}
+
+/// Directories that can hold sessions for `cwd`: its own, and those of
+/// folders inside it or beside it with a longer name (`app/.worktrees/x`,
+/// `app-worktrees/x`), which may be its worktrees.
+fn scoped_dirs(root: &Path, cwd: &str) -> Vec<PathBuf> {
+    let encoded = encode_project_dir(cwd.trim_end_matches(['/', '\\']));
+    let prefix = &encoded[..encoded.len().min(MAX_ENCODED_DIR_LEN)];
+    subdirs(root)
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .and_then(|name| name.strip_prefix(prefix))
+                .is_some_and(|rest| rest.is_empty() || rest.starts_with('-'))
         })
         .collect()
 }
 
-fn same_cwd(left: &str, right: &str) -> bool {
-    left.trim_end_matches(['/', '\\']) == right.trim_end_matches(['/', '\\'])
-}
-
-struct Candidate {
-    path: PathBuf,
-    id: String,
-    updated_at: u64,
-    size_bytes: u64,
-}
-
-/// Transcripts under `root`, newest first. Only top-level files count;
-/// subagent transcripts live in nested directories.
-fn candidates(root: &Path, cwd: Option<&str>) -> Vec<Candidate> {
+pub(super) fn candidates(root: &Path, cwd: Option<&str>) -> Vec<Candidate> {
     let dirs = match cwd {
-        Some(cwd) => project_dirs(root, cwd),
-        None => std::fs::read_dir(root)
-            .map(|entries| {
-                entries
-                    .flatten()
-                    .map(|entry| entry.path())
-                    .filter(|path| path.is_dir())
-                    .collect()
-            })
-            .unwrap_or_default(),
+        Some(cwd) => scoped_dirs(root, cwd),
+        None => subdirs(root),
     };
     let mut found = Vec::new();
     for dir in dirs {
@@ -241,172 +121,45 @@ fn candidates(root: &Path, cwd: Option<&str>) -> Vec<Candidate> {
             let Some(id) = path.file_stem().and_then(|stem| stem.to_str()) else {
                 continue;
             };
-            if validate_session_id(id).is_err() {
-                continue;
-            }
-            let Ok(metadata) = entry.metadata() else {
-                continue;
-            };
-            if !metadata.is_file() {
-                continue;
-            }
-            let updated_at = metadata
-                .modified()
-                .ok()
-                .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                .map(|duration| duration.as_millis() as u64)
-                .unwrap_or(0);
-            found.push(Candidate {
-                id: id.to_string(),
-                path,
-                updated_at,
-                size_bytes: metadata.len(),
-            });
+            let id = id.to_string();
+            found.extend(Candidate::new(Harness::Claude, path, &id));
         }
     }
-    found.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     found
 }
 
-/// Newest sessions first. Conversations MonoCode already has are skipped
-/// before their transcript is opened, and counted instead.
-fn list_sessions(
-    root: &Path,
-    request: &ClaudeSessionQuery,
-    known: &HashMap<String, String>,
-    home: Option<&str>,
-) -> ClaudeSessionListing {
-    let limit = request
-        .limit
-        .unwrap_or(DEFAULT_LIST_LIMIT)
-        .clamp(1, MAX_LIST_LIMIT);
-    let cwd = request
-        .cwd
-        .as_deref()
-        .map(|cwd| cwd.trim_end_matches(['/', '\\']))
-        .filter(|cwd| !cwd.is_empty());
-    let query = request
-        .query
-        .as_deref()
-        .map(str::trim)
-        .filter(|query| !query.is_empty())
-        .map(str::to_lowercase);
-    let mut listing = ClaudeSessionListing::default();
-    let mut summarized = 0;
-    for candidate in candidates(root, cwd) {
-        let monocode_session_id = known.get(&candidate.id).cloned();
-        if monocode_session_id.is_some() && !request.include_imported {
-            listing.imported_count += 1;
-            continue;
-        }
-        if summarized == MAX_SUMMARIZED {
-            break;
-        }
-        summarized += 1;
-        let Some(summary) = summarize_session(&candidate, monocode_session_id, home) else {
-            continue;
-        };
-        if cwd.is_some_and(|cwd| !same_cwd(&summary.cwd, cwd)) {
-            continue;
-        }
-        if query
-            .as_deref()
-            .is_some_and(|query| !matches_query(&summary, query))
-        {
-            continue;
-        }
-        if listing.sessions.len() == limit {
-            listing.has_more = true;
-            break;
-        }
-        listing.sessions.push(summary);
-    }
-    listing
-}
-
-fn matches_query(summary: &ClaudeSessionSummary, query: &str) -> bool {
-    let folder = summary
-        .cwd
-        .trim_end_matches(['/', '\\'])
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or("");
-    [
-        summary.title.as_deref().unwrap_or(""),
-        &summary.first_prompt,
-        &summary.last_prompt,
-        folder,
-    ]
-    .iter()
-    .any(|text| text.to_lowercase().contains(query))
-}
-
-fn folder_state(cwd: &str, home: Option<&str>) -> SessionFolder {
-    if home.is_some_and(|home| same_cwd(home, cwd)) {
-        SessionFolder::Home
-    } else if Path::new(cwd).is_dir() {
-        SessionFolder::Ok
-    } else {
-        SessionFolder::Missing
-    }
-}
-
 /// Only title records and prompt-bearing user lines are parsed. Sessions
-/// without a real prompt (a cancelled `/resume`, say) are skipped because
+/// without a real prompt (a cancelled `/resume`, say) give `None` because
 /// there is nothing to continue.
-fn summarize_session(
-    candidate: &Candidate,
-    monocode_session_id: Option<String>,
-    home: Option<&str>,
-) -> Option<ClaudeSessionSummary> {
-    // A long run of tool output can push the last prompt out of the tail, so
-    // the tail widens until it holds one.
-    let mut tail_bytes = SUMMARY_TAIL_BYTES;
-    let scan = loop {
-        let mut scan = SummaryScan::default();
-        visit_summary_lines(
-            &candidate.path,
-            candidate.size_bytes,
-            tail_bytes,
-            |line, in_tail| scan.visit(line, in_tail),
-        )
-        .ok()?;
-        if scan.tail_prompt
-            || tail_bytes >= MAX_SUMMARY_TAIL_BYTES
-            || candidate.size_bytes <= SUMMARY_HEAD_BYTES + tail_bytes
-        {
-            break scan;
-        }
-        tail_bytes *= 4;
-    };
-    let cwd = scan.cwd?;
-    Some(ClaudeSessionSummary {
-        id: candidate.id.clone(),
-        folder: folder_state(&cwd, home),
-        cwd,
-        title: scan.custom_title.or(scan.ai_title),
+pub(super) fn transcript_info(candidate: &Candidate) -> Option<TranscriptInfo> {
+    let scan = scan_ends::<ClaudeScan>(candidate)?;
+    Some(TranscriptInfo {
+        cwd: scan.cwd?,
+        title: scan.custom_title.or(scan.ai_title).or(scan.summary_title),
         first_prompt: scan.first_prompt?,
         last_prompt: scan.last_prompt?,
         git_branch: scan.git_branch,
-        updated_at: candidate.updated_at,
-        size_bytes: candidate.size_bytes,
-        monocode_session_id,
     })
 }
 
 #[derive(Default)]
-struct SummaryScan {
+struct ClaudeScan {
     cwd: Option<String>,
     git_branch: Option<String>,
     ai_title: Option<String>,
     custom_title: Option<String>,
+    /// Older Claude Code versions title a session with a `summary` record.
+    summary_title: Option<String>,
     first_prompt: Option<String>,
     last_prompt: Option<String>,
-    /// The last prompt came from the tail rather than the head.
     tail_prompt: bool,
 }
 
-impl SummaryScan {
+impl SummaryScan for ClaudeScan {
+    fn tail_prompt(&self) -> bool {
+        self.tail_prompt
+    }
+
     fn visit(&mut self, line: &str, in_tail: bool) {
         if line.contains("\"type\":\"ai-title\"") || line.contains("\"type\":\"custom-title\"") {
             let Ok(record) = serde_json::from_str::<Value>(line) else {
@@ -417,6 +170,16 @@ impl SummaryScan {
             }
             if let Some(title) = non_empty_str(&record, "customTitle") {
                 self.custom_title = Some(title);
+            }
+            return;
+        }
+        if line.contains("\"type\":\"summary\"") {
+            if let Ok(record) = serde_json::from_str::<Value>(line) {
+                if record.get("type").and_then(Value::as_str) == Some("summary") {
+                    if let Some(title) = non_empty_str(&record, "summary") {
+                        self.summary_title = Some(title);
+                    }
+                }
             }
             return;
         }
@@ -446,50 +209,6 @@ impl SummaryScan {
     }
 }
 
-/// Feeds `visit` the first `SUMMARY_HEAD_BYTES` and the last `tail_bytes` of
-/// a transcript, line by line, flagging tail lines. Small transcripts are read
-/// whole and count as tail.
-fn visit_summary_lines(
-    path: &Path,
-    size: u64,
-    tail_bytes: u64,
-    mut visit: impl FnMut(&str, bool),
-) -> std::io::Result<()> {
-    let mut reader = BufReader::new(std::fs::File::open(path)?);
-    let mut line = Vec::new();
-    let whole = size <= SUMMARY_HEAD_BYTES + tail_bytes;
-    let mut offset = 0u64;
-    while whole || offset < SUMMARY_HEAD_BYTES {
-        line.clear();
-        let read = reader.read_until(b'\n', &mut line)?;
-        if read == 0 {
-            return Ok(());
-        }
-        offset += read as u64;
-        visit(&String::from_utf8_lossy(&line), whole);
-    }
-    let tail_start = size - tail_bytes;
-    if tail_start > offset {
-        reader.seek(SeekFrom::Start(tail_start))?;
-        // The seek lands mid-line; that fragment is not a record.
-        line.clear();
-        reader.read_until(b'\n', &mut line)?;
-    }
-    loop {
-        line.clear();
-        if reader.read_until(b'\n', &mut line)? == 0 {
-            return Ok(());
-        }
-        visit(&String::from_utf8_lossy(&line), true);
-    }
-}
-
-/// One line of prompt text for a list row.
-fn prompt_preview(prompt: &str) -> String {
-    let collapsed = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
-    truncate_chars(&collapsed, MAX_PROMPT_PREVIEW_CHARS)
-}
-
 /// Text between `<tag>` and `</tag>`.
 fn tag_text<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
     let open = format!("<{tag}>");
@@ -498,18 +217,9 @@ fn tag_text<'a>(text: &'a str, tag: &str) -> Option<&'a str> {
     Some(text[start..end].trim())
 }
 
-fn non_empty_str(record: &Value, key: &str) -> Option<String> {
-    record
-        .get(key)
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-}
-
 /// Text the user actually typed, with slash commands shown as `/name args`.
-/// Mirrors the importer's prompt filter closely enough for a preview; the
-/// TypeScript side decides what is rendered.
+/// Keep in step with `classifyClaudeUserRecord`, which decides what an
+/// import renders, so a row's preview matches the chat it opens.
 fn user_prompt_text(record: &Value) -> Option<String> {
     if record.get("isSidechain").and_then(Value::as_bool) == Some(true)
         || record.get("isMeta").and_then(Value::as_bool) == Some(true)
@@ -533,6 +243,7 @@ fn user_prompt_text(record: &Value) -> Option<String> {
         || trimmed.starts_with("[Request interrupted")
         || trimmed.starts_with("<local-command-")
         || trimmed.starts_with("<task-notification>")
+        || trimmed.starts_with("<system-reminder>")
     {
         return None;
     }
@@ -544,42 +255,10 @@ fn user_prompt_text(record: &Value) -> Option<String> {
     Some(text)
 }
 
-fn truncate_chars(value: &str, max: usize) -> String {
-    match value.char_indices().nth(max) {
-        Some((index, _)) => format!("{}…", &value[..index]),
-        None => value.to_string(),
-    }
-}
-
-fn read_session(path: &Path) -> Result<Vec<Value>, String> {
-    let size = std::fs::metadata(path)
-        .map_err(|error| error.to_string())?
-        .len();
-    if size > MAX_SESSION_FILE_BYTES {
-        return Err("This Claude Code session is too large to import".into());
-    }
-    let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
-    let mut records = Vec::new();
-    for line in BufReader::new(file).lines() {
-        let line = line.map_err(|error| error.to_string())?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        // A session being written right now can end in a partial line.
-        let Ok(Value::Object(record)) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        if let Some(record) = slim_record(record) {
-            records.push(Value::Object(record));
-        }
-    }
-    Ok(records)
-}
-
-fn slim_record(record: Map<String, Value>) -> Option<Map<String, Value>> {
+pub(super) fn slim_record(record: Map<String, Value>) -> Option<Map<String, Value>> {
     let kind = record.get("type").and_then(Value::as_str)?;
     let keep = match kind {
-        "user" | "assistant" | "ai-title" | "custom-title" => true,
+        "user" | "assistant" | "ai-title" | "custom-title" | "summary" => true,
         "system" => record.get("subtype").and_then(Value::as_str) == Some("compact_boundary"),
         _ => false,
     };
@@ -626,10 +305,16 @@ fn slim_content_block(block: &mut Value) {
                 Value::String(truncate_chars(&text, MAX_TOOL_RESULT_CHARS)),
             );
         }
+        Some("tool_use") => {
+            if let Some(input) = object.get_mut("input") {
+                truncate_strings(input, MAX_TOOL_INPUT_CHARS);
+            }
+        }
         _ => {}
     }
 }
 
+/// Tool result content as plain text.
 fn tool_result_text(content: Option<&Value>) -> String {
     match content {
         Some(Value::String(text)) => text.clone(),
@@ -652,18 +337,29 @@ fn tool_result_text(content: Option<&Value>) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::super::test_support::{known_for, set_mtime, temp_root};
+    use super::super::{
+        list_sessions, main_checkout, read_records, AgentSessionListing, AgentSessionQuery, Known,
+        SessionFolder, Source, SUMMARY_HEAD_BYTES, SUMMARY_TAIL_BYTES,
+    };
     use super::*;
+    use crate::session_store::KnownSession;
     use serde_json::json;
     use std::io::Write;
 
-    fn temp_root(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "monocode-claude-sessions-{name}-{}",
-            std::process::id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(&root).unwrap();
-        root
+    fn read_session(path: &Path) -> Result<Vec<Value>, String> {
+        read_records(path, slim_record)
+    }
+
+    fn claude(root: &Path) -> [Source; 1] {
+        [Source {
+            harness: Harness::Claude,
+            root: root.to_path_buf(),
+        }]
+    }
+
+    fn known(sessions: impl IntoIterator<Item = (&'static str, KnownSession)>) -> Known {
+        known_for(Harness::Claude, sessions)
     }
 
     fn write_session(dir: &Path, id: &str, records: &[Value]) {
@@ -725,7 +421,7 @@ mod tests {
             &[json!({ "type": "mode", "mode": "normal" })],
         );
 
-        let listing = list_sessions(&root, &scoped(cwd), &HashMap::new(), None);
+        let listing = list(&root, &scoped(cwd), &Known::new());
         assert_eq!(listing.sessions.len(), 1);
         let session = &listing.sessions[0];
         assert_eq!(session.id, "one");
@@ -738,20 +434,19 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    fn scoped(cwd: &str) -> ClaudeSessionQuery {
-        ClaudeSessionQuery {
+    fn list(root: &Path, request: &AgentSessionQuery, known: &Known) -> AgentSessionListing {
+        list_sessions(&claude(root), request, known, None, &|| true)
+    }
+
+    fn scoped(cwd: &str) -> AgentSessionQuery {
+        AgentSessionQuery {
             cwd: Some(cwd.into()),
             ..Default::default()
         }
     }
 
     fn touch(dir: &Path, id: &str, seconds: u64) {
-        std::fs::File::options()
-            .write(true)
-            .open(dir.join(format!("{id}.jsonl")))
-            .unwrap()
-            .set_modified(UNIX_EPOCH + std::time::Duration::from_secs(seconds))
-            .unwrap();
+        set_mtime(&dir.join(format!("{id}.jsonl")), seconds);
     }
 
     #[test]
@@ -769,18 +464,18 @@ mod tests {
         touch(&app, "old", 100);
         touch(&site, "known", 200);
         touch(&site, "new", 300);
-        let known = HashMap::from([("known".to_string(), "mono-1".to_string())]);
+        let known = known([("known", KnownSession::new("mono-1", "/work/site"))]);
 
-        let listing = list_sessions(&root, &ClaudeSessionQuery::default(), &known, None);
+        let listing = list(&root, &AgentSessionQuery::default(), &known);
         let ids: Vec<_> = listing.sessions.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, ["new", "old"]);
         assert_eq!(listing.imported_count, 1);
 
-        let all = ClaudeSessionQuery {
+        let all = AgentSessionQuery {
             include_imported: true,
             ..Default::default()
         };
-        let listing = list_sessions(&root, &all, &known, None);
+        let listing = list(&root, &all, &known);
         assert_eq!(listing.sessions.len(), 3);
         assert_eq!(
             listing.sessions[1].monocode_session_id.as_deref(),
@@ -788,11 +483,11 @@ mod tests {
         );
         assert_eq!(listing.imported_count, 0);
 
-        let first = ClaudeSessionQuery {
+        let first = AgentSessionQuery {
             limit: Some(1),
             ..Default::default()
         };
-        let listing = list_sessions(&root, &first, &known, None);
+        let listing = list(&root, &first, &known);
         assert_eq!(listing.sessions.len(), 1);
         assert!(listing.has_more);
         let _ = std::fs::remove_dir_all(&root);
@@ -812,13 +507,11 @@ mod tests {
             ],
         );
         let search = |query: &str| {
-            let request = ClaudeSessionQuery {
+            let request = AgentSessionQuery {
                 query: Some(query.into()),
                 ..Default::default()
             };
-            list_sessions(&root, &request, &HashMap::new(), None)
-                .sessions
-                .len()
+            list(&root, &request, &Known::new()).sessions.len()
         };
         assert_eq!(search("invoice"), 1);
         assert_eq!(search("first"), 1);
@@ -843,7 +536,7 @@ mod tests {
         let size = std::fs::metadata(dir.join("long.jsonl")).unwrap().len();
         assert!(size > SUMMARY_HEAD_BYTES + SUMMARY_TAIL_BYTES);
 
-        let listing = list_sessions(&root, &scoped(cwd), &HashMap::new(), None);
+        let listing = list(&root, &scoped(cwd), &Known::new());
         let session = &listing.sessions[0];
         assert_eq!(session.first_prompt, "start here");
         assert_eq!(session.last_prompt, "finish up");
@@ -863,7 +556,7 @@ mod tests {
         records.extend(std::iter::repeat_n(filler, 100));
         write_session(&dir, "wide", &records);
 
-        let listing = list_sessions(&root, &scoped(cwd), &HashMap::new(), None);
+        let listing = list(&root, &scoped(cwd), &Known::new());
         assert_eq!(listing.sessions[0].last_prompt, "the real last ask");
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -875,23 +568,6 @@ mod tests {
             json!("<command-message>model</command-message>\n<command-name>/model</command-name>\n<command-args>opus</command-args>"),
         );
         assert_eq!(user_prompt_text(&record).as_deref(), Some("/model opus"));
-        assert_eq!(prompt_preview("  fix\n\n the   build "), "fix the build");
-    }
-
-    #[test]
-    fn home_and_missing_folders_are_flagged() {
-        let root = temp_root("folders");
-        let home = root.to_str().unwrap();
-        assert_eq!(
-            folder_state(&format!("{home}/"), Some(home)),
-            SessionFolder::Home
-        );
-        assert_eq!(folder_state(home, None), SessionFolder::Ok);
-        assert_eq!(
-            folder_state(&format!("{home}/gone"), Some(home)),
-            SessionFolder::Missing
-        );
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -938,8 +614,268 @@ mod tests {
     }
 
     #[test]
-    fn rejects_path_like_session_ids() {
-        assert!(validate_session_id("../etc").is_err());
-        assert!(validate_session_id("d35a3d8b-d7b9-4b7a-b919-01cd52ccd01a").is_ok());
+    fn chats_lists_only_sessions_without_a_project() {
+        let root = temp_root("chats");
+        let projects = root.join("projects");
+        let home = root.join("home");
+        let app = root.join("app");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&app).unwrap();
+        let (home, app) = (home.to_str().unwrap(), app.to_str().unwrap());
+        let gone = format!("{app}-deleted");
+        for (id, cwd, seconds) in [
+            ("in-home", home, 400),
+            ("in-app", app, 300),
+            ("in-gone", gone.as_str(), 200),
+            ("known-home", home, 100),
+        ] {
+            let dir = projects.join(encode_project_dir(cwd));
+            write_session(&dir, id, &[user(cwd, json!("work"))]);
+            touch(&dir, id, seconds);
+        }
+        let known = known([
+            ("known-home", KnownSession::new("m-1", "~")),
+            ("in-app", KnownSession::new("m-2", app)),
+        ]);
+        let request = AgentSessionQuery {
+            projectless: true,
+            ..Default::default()
+        };
+        let listing = list_sessions(&claude(&projects), &request, &known, Some(home), &|| true);
+        let ids: Vec<_> = listing.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["in-home", "in-gone"]);
+        // Only the chat already in MonoCode's Chats counts, not the project one.
+        assert_eq!(listing.imported_count, 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_time_filter_ends_the_listing_at_older_sessions() {
+        let root = temp_root("since");
+        let dir = root.join(encode_project_dir("/work/app"));
+        for (id, seconds) in [("new", 300), ("mid", 200), ("old", 100)] {
+            write_session(&dir, id, &[user("/work/app", json!("work"))]);
+            touch(&dir, id, seconds);
+        }
+        let known = known([("old", KnownSession::new("m", "/work/app"))]);
+        let request = AgentSessionQuery {
+            since: Some(200_000),
+            limit: Some(1),
+            ..Default::default()
+        };
+        let listing = list(&root, &request, &known);
+        let ids: Vec<_> = listing.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["new"]);
+        assert!(listing.has_more);
+        // The imported session is older than the filter, so it isn't counted.
+        assert_eq!(listing.imported_count, 0);
+
+        let request = AgentSessionQuery {
+            since: Some(250_000),
+            limit: Some(1),
+            ..Default::default()
+        };
+        assert!(!list(&root, &request, &known).has_more);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn counts_every_known_session_not_just_one_page() {
+        let root = temp_root("count");
+        let dir = root.join(encode_project_dir("/work/app"));
+        for (index, id) in ["a", "b", "c", "d"].iter().enumerate() {
+            write_session(&dir, id, &[user("/work/app", json!("work"))]);
+            touch(&dir, id, 100 + index as u64);
+        }
+        // The two oldest are in MonoCode, one of them under another project.
+        let known = known([
+            ("a", KnownSession::new("m-a", "/work/app")),
+            ("b", KnownSession::new("m-b", "/work/other")),
+        ]);
+
+        let first = AgentSessionQuery {
+            limit: Some(1),
+            ..Default::default()
+        };
+        let listing = list(&root, &first, &known);
+        assert_eq!(listing.sessions.len(), 1);
+        assert!(listing.has_more);
+        assert_eq!(listing.imported_count, 2);
+
+        let scoped_first = AgentSessionQuery {
+            limit: Some(1),
+            ..scoped("/work/app")
+        };
+        assert_eq!(list(&root, &scoped_first, &known).imported_count, 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_superseded_listing_stops_reading() {
+        let root = temp_root("superseded");
+        let dir = root.join(encode_project_dir("/work/app"));
+        write_session(&dir, "s", &[user("/work/app", json!("work"))]);
+        let listing = list_sessions(
+            &claude(&root),
+            &AgentSessionQuery::default(),
+            &Known::new(),
+            None,
+            &|| false,
+        );
+        assert!(listing.sessions.is_empty());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_changed_transcript_is_read_again() {
+        let root = temp_root("cache");
+        let dir = root.join(encode_project_dir("/work/app"));
+        write_session(&dir, "s", &[user("/work/app", json!("first"))]);
+        touch(&dir, "s", 100);
+        let prompt = |root: &Path| {
+            list(root, &scoped("/work/app"), &Known::new()).sessions[0]
+                .last_prompt
+                .clone()
+        };
+        assert_eq!(prompt(&root), "first");
+        write_session(
+            &dir,
+            "s",
+            &[
+                user("/work/app", json!("first")),
+                user("/work/app", json!("second")),
+            ],
+        );
+        touch(&dir, "s", 200);
+        assert_eq!(prompt(&root), "second");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            // A pre-push hook exports these; they would aim every command at
+            // the repository being pushed instead of the temp folder.
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_INDEX_FILE")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_COMMON_DIR")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+
+    #[test]
+    fn worktree_sessions_list_under_their_main_checkout() {
+        let root = temp_root("worktree");
+        let main = root
+            .join("repo")
+            .canonicalize()
+            .unwrap_or(root.join("repo"));
+        std::fs::create_dir_all(&main).unwrap();
+        let main = main.canonicalize().unwrap();
+        git(&main, &["init", "-q", "-b", "main"]);
+        git(&main, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        git(
+            &main,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                ".worktrees/feature",
+                "-b",
+                "feature",
+            ],
+        );
+        let main_str = main.to_str().unwrap();
+        let tree = format!("{main_str}/.worktrees/feature");
+        assert_eq!(main_checkout(&tree).as_deref(), Some(main_str));
+        assert_eq!(main_checkout(main_str), None);
+
+        let projects = root.join("projects");
+        write_session(
+            &projects.join(encode_project_dir(&tree)),
+            "wt",
+            &[user(&tree, json!("in the worktree"))],
+        );
+        // Shares the name prefix but is another folder.
+        let sibling = format!("{main_str}-other");
+        write_session(
+            &projects.join(encode_project_dir(&sibling)),
+            "sib",
+            &[user(&sibling, json!("elsewhere"))],
+        );
+        let listing = list(&projects, &scoped(main_str), &Known::new());
+        let ids: Vec<_> = listing.sessions.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["wt"]);
+        assert_eq!(listing.sessions[0].project.as_deref(), Some(main_str));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn reads_a_transcript_cut_inside_a_character() {
+        let root = temp_root("cut");
+        write_session(&root, "s", &[user("/w", json!("héllo"))]);
+        let mut file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(root.join("s.jsonl"))
+            .unwrap();
+        // The first byte of a two-byte "é", as a write in progress leaves it.
+        file.write_all(b"{\"type\":\"user\",\"x\":\"\xc3").unwrap();
+        let records = read_session(&root.join("s.jsonl")).unwrap();
+        assert_eq!(records.len(), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn caps_tool_inputs_and_keeps_old_summary_titles() {
+        let root = temp_root("inputs");
+        let cwd = "/work/old";
+        let dir = root.join(encode_project_dir(cwd));
+        let big = "w".repeat(MAX_TOOL_INPUT_CHARS + 5);
+        write_session(
+            &dir,
+            "s",
+            &[
+                json!({ "type": "summary", "summary": "Old style title", "leafUuid": "x" }),
+                user(cwd, json!("write it")),
+                json!({
+                    "type": "assistant",
+                    "uuid": "a1",
+                    "message": { "role": "assistant", "content": [{
+                        "type": "tool_use", "id": "t", "name": "Write",
+                        "input": { "file_path": "/work/old/a.txt", "content": big },
+                    }] },
+                }),
+            ],
+        );
+        let listing = list(&root, &scoped(cwd), &Known::new());
+        assert_eq!(
+            listing.sessions[0].title.as_deref(),
+            Some("Old style title")
+        );
+
+        let records = read_session(&dir.join("s.jsonl")).unwrap();
+        assert_eq!(records[0]["summary"], "Old style title");
+        let input = &records[2]["message"]["content"][0]["input"];
+        assert_eq!(input["file_path"], "/work/old/a.txt");
+        assert_eq!(
+            input["content"].as_str().unwrap().chars().count(),
+            MAX_TOOL_INPUT_CHARS + 1
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn system_reminders_are_not_prompts() {
+        let record = user("/w", json!("<system-reminder>be brief</system-reminder>"));
+        assert_eq!(user_prompt_text(&record), None);
     }
 }

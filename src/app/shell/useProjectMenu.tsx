@@ -75,7 +75,7 @@ import {
 } from "../../features/notifications/ui/notificationMuteActions";
 import { useProjectNotificationPreferences } from "../../features/notifications/hooks/useProjectNotificationPreferences";
 import { useNotificationProjects } from "../../features/notifications/hooks/useNotificationProjects";
-import { requestClaudeSessionImport } from "../../features/sessions/model/claudeSessionImport";
+import { requestSessionImport } from "../../features/sessions/model/agentSessionImport";
 import { updateNotificationPreferences } from "../../features/notifications/model/notificationPreferences";
 import type { ExplorerMenuItem } from "../../features/files/ui/ExplorerMenu";
 
@@ -128,7 +128,7 @@ function projectMenuExtraItems(
       : { id: "pin", label: "Pin project", icon: Pin },
     { id: "reveal", label: REVEAL_LABEL, icon: FolderOpen },
     {
-      id: "import-claude-session",
+      id: "import-session",
       label: "Import session…",
       icon: FolderInput,
     },
@@ -385,10 +385,9 @@ export function useProjectMenu({
         name: resolveTabGroupLabel(key, groupLabels, basename(path)),
       });
     } else if (action === "reveal") void revealPath(path);
-    else if (action === "import-claude-session") {
-      requestClaudeSessionImport(path);
-    }
-    else if (action === "archive") {
+    else if (action === "import-session") {
+      requestSessionImport(path);
+    } else if (action === "archive") {
       onRemoveProject?.(path, { purgeData: false });
     } else if (action === "delete") {
       setRemoving({
