@@ -950,4 +950,32 @@ describe("subagent messages", () => {
       subagentType: "explore",
     });
   });
+
+  it("ignores tool heartbeats so they don't become subagent steps", () => {
+    expect(
+      parseToolProgress({
+        type: "tool_progress",
+        tool_use_id: "toolu_agent-heartbeat-0",
+        parent_tool_use_id: "toolu_agent",
+        tool_name: "Agent",
+        heartbeat: true,
+      }),
+    ).toBeNull();
+    expect(
+      parseToolProgress({
+        type: "tool_progress",
+        tool_use_id: "toolu_agent-heartbeat-12",
+        parent_tool_use_id: "toolu_agent",
+        tool_name: "Agent",
+      }),
+    ).toBeNull();
+    expect(
+      parseToolProgress({
+        type: "tool_progress",
+        tool_use_id: "toolu_bash",
+        parent_tool_use_id: "toolu_agent",
+        tool_name: "Bash",
+      }),
+    ).toMatchObject({ toolUseId: "toolu_bash", toolName: "Bash" });
+  });
 });

@@ -1257,7 +1257,10 @@ function handleToolProgress(live: Live, rec: Record<string, unknown>): void {
   });
   // Progress names the call in flight. That is a step in the run, not the
   // result of it, so it goes to the panel rather than onto the Agent row.
-  if (progress.toolName) {
+  // Progress named after the Agent tool itself (an API retry notice) is
+  // about the whole run, not a step in it, and would show as a stray
+  // "Subagent" row.
+  if (progress.toolName && !isAgentToolName(progress.toolName)) {
     live.onEvent({
       type: "agent.step",
       callId: tool.id,
