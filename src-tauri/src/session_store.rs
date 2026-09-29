@@ -34,14 +34,14 @@ pub struct SessionStore {
 }
 
 impl SessionStore {
-    /// MonoCode sessions (archived included) bound to a `harness` conversation,
-    /// keyed by the provider's own session id.
-    pub(crate) fn provider_session_ids(
+    /// MonoCode sessions (archived included) that hold a `harness`
+    /// conversation, keyed by the provider's own session id.
+    pub(crate) fn known_provider_sessions(
         &self,
         harness: &str,
-    ) -> Result<HashMap<String, String>, String> {
+    ) -> Result<HashMap<String, KnownSession>, String> {
         let conn = self.conn.lock().map_err(|_| "Session store is locked")?;
-        provider_session_ids(&conn, harness).map_err(|e| e.to_string())
+        known_provider_sessions(&conn, harness).map_err(|e| e.to_string())
     }
 
     pub fn open(path: PathBuf) -> Result<Self, String> {
@@ -1623,16 +1623,72 @@ fn list_by_project(conn: &Connection, cwd: &str) -> rusqlite::Result<Vec<Session
     rows.collect()
 }
 
-fn provider_session_ids(
+/// A MonoCode session holding a provider conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct KnownSession {
+    pub id: String,
+    cwd: String,
+    worktree_cwd: Option<String>,
+}
+
+impl KnownSession {
+    #[cfg(test)]
+    pub(crate) fn new(id: &str, cwd: &str) -> Self {
+        Self {
+            id: id.into(),
+            cwd: cwd.into(),
+            worktree_cwd: None,
+        }
+    }
+
+    /// A chat that belongs to no project.
+    pub(crate) fn is_projectless(&self) -> bool {
+        self.cwd == "~"
+    }
+
+    /// Whether this session is one of the project at `cwd`, or ran there.
+    pub(crate) fn belongs_to(&self, cwd: &str) -> bool {
+        let cwd = cwd.trim_end_matches(['/', '\\']);
+        std::iter::once(&self.cwd)
+            .chain(self.worktree_cwd.as_ref())
+            .any(|path| path.trim_end_matches(['/', '\\']) == cwd)
+    }
+}
+
+/// Sessions keyed by the provider conversation they resume. A chat imported
+/// without one (its folder was gone) takes the conversation's id as its own,
+/// so every session is also listed under its own id.
+fn known_provider_sessions(
     conn: &Connection,
     harness: &str,
-) -> rusqlite::Result<HashMap<String, String>> {
+) -> rusqlite::Result<HashMap<String, KnownSession>> {
     let mut statement = conn.prepare(
-        "SELECT provider_session_id, id FROM sessions
-         WHERE harness = ?1 AND provider_session_id IS NOT NULL AND provider_session_id != ''",
+        "SELECT NULLIF(provider_session_id, ''), id, cwd, NULLIF(worktree_cwd, '')
+         FROM sessions WHERE harness = ?1",
     )?;
-    let rows = statement.query_map([harness], |row| Ok((row.get(0)?, row.get(1)?)))?;
-    rows.collect()
+    let rows = statement.query_map([harness], |row| {
+        Ok((
+            row.get::<_, Option<String>>(0)?,
+            KnownSession {
+                id: row.get(1)?,
+                cwd: row.get(2)?,
+                worktree_cwd: row.get(3)?,
+            },
+        ))
+    })?;
+    let mut known = HashMap::new();
+    let mut own_ids = Vec::new();
+    for row in rows {
+        let (provider_id, session) = row?;
+        if let Some(provider_id) = provider_id {
+            known.insert(provider_id, session.clone());
+        }
+        own_ids.push(session);
+    }
+    for session in own_ids {
+        known.entry(session.id.clone()).or_insert(session);
+    }
+    Ok(known)
 }
 
 fn list_linked(conn: &Connection) -> rusqlite::Result<Vec<SessionSummary>> {
@@ -2397,6 +2453,74 @@ mod tests {
             get_session(&conn, "s1").unwrap().unwrap().linked_work_item,
             None
         );
+    }
+
+    #[test]
+    fn known_provider_sessions_cover_resumed_and_imported_ids() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let conn = store.conn.lock().unwrap();
+        let mut resumed = sample("mono-1", "/tmp/app", "Resumes a Claude chat");
+        resumed.harness = "claude".into();
+        resumed.provider_session_id = Some("claude-1".into());
+        resumed.worktree_cwd = Some("/tmp/app/.worktrees/x".into());
+        upsert_session(&conn, &resumed).unwrap();
+        // Imported from a folder that is gone: no conversation to resume, so
+        // it carries the Claude id as its own.
+        let mut orphan = sample("claude-2", "~", "From a deleted folder");
+        orphan.harness = "claude".into();
+        orphan.provider_session_id = None;
+        upsert_session(&conn, &orphan).unwrap();
+        upsert_session(&conn, &sample("cursor-1", "/tmp/app", "Other harness")).unwrap();
+
+        let known = known_provider_sessions(&conn, "claude").unwrap();
+        assert_eq!(known["claude-1"].id, "mono-1");
+        assert!(known["claude-1"].belongs_to("/tmp/app/"));
+        assert!(known["claude-1"].belongs_to("/tmp/app/.worktrees/x"));
+        assert!(!known["claude-1"].belongs_to("/tmp/other"));
+        assert_eq!(known["claude-2"].id, "claude-2");
+        assert!(!known.contains_key("cursor-1"));
+    }
+
+    #[test]
+    fn imported_chats_are_found_by_search_like_any_other() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let conn = store.conn.lock().unwrap();
+        let mut project = sample("imported-1", "/tmp/app", "claude · Fix the invoice export");
+        project.harness = "claude".into();
+        project.worktree_cwd = Some("/tmp/app/.worktrees/x".into());
+        project.blocks = json!([
+            { "id": "u1", "role": "user", "text": "the totals are off by one cent" },
+            { "id": "a1", "role": "assistant", "text": "Rounding happens before tax." },
+        ]);
+        upsert_session(&conn, &project).unwrap();
+        let mut home = sample("imported-2", "~", "claude · Tidy dotfiles");
+        home.harness = "claude".into();
+        home.blocks = json!([{ "id": "u2", "role": "user", "text": "clean up my zshrc" }]);
+        upsert_session(&conn, &home).unwrap();
+
+        let search = |query: &str| {
+            search_sessions(
+                &conn,
+                &SessionSearchOptions {
+                    query: query.into(),
+                    cwd: None,
+                    include_archived: false,
+                    search_owner: String::new(),
+                },
+            )
+            .unwrap()
+            .hits
+        };
+        let title = search("invoice");
+        assert_eq!(title.len(), 1);
+        assert_eq!(title[0].kind, "conversation");
+        assert_eq!(title[0].session_id, "imported-1");
+        let message = search("before tax");
+        assert_eq!(message[0].kind, "message");
+        assert_eq!(message[0].block_id.as_deref(), Some("a1"));
+        let projectless = search("zshrc");
+        assert_eq!(projectless[0].session_id, "imported-2");
+        assert_eq!(projectless[0].cwd, "~");
     }
 
     #[test]

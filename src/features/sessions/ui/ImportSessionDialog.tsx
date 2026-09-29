@@ -11,10 +11,11 @@ import { GitBranch, ListFilter, RefreshCw } from "../../../shared/ui/icons";
 import { prettyCwd, projectKey, projectName } from "../../../shared/lib/paths";
 import { formatRelative } from "../../../shared/lib/relativeTime";
 import {
-  listClaudeSessions,
-  type ClaudeSessionListing,
-  type ClaudeSessionSummary,
-} from "../../../platform/tauri/claudeSessions";
+  IMPORTABLE_HARNESSES,
+  listAgentSessions,
+  type AgentSessionListing,
+  type AgentSessionSummary,
+} from "../../../platform/tauri/agentSessions";
 import { sameProjectPath } from "../../projects/model/recents";
 import { ProjectMascot } from "../../projects/ui/ProjectMascot";
 import {
@@ -26,7 +27,10 @@ import {
   resolveTabGroupLabel,
   resolveTabGroupMascot,
 } from "../../workspace/model/tabGroups";
-import { importClaudeSession } from "../model/claudeSessionImport";
+import {
+  agentImportPlan,
+  importAgentSession,
+} from "../model/agentSessionImport";
 import {
   DEFAULT_SESSION_SIDEBAR_FILTERS,
   hasActiveSessionFilters,
@@ -63,22 +67,15 @@ type FolderIdentity = {
 /** Where a home-folder session goes: a chat that belongs to no project. */
 const NO_PROJECT: FolderIdentity = { label: "No project" };
 
-/**
- * The MonoCode cwd a session is imported to. One started in the home folder
- * becomes a chat without a project ("~"), which still runs from home.
- */
-function importTarget(session: ClaudeSessionSummary): string {
-  return session.folder === "home" ? "~" : session.cwd;
-}
-
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
 /**
- * Lists Claude Code sessions started in the terminal and imports the chosen
- * one as a MonoCode session that resumes the same conversation. Reads like
- * the sessions list: same search box, filter menu, row and empty states.
+ * Lists sessions started in a terminal with Claude Code, Pi or omp, and
+ * imports the chosen one as a MonoCode session that resumes the same
+ * conversation. Reads like the sessions list: same search box, filter menu,
+ * row and empty states.
  */
 export function ImportSessionDialog({
   cwd: initialCwd,
@@ -87,6 +84,8 @@ export function ImportSessionDialog({
   onOpen,
 }: Props) {
   const [scope, setScope] = useState(initialCwd);
+  // Only sessions that import as chats without a project.
+  const [chatsOnly, setChatsOnly] = useState(false);
   const [query, setQuery] = useState("");
   const [search, setSearch] = useState("");
   const [filters, setFilters] = useState<SessionSidebarFilters>(
@@ -98,7 +97,7 @@ export function ImportSessionDialog({
   const [page, setPage] = useState(0);
   const [includeImported, setIncludeImported] = useState(false);
   const [reload, setReload] = useState(0);
-  const [listing, setListing] = useState<ClaudeSessionListing | null>(null);
+  const [listing, setListing] = useState<AgentSessionListing | null>(null);
   const [fetching, setFetching] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [importing, setImporting] = useState<string | null>(null);
@@ -106,6 +105,8 @@ export function ImportSessionDialog({
   const [importError, setImportError] = useState("");
   const [hiddenCount, setHiddenCount] = useState(0);
   const sentinel = useRef<HTMLLIElement>(null);
+  // Each listing supersedes the last, so a fast typist doesn't queue reads.
+  const owner = useMemo(() => crypto.randomUUID(), []);
 
   useEffect(() => {
     const id = window.setTimeout(() => {
@@ -115,14 +116,29 @@ export function ImportSessionDialog({
     return () => window.clearTimeout(id);
   }, [query]);
 
+  const hiddenHarnessesKey = filters.hiddenHarnesses.join(",");
   useEffect(() => {
     let active = true;
     setFetching(true);
-    void listClaudeSessions({
-      cwd: scope,
+    // The time filter goes to the listing, so a page and "more" count only
+    // matching rows; filtering here instead kept loading hidden pages.
+    const since = timeFilterStart(filters.time, Date.now());
+    const hidden = new Set<string>(hiddenHarnessesKey.split(","));
+    void listAgentSessions({
+      ...(hiddenHarnessesKey
+        ? {
+            harnesses: IMPORTABLE_HARNESSES.filter(
+              (harness) => !hidden.has(harness),
+            ),
+          }
+        : {}),
+      cwd: chatsOnly ? undefined : scope,
+      ...(chatsOnly ? { projectless: true } : {}),
       query: search || undefined,
       limit: PAGE_LIMITS[page],
       includeImported,
+      owner,
+      ...(since > 0 ? { since } : {}),
     })
       .then((next) => {
         if (!active) return;
@@ -139,7 +155,17 @@ export function ImportSessionDialog({
     return () => {
       active = false;
     };
-  }, [scope, search, page, includeImported, reload]);
+  }, [
+    scope,
+    chatsOnly,
+    search,
+    page,
+    includeImported,
+    reload,
+    owner,
+    filters.time,
+    hiddenHarnessesKey,
+  ]);
 
   const canLoadMore =
     !!listing?.hasMore && page < PAGE_LIMITS.length - 1 && !fetching;
@@ -157,17 +183,13 @@ export function ImportSessionDialog({
 
   const identity = useFolderIdentity(projects);
   const now = Date.now();
-  const since = timeFilterStart(filters.time, now);
-  const sessions = (listing?.sessions ?? []).filter(
-    (session) => session.updatedAt >= since,
-  );
+  const sessions = listing?.sessions ?? [];
   const filtersActive = hasActiveSessionFilters(filters);
 
-  const pick = (session: ClaudeSessionSummary) => {
-    if (importing || session.folder === "missing") return;
-    const target = importTarget(session);
+  const pick = (session: AgentSessionSummary) => {
+    if (importing) return;
     if (session.monocodeSessionId) {
-      onOpen(session.monocodeSessionId, target);
+      onOpen(session.monocodeSessionId, agentImportPlan(session).cwd);
       return;
     }
     if (now - session.updatedAt < RECENT_MS && confirming !== session.id) {
@@ -176,8 +198,8 @@ export function ImportSessionDialog({
     }
     setImporting(session.id);
     setImportError("");
-    void importClaudeSession(session.cwd, session.id, target)
-      .then((result) => onOpen(result.sessionId, target))
+    void importAgentSession(session)
+      .then((result) => onOpen(result.sessionId, result.cwd))
       .catch((reason: unknown) => setImportError(errorText(reason)))
       .finally(() => {
         setImporting(null);
@@ -199,7 +221,42 @@ export function ImportSessionDialog({
     setReload((n) => n + 1);
   };
 
-  const scopeLabel = scope ? identity(scope).label : "";
+  const projectScoped = !!scope && !chatsOnly;
+  const views: {
+    id: string;
+    label: string;
+    active: boolean;
+    pick: () => void;
+  }[] = [
+    {
+      id: "all",
+      label: "All folders",
+      active: !scope && !chatsOnly,
+      pick: () => {
+        setScope(undefined);
+        setChatsOnly(false);
+      },
+    },
+    ...(initialCwd
+      ? [
+          {
+            id: "project",
+            label: identity(initialCwd).label,
+            active: projectScoped,
+            pick: () => {
+              setScope(initialCwd);
+              setChatsOnly(false);
+            },
+          },
+        ]
+      : []),
+    {
+      id: "chats",
+      label: "Chats",
+      active: chatsOnly,
+      pick: () => setChatsOnly(true),
+    },
+  ];
 
   return (
     <Modal
@@ -247,21 +304,38 @@ export function ImportSessionDialog({
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-none">
-          {scope ? (
-            <p className="px-3 pt-2 text-[12px] text-content/50">
-              In {scopeLabel} ·{" "}
-              <button
-                type="button"
-                onClick={() => {
-                  setScope(undefined);
-                  setPage(0);
-                }}
-                className="text-content/70 hover:text-content"
-              >
-                Show all
-              </button>
-            </p>
-          ) : null}
+          <div
+            role="group"
+            aria-label="Which sessions"
+            className="flex items-center gap-1 px-3 pt-2 text-[12px]"
+          >
+            {views.map((view, index) => (
+              <span key={view.id} className="flex items-center gap-1">
+                {index > 0 ? <span className="text-content/30">·</span> : null}
+                <button
+                  type="button"
+                  aria-pressed={view.active}
+                  title={
+                    view.id === "chats"
+                      ? "Sessions without a project: started in your home folder, or in a folder that no longer exists"
+                      : undefined
+                  }
+                  onClick={() => {
+                    if (view.active) return;
+                    view.pick();
+                    setPage(0);
+                  }}
+                  className={
+                    view.active
+                      ? "text-content"
+                      : "text-content/50 hover:text-content"
+                  }
+                >
+                  {view.label}
+                </button>
+              </span>
+            ))}
+          </div>
 
           {importError ? (
             <p role="alert" className="px-3 pt-2 text-[12px] text-red-400">
@@ -273,13 +347,13 @@ export function ImportSessionDialog({
           The first load stays blank, like the sessions list: it resolves in
           a moment and a placeholder would only flash.
         */}
-          {!listing ? (
-            loadError ? (
-              <p className="px-3 py-2 text-[12px] text-content/50">
-                Couldn’t load Claude Code sessions
-              </p>
-            ) : null
-          ) : sessions.length === 0 ? (
+          {loadError ? (
+            <p role="alert" className="px-3 pt-2 text-[12px] text-content/50">
+              Couldn’t load terminal sessions
+            </p>
+          ) : null}
+
+          {!listing ? null : sessions.length === 0 ? (
             search ? (
               <p className="px-3 py-2 text-[12px] text-content/50">
                 No matching sessions
@@ -287,6 +361,10 @@ export function ImportSessionDialog({
             ) : filtersActive ? (
               <p className="px-3 py-2 text-[12px] text-content/50">
                 No sessions match these filters
+              </p>
+            ) : chatsOnly && !(hiddenCount > 0 && !includeImported) ? (
+              <p className="px-3 py-2 text-[12px] text-content/50">
+                No sessions without a project
               </p>
             ) : hiddenCount > 0 && !includeImported ? (
               <p className="px-3 py-2 text-[12px] text-content/50">
@@ -303,13 +381,7 @@ export function ImportSessionDialog({
                 <ImportSessionRow
                   key={session.id}
                   session={session}
-                  folder={
-                  scope
-                    ? null
-                    : session.folder === "home"
-                      ? NO_PROJECT
-                      : identity(session.cwd)
-                }
+                  folder={projectScoped ? null : rowFolder(session, identity)}
                   now={now}
                   importing={importing === session.id}
                   confirming={confirming === session.id}
@@ -321,7 +393,8 @@ export function ImportSessionDialog({
             </ul>
           )}
 
-          {listing && (hiddenCount > 0 || includeImported) ? (
+          {/* The count covers every session, so a search would contradict it. */}
+          {listing && !search && (hiddenCount > 0 || includeImported) ? (
             <p className="mt-auto px-3 py-2 text-[12px] text-content/50">
               {includeImported
                 ? "Showing sessions already in MonoCode · "
@@ -345,9 +418,12 @@ export function ImportSessionDialog({
         <SessionFiltersMenu
           x={filterMenu.x}
           y={filterMenu.y}
-          harnesses={[]}
+          harnesses={[...IMPORTABLE_HARNESSES]}
           filters={filters}
-          onChange={setFilters}
+          onChange={(next) => {
+            setFilters(next);
+            setPage(0);
+          }}
           onClose={() => setFilterMenu(null)}
           archivedOption={false}
           statusOptions={false}
@@ -355,6 +431,16 @@ export function ImportSessionDialog({
       ) : null}
     </Modal>
   );
+}
+
+/** Where a row's session ran, as the project rail names it. */
+function rowFolder(
+  session: AgentSessionSummary,
+  identity: (cwd: string) => FolderIdentity,
+): FolderIdentity {
+  if (session.folder === "home") return NO_PROJECT;
+  if (session.folder === "missing") return { label: prettyCwd(session.cwd) };
+  return identity(agentImportPlan(session).cwd);
 }
 
 /** One session, laid out like a row of the sessions list. */
@@ -367,47 +453,45 @@ function ImportSessionRow({
   disabled,
   onPick,
 }: {
-  session: ClaudeSessionSummary;
+  session: AgentSessionSummary;
   /** Where the session ran; omitted when the sheet is scoped to one project. */
   folder: FolderIdentity | null;
   now: number;
   importing: boolean;
   confirming: boolean;
   disabled: boolean;
-  onPick: (session: ClaudeSessionSummary) => void;
+  onPick: (session: AgentSessionSummary) => void;
 }) {
   const title = session.title || session.firstPrompt;
-  const unavailable =
-    session.folder === "missing" ? "Folder was not found" : null;
+  const missing = session.folder === "missing";
   const tooltip = [
     title,
     session.lastPrompt !== title ? session.lastPrompt : "",
   ]
     .filter(Boolean)
     .join("\n");
-  const note = unavailable
-    ? unavailable
-    : confirming
-      ? "May still be open in the terminal. Click again to import."
-      : session.monocodeSessionId
-        ? "Already in MonoCode"
+  const note = confirming
+    ? "May still be open in the terminal. Click again to import."
+    : session.monocodeSessionId
+      ? "Already in MonoCode"
+      : missing
+        ? "Folder no longer exists · imports without resuming"
         : null;
 
   return (
     <li>
       <button
         type="button"
-        disabled={disabled || !!unavailable}
+        disabled={disabled}
         onClick={() => onPick(session)}
-        className={`relative flex w-full cursor-default select-none flex-col rounded-md border border-transparent px-2.5 py-2 text-left outline-none focus-visible:ring-1 focus-visible:ring-accent/50 ${
-          unavailable
-            ? "text-content/30"
-            : "text-content/80 hover:bg-content/5 hover:text-content disabled:hover:bg-transparent"
-        }`}
+        className="relative flex w-full cursor-default select-none flex-col rounded-md border border-transparent px-2.5 py-2 text-left text-content/80 outline-none hover:bg-content/5 hover:text-content focus-visible:ring-1 focus-visible:ring-accent/50 disabled:hover:bg-transparent"
       >
         <span className="flex items-center gap-2">
           <span className="flex min-w-0 flex-1 items-center gap-1.5">
-            <HarnessIcon harness="claude" className="size-3.5 shrink-0" />
+            <HarnessIcon
+              harness={session.harness}
+              className="size-3.5 shrink-0"
+            />
             {folder ? (
               <>
                 {folder.mascot ? (
@@ -443,16 +527,14 @@ function ImportSessionRow({
           // Only the title carries the full prompts: on the whole row, one
           // shown tooltip made every row it crossed pop its own at once.
           title={tooltip}
-          className={`mt-1 min-w-0 line-clamp-1 text-[13px] font-semibold leading-snug ${
-            unavailable ? "" : "text-content"
-          }`}
+          className="mt-1 min-w-0 line-clamp-1 text-[13px] font-semibold leading-snug text-content"
         >
           {title}
         </span>
         {note ? (
           <span
             className={`mt-1 min-w-0 truncate text-[11px] ${
-              confirming && !unavailable ? "text-amber-400" : "text-content/45"
+              confirming ? "text-amber-400" : "text-content/45"
             }`}
           >
             {note}

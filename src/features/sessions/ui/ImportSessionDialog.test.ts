@@ -4,29 +4,29 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
-  ClaudeSessionListing,
-  ClaudeSessionQuery,
-  ClaudeSessionSummary,
-} from "../../../platform/tauri/claudeSessions";
+  AgentSessionListing,
+  AgentSessionQuery,
+  AgentSessionSummary,
+} from "../../../platform/tauri/agentSessions";
 
 const api = vi.hoisted(() => ({
-  listClaudeSessions:
-    vi.fn<(request: ClaudeSessionQuery) => Promise<ClaudeSessionListing>>(),
-  importClaudeSession:
+  listAgentSessions:
+    vi.fn<(request: AgentSessionQuery) => Promise<AgentSessionListing>>(),
+  importAgentSession:
     vi.fn<
       (
-        cwd: string,
-        id: string,
-        target?: string,
-      ) => Promise<{ sessionId: string; existing: boolean }>
+        session: AgentSessionSummary,
+      ) => Promise<{ sessionId: string; cwd: string; existing: boolean }>
     >(),
 }));
 
-vi.mock("../../../platform/tauri/claudeSessions", () => ({
-  listClaudeSessions: api.listClaudeSessions,
+vi.mock("../../../platform/tauri/agentSessions", async (actual) => ({
+  ...(await actual<typeof import("../../../platform/tauri/agentSessions")>()),
+  listAgentSessions: api.listAgentSessions,
 }));
-vi.mock("../model/claudeSessionImport", () => ({
-  importClaudeSession: api.importClaudeSession,
+vi.mock("../model/agentSessionImport", async (actual) => ({
+  ...(await actual<typeof import("../model/agentSessionImport")>()),
+  importAgentSession: api.importAgentSession,
 }));
 
 import { ImportSessionDialog } from "./ImportSessionDialog";
@@ -38,9 +38,10 @@ let container: HTMLDivElement;
 let root: Root;
 
 function summary(
-  overrides: Partial<ClaudeSessionSummary> & { id: string },
-): ClaudeSessionSummary {
+  overrides: Partial<AgentSessionSummary> & { id: string },
+): AgentSessionSummary {
   return {
+    harness: "claude",
     cwd: "/Users/me/code/monocode",
     title: null,
     firstPrompt: "first prompt",
@@ -55,9 +56,9 @@ function summary(
 }
 
 function listing(
-  sessions: ClaudeSessionSummary[],
+  sessions: AgentSessionSummary[],
   importedCount = 0,
-): ClaudeSessionListing {
+): AgentSessionListing {
   return { sessions, importedCount, hasMore: false };
 }
 
@@ -67,14 +68,18 @@ function dialogText(): string {
 
 function row(text: string): HTMLButtonElement {
   const found = [
-    ...document.querySelectorAll<HTMLButtonElement>('[aria-label="Sessions"] button'),
+    ...document.querySelectorAll<HTMLButtonElement>(
+      '[aria-label="Sessions"] button',
+    ),
   ].find((button) => button.textContent?.includes(text));
   expect(found, text).toBeDefined();
   return found!;
 }
 
 function button(label: string): HTMLButtonElement {
-  const found = [...document.querySelectorAll<HTMLButtonElement>("button")].find(
+  const found = [
+    ...document.querySelectorAll<HTMLButtonElement>("button"),
+  ].find(
     (item) => (item.getAttribute("aria-label") ?? item.textContent) === label,
   );
   expect(found, label).toBeDefined();
@@ -108,8 +113,8 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
   vi.setSystemTime(NOW);
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-  api.listClaudeSessions.mockReset();
-  api.importClaudeSession.mockReset();
+  api.listAgentSessions.mockReset();
+  api.importAgentSession.mockReset();
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -124,7 +129,7 @@ afterEach(() => {
 
 describe("ImportSessionDialog", () => {
   it("lists terminal sessions from every folder like the sessions list", async () => {
-    api.listClaudeSessions.mockResolvedValue(
+    api.listAgentSessions.mockResolvedValue(
       listing(
         [
           summary({ id: "a", title: "Fix the build" }),
@@ -141,11 +146,12 @@ describe("ImportSessionDialog", () => {
     );
     await render({});
 
-    expect(api.listClaudeSessions).toHaveBeenCalledWith({
+    expect(api.listAgentSessions).toHaveBeenCalledWith({
       cwd: undefined,
       query: undefined,
       limit: 15,
       includeImported: false,
+      owner: expect.any(String),
     });
     expect(dialogText()).toContain("Import session");
     expect(row("Fix the build").textContent).toContain("monocode");
@@ -159,44 +165,46 @@ describe("ImportSessionDialog", () => {
 
   it("imports a session and asks again before importing one still open", async () => {
     const open = vi.fn();
-    api.listClaudeSessions.mockResolvedValue(
+    api.listAgentSessions.mockResolvedValue(
       listing([
         summary({ id: "old", title: "Older work" }),
         summary({ id: "live", title: "Live work", updatedAt: NOW - 30_000 }),
       ]),
     );
-    api.importClaudeSession.mockResolvedValue({
+    api.importAgentSession.mockResolvedValue({
       sessionId: "mono-1",
+      cwd: "/Users/me/code/monocode",
       existing: false,
     });
     await render({ onOpen: open });
 
     await act(async () => row("Older work").click());
-    expect(api.importClaudeSession).toHaveBeenCalledWith(
-      "/Users/me/code/monocode",
-      "old",
-      "/Users/me/code/monocode",
+    expect(api.importAgentSession).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "old", cwd: "/Users/me/code/monocode" }),
     );
     expect(open).toHaveBeenCalledWith("mono-1", "/Users/me/code/monocode");
 
     await act(async () => row("Live work").click());
-    expect(api.importClaudeSession).toHaveBeenCalledTimes(1);
+    expect(api.importAgentSession).toHaveBeenCalledTimes(1);
     expect(row("Live work").textContent).toContain(
       "May still be open in the terminal",
     );
     await act(async () => row("Live work").click());
-    expect(api.importClaudeSession).toHaveBeenLastCalledWith(
-      "/Users/me/code/monocode",
-      "live",
-      "/Users/me/code/monocode",
+    expect(api.importAgentSession).toHaveBeenLastCalledWith(
+      expect.objectContaining({ id: "live" }),
     );
   });
 
   it("imports a home-folder session as a chat without a project", async () => {
     const open = vi.fn();
-    api.listClaudeSessions.mockResolvedValue(
+    api.listAgentSessions.mockResolvedValue(
       listing([
-        summary({ id: "home", cwd: "/Users/me", folder: "home", title: "Notes" }),
+        summary({
+          id: "home",
+          cwd: "/Users/me",
+          folder: "home",
+          title: "Notes",
+        }),
         summary({
           id: "gone",
           cwd: "/Users/me/deleted",
@@ -205,89 +213,254 @@ describe("ImportSessionDialog", () => {
         }),
       ]),
     );
-    api.importClaudeSession.mockResolvedValue({
+    api.importAgentSession.mockResolvedValue({
       sessionId: "mono-2",
+      cwd: "~",
       existing: false,
     });
     await render({ onOpen: open });
 
     expect(row("Notes").textContent).toContain("No project");
     await act(async () => row("Notes").click());
-    expect(api.importClaudeSession).toHaveBeenCalledWith("/Users/me", "home", "~");
+    expect(api.importAgentSession).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "home", folder: "home" }),
+    );
     expect(open).toHaveBeenCalledWith("mono-2", "~");
 
-    // A deleted folder still has nothing to resume from.
-    expect(row("Gone").disabled).toBe(true);
-    expect(row("Gone").textContent).toContain("Folder was not found");
+    // A deleted folder can't be resumed, but its transcript still imports.
+    expect(row("Gone").disabled).toBe(false);
+    expect(row("Gone").textContent).toContain("~/deleted");
+    expect(row("Gone").textContent).toContain(
+      "Folder no longer exists · imports without resuming",
+    );
+    api.importAgentSession.mockResolvedValue({
+      sessionId: "gone",
+      cwd: "~",
+      existing: false,
+    });
+    await act(async () => row("Gone").click());
+    expect(open).toHaveBeenLastCalledWith("gone", "~");
+  });
+
+  it("labels a worktree session with its project", async () => {
+    const open = vi.fn();
+    api.listAgentSessions.mockResolvedValue(
+      listing([
+        summary({
+          id: "wt",
+          title: "Worktree work",
+          cwd: "/Users/me/code/monocode/.worktrees/feature",
+          project: "/Users/me/code/monocode",
+          gitBranch: "feature",
+          monocodeSessionId: "m-wt",
+        }),
+      ]),
+    );
+    await render({ onOpen: open });
+    expect(row("Worktree work").textContent).toContain("monocode");
+    expect(row("Worktree work").textContent).not.toContain(".worktrees");
+    await act(async () => row("Worktree work").click());
+    expect(open).toHaveBeenCalledWith("m-wt", "/Users/me/code/monocode");
+  });
+
+  it("keeps the list and says so when a refresh fails", async () => {
+    api.listAgentSessions.mockResolvedValue(
+      listing([summary({ id: "a", title: "Still here" })]),
+    );
+    await render({});
+    api.listAgentSessions.mockRejectedValue(new Error("disk"));
+    await act(async () => button("Refresh").click());
+    await flush();
+    expect(dialogText()).toContain("Couldn’t load terminal sessions");
+    expect(row("Still here")).toBeDefined();
   });
 
   it("opens a session MonoCode already has instead of importing it", async () => {
     const open = vi.fn();
-    api.listClaudeSessions.mockResolvedValue(listing([], 1));
+    api.listAgentSessions.mockResolvedValue(listing([], 1));
     await render({ onOpen: open });
-    expect(dialogText()).toContain("Every recent session is already in MonoCode");
+    expect(dialogText()).toContain(
+      "Every recent session is already in MonoCode",
+    );
 
-    api.listClaudeSessions.mockResolvedValue(
-      listing([summary({ id: "known", title: "Known", monocodeSessionId: "m-9" })]),
+    api.listAgentSessions.mockResolvedValue(
+      listing([
+        summary({ id: "known", title: "Known", monocodeSessionId: "m-9" }),
+      ]),
     );
     await act(async () => button("Show").click());
     await flush();
-    expect(api.listClaudeSessions).toHaveBeenLastCalledWith(
+    expect(api.listAgentSessions).toHaveBeenLastCalledWith(
       expect.objectContaining({ includeImported: true }),
     );
     expect(row("Known").textContent).toContain("Already in MonoCode");
     await act(async () => row("Known").click());
     expect(open).toHaveBeenCalledWith("m-9", "/Users/me/code/monocode");
-    expect(api.importClaudeSession).not.toHaveBeenCalled();
+    expect(api.importAgentSession).not.toHaveBeenCalled();
   });
 
   it("searches after a pause and says when nothing matches", async () => {
-    api.listClaudeSessions.mockResolvedValue(listing([summary({ id: "a" })]));
+    api.listAgentSessions.mockResolvedValue(listing([summary({ id: "a" })]));
     await render({});
 
-    api.listClaudeSessions.mockResolvedValue(listing([]));
+    api.listAgentSessions.mockResolvedValue(listing([]));
     const input = document.querySelector<HTMLInputElement>(
       'input[aria-label="Search conversations"]',
     )!;
     expect(input.placeholder).toBe("Search conversations...");
     act(() => {
-      Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
-        input,
-        "  billing ",
-      );
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )!.set!.call(input, "  billing ");
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
-    expect(api.listClaudeSessions).toHaveBeenCalledTimes(1);
+    expect(api.listAgentSessions).toHaveBeenCalledTimes(1);
     await act(async () => {
       vi.advanceTimersByTime(250);
     });
     await flush();
-    expect(api.listClaudeSessions).toHaveBeenLastCalledWith(
+    expect(api.listAgentSessions).toHaveBeenLastCalledWith(
       expect.objectContaining({ query: "billing" }),
     );
     expect(dialogText()).toContain("No matching sessions");
   });
 
+  it("hides the already-imported count while searching", async () => {
+    api.listAgentSessions.mockResolvedValue(listing([summary({ id: "a" })], 4));
+    await render({});
+    expect(dialogText()).toContain("4 already in MonoCode");
+
+    const input = document.querySelector<HTMLInputElement>(
+      'input[aria-label="Search conversations"]',
+    )!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )!.set!.call(input, "billing");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(250);
+    });
+    await flush();
+    expect(dialogText()).not.toContain("already in MonoCode");
+  });
+
   it("starts on one project and can widen to every folder", async () => {
-    api.listClaudeSessions.mockResolvedValue(listing([summary({ id: "a" })]));
+    api.listAgentSessions.mockResolvedValue(listing([summary({ id: "a" })]));
     await render({ cwd: "/Users/me/code/monocode" });
-    expect(api.listClaudeSessions).toHaveBeenLastCalledWith(
+    expect(api.listAgentSessions).toHaveBeenLastCalledWith(
       expect.objectContaining({ cwd: "/Users/me/code/monocode" }),
     );
-    expect(dialogText()).toContain("In monocode · Show all");
+    expect(button("monocode").getAttribute("aria-pressed")).toBe("true");
 
-    await act(async () => button("Show all").click());
+    await act(async () => button("All folders").click());
     await flush();
-    expect(api.listClaudeSessions).toHaveBeenLastCalledWith(
+    expect(api.listAgentSessions).toHaveBeenLastCalledWith(
       expect.objectContaining({ cwd: undefined }),
     );
+    expect(button("All folders").getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("lists only sessions without a project under Chats", async () => {
+    api.listAgentSessions.mockResolvedValue(listing([summary({ id: "a" })]));
+    await render({ cwd: "/Users/me/code/monocode" });
+
+    api.listAgentSessions.mockResolvedValue(
+      listing([
+        summary({
+          id: "home",
+          cwd: "/Users/me",
+          folder: "home",
+          title: "Notes",
+        }),
+      ]),
+    );
+    await act(async () => button("Chats").click());
+    await flush();
+    const request = api.listAgentSessions.mock.lastCall![0];
+    expect(request).toMatchObject({ cwd: undefined, projectless: true });
+    expect(row("Notes").textContent).toContain("No project");
+
+    api.listAgentSessions.mockResolvedValue(listing([]));
+    await act(async () => button("Refresh").click());
+    await flush();
+    expect(dialogText()).toContain("No sessions without a project");
+
+    await act(async () => button("monocode").click());
+    await flush();
+    expect(api.listAgentSessions.mock.lastCall![0]).toMatchObject({
+      cwd: "/Users/me/code/monocode",
+    });
+    expect(api.listAgentSessions.mock.lastCall![0].projectless).toBeUndefined();
   });
 
   it("shows the empty illustration when there is nothing to import", async () => {
-    api.listClaudeSessions.mockResolvedValue(listing([]));
+    api.listAgentSessions.mockResolvedValue(listing([]));
     await render({});
     expect(dialogText()).toContain(
       "Sessions you start in the terminal will show up here",
     );
+  });
+
+  it("asks the listing for the time filter instead of hiding rows", async () => {
+    api.listAgentSessions.mockResolvedValue({
+      sessions: [summary({ id: "a", title: "Recent" })],
+      importedCount: 0,
+      hasMore: true,
+    });
+    await render({});
+
+    await act(async () => button("Filter sessions").click());
+    const today = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitemcheckbox"]'),
+    ].find((item) => item.textContent?.includes("Today"));
+    expect(today).toBeDefined();
+    await act(async () => today!.click());
+    await flush();
+
+    const midnight = new Date(NOW);
+    midnight.setHours(0, 0, 0, 0);
+    expect(api.listAgentSessions).toHaveBeenLastCalledWith(
+      expect.objectContaining({ since: midnight.getTime(), limit: 15 }),
+    );
+  });
+
+  it("gives only the filter button an expanded state", async () => {
+    api.listAgentSessions.mockResolvedValue(listing([summary({ id: "a" })]));
+    await render({});
+    expect(button("Filter sessions").getAttribute("aria-expanded")).toBe(
+      "false",
+    );
+    expect(button("Refresh").hasAttribute("aria-expanded")).toBe(false);
+  });
+
+  it("shows each session's agent and filters by agent", async () => {
+    api.listAgentSessions.mockResolvedValue(
+      listing([
+        summary({ id: "c", title: "From Claude" }),
+        summary({ id: "p", title: "From Pi", harness: "pi" }),
+      ]),
+    );
+    await render({});
+    // Each row leads with its own agent's icon.
+    const icon = (title: string) => row(title).querySelector("svg")?.outerHTML;
+    expect(icon("From Pi")).toBeDefined();
+    expect(icon("From Pi")).not.toBe(icon("From Claude"));
+    expect(api.listAgentSessions.mock.lastCall![0].harnesses).toBeUndefined();
+
+    await act(async () => button("Filter sessions").click());
+    const claude = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitemcheckbox"]'),
+    ].find((item) => item.textContent?.includes("Claude Code"));
+    expect(claude).toBeDefined();
+    await act(async () => claude!.click());
+    await flush();
+    expect(api.listAgentSessions.mock.lastCall![0].harnesses).toEqual([
+      "pi",
+      "omp",
+    ]);
   });
 });

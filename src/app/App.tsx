@@ -67,9 +67,9 @@ import { WhatsNewDialog } from "./shell/WhatsNewDialog";
 import { ProviderSignInDialog } from "../features/sessions/ui/ProviderSignInDialog";
 import { ImportSessionDialog } from "../features/sessions/ui/ImportSessionDialog";
 import {
-  CLAUDE_SESSION_IMPORT_EVENT,
+  SESSION_IMPORT_EVENT,
   type SessionImportRequest,
-} from "../features/sessions/model/claudeSessionImport";
+} from "../features/sessions/model/agentSessionImport";
 import { TitleBar, type Tab as TitleTab } from "./shell/TitleBar";
 import { MenuBar } from "./shell/MenuBar";
 import { FilePicker } from "../features/files/ui/FilePicker";
@@ -3962,11 +3962,12 @@ export default function App({
   useEffect(() => {
     const onRequest = (event: Event) => {
       const cwd = (event as CustomEvent<SessionImportRequest>).detail?.cwd;
-      setSessionImport({ cwd: typeof cwd === "string" && cwd ? cwd : undefined });
+      setSessionImport({
+        cwd: typeof cwd === "string" && cwd ? cwd : undefined,
+      });
     };
-    window.addEventListener(CLAUDE_SESSION_IMPORT_EVENT, onRequest);
-    return () =>
-      window.removeEventListener(CLAUDE_SESSION_IMPORT_EVENT, onRequest);
+    window.addEventListener(SESSION_IMPORT_EVENT, onRequest);
+    return () => window.removeEventListener(SESSION_IMPORT_EVENT, onRequest);
   }, []);
 
   const onImportedSessionOpen = useCallback(
@@ -4721,6 +4722,11 @@ export default function App({
   const onDeleteHistorySession = useCallback(
     (sessionId: string) => onRemoveHistorySession(sessionId, "delete"),
     [onRemoveHistorySession],
+  );
+
+  const onArchiveChat = useCallback(
+    (sessionId: string) => void onArchiveHistorySession(sessionId, true),
+    [onArchiveHistorySession],
   );
 
   const onDeleteHistorySessions = useCallback(
@@ -10378,6 +10384,9 @@ export default function App({
               onSelectAgent={onSelectLiveAgent}
               chats={projectlessChats}
               onSelectChat={onSelectLiveAgent}
+              onRenameChat={onRenameHistorySession}
+              onArchiveChat={onArchiveChat}
+              onDeleteChat={onDeleteHistorySession}
               onSelectProject={onSelectProject}
               onOpenProject={pickProject}
               onRemoveProject={onRemoveProject}
@@ -10614,6 +10623,7 @@ export default function App({
                   recents={recents}
                   history={projectHistory}
                   sessions={sessions.filter((session) => !session.inboxAsk)}
+                  chats={projectlessChats}
                   focusToken={searchViewFocusToken}
                   besideRail={projectRailOpen || compactProjectRail}
                   compactRail={compactRailActive}

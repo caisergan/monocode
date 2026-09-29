@@ -48,7 +48,11 @@ describe("Modal", () => {
     const root = createRoot(container);
     act(() =>
       root.render(
-        createElement(Modal, { title: "Example", onClose: vi.fn(), children: "Body" }),
+        createElement(Modal, {
+          title: "Example",
+          onClose: vi.fn(),
+          children: "Body",
+        }),
       ),
     );
     expect(document.querySelector("body > [data-dialog-layer]")).not.toBeNull();

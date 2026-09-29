@@ -52,7 +52,7 @@ import {
   SessionsSearchField,
 } from "../../features/sessions/ui/SessionsSearchBar";
 import { useImportableSessionCount } from "../../features/sessions/ui/useImportableSessionCount";
-import { requestClaudeSessionImport } from "../../features/sessions/model/claudeSessionImport";
+import { requestSessionImport } from "../../features/sessions/model/agentSessionImport";
 import { type GitFileDiffKind, type GitHistoryCommit } from "../../platform/tauri/fs";
 import { IS_MAC, MOD } from "../../platform/tauri/platform";
 import { resolveModel } from "../../features/sessions/model/models";
@@ -263,6 +263,9 @@ type Props = {
   /** Chats that belong to no project, listed in the project rail. */
   chats?: ProjectlessChat[];
   onSelectChat?: (sessionId: string) => void;
+  onRenameChat?: (sessionId: string, title: string) => void;
+  onArchiveChat?: (sessionId: string) => void;
+  onDeleteChat?: (sessionId: string) => void;
   onSelectProject?: (path: string) => void;
   onOpenProject?: () => void;
   onRemoveProject?: (path: string, options: { purgeData: boolean }) => void;
@@ -352,6 +355,9 @@ function SidebarComponent({
   onSelectAgent,
   chats,
   onSelectChat,
+  onRenameChat,
+  onArchiveChat,
+  onDeleteChat,
   onSelectProject,
   onOpenProject,
   onRemoveProject,
@@ -1497,11 +1503,13 @@ function SidebarComponent({
           <p className="shrink-0 px-3 pt-2 text-[12px] text-content/50">
             {importable.count}
             {importable.more ? "+" : ""}{" "}
-            {importable.count === 1 && !importable.more ? "session" : "sessions"}{" "}
+            {importable.count === 1 && !importable.more
+              ? "session"
+              : "sessions"}{" "}
             from the terminal ·{" "}
             <button
               type="button"
-              onClick={() => requestClaudeSessionImport(cwd)}
+              onClick={() => requestSessionImport(cwd)}
               className="text-content/70 hover:text-content"
             >
               Import
@@ -1960,6 +1968,9 @@ function SidebarComponent({
           onSelectAgent={onSelectAgent}
           chats={chats}
           onSelectChat={onSelectChat}
+          onRenameChat={onRenameChat}
+          onArchiveChat={onArchiveChat}
+          onDeleteChat={onDeleteChat}
           canGoBack={canGoBack}
           canGoForward={canGoForward}
           onGoBack={onGoBack}
@@ -3371,4 +3382,3 @@ function formatGitLabel(repo?: string, branch?: string): string {
   if (repo && branch) return `${repo}/${branch}`;
   return branch || repo || "";
 }
-

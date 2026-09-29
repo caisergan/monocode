@@ -13,6 +13,7 @@ import type {
   SessionSummary,
 } from "../../sessions/data/sessionStore";
 import type { RankedFile } from "../../files/model/fileIndex";
+import type { ProjectlessChat } from "../../sessions/model/projectlessChats";
 import type { ProjectSearchMatch } from "./search";
 import { transcriptBlockText } from "../../sessions/model/transcriptFind";
 
@@ -318,9 +319,14 @@ export function hitsFromSessionSearch(
   return hits;
 }
 
+/**
+ * Title-searchable conversations: the project's history, the open sessions,
+ * and chats without a project, which belong to no project's history.
+ */
 export function conversationRowsFrom(
   history: SessionSummary[],
   sessions: Session[],
+  chats: readonly ProjectlessChat[] = [],
 ): Array<{
   id: string;
   cwd: string;
@@ -338,6 +344,15 @@ export function conversationRowsFrom(
       updatedAt: number;
     }
   >();
+  for (const chat of chats) {
+    rows.set(chat.id, {
+      id: chat.id,
+      cwd: "~",
+      harness: chat.harness,
+      title: chat.title,
+      updatedAt: chat.updatedAt ?? Date.now(),
+    });
+  }
   for (const row of history) {
     rows.set(row.id, {
       id: row.id,

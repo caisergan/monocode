@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { listClaudeSessions } from "../../../platform/tauri/claudeSessions";
+import { listAgentSessions } from "../../../platform/tauri/agentSessions";
 
 /** Past this the hint just says "20+". */
 const HINT_LIMIT = 20;
@@ -17,7 +17,12 @@ export function useImportableSessionCount(
   cwd: string | undefined,
   refreshKey: unknown,
 ): ImportableSessionCount {
-  const [result, setResult] = useState<ImportableSessionCount>(NONE);
+  // Kept with the folder it counts, so switching projects never shows the
+  // last project's count while the new one loads.
+  const [result, setResult] = useState<{
+    cwd: string;
+    value: ImportableSessionCount;
+  } | null>(null);
   const [focusTick, setFocusTick] = useState(0);
 
   useEffect(() => {
@@ -27,26 +32,23 @@ export function useImportableSessionCount(
   }, []);
 
   useEffect(() => {
-    if (!cwd || cwd === "~") {
-      setResult(NONE);
-      return;
-    }
+    if (!cwd || cwd === "~") return;
     let active = true;
-    void listClaudeSessions({ cwd, limit: HINT_LIMIT })
+    void listAgentSessions({ cwd, limit: HINT_LIMIT })
       .then((listing) => {
         if (!active) return;
         const count = listing.sessions.filter(
           (session) => session.folder === "ok",
         ).length;
-        setResult({ count, more: listing.hasMore });
+        setResult({ cwd, value: { count, more: listing.hasMore } });
       })
       .catch(() => {
-        if (active) setResult(NONE);
+        if (active) setResult({ cwd, value: NONE });
       });
     return () => {
       active = false;
     };
   }, [cwd, refreshKey, focusTick]);
 
-  return result;
+  return result && result.cwd === cwd ? result.value : NONE;
 }

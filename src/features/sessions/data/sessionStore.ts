@@ -230,6 +230,23 @@ function enqueueSessionWrite<T>(
   return run;
 }
 
+const projectlessListeners = new Set<() => void>();
+
+/**
+ * Called after a write that may change the saved chats without a project: a
+ * save of one, or any archive or delete (whose cwd isn't known here).
+ */
+export function onProjectlessSessionsChange(listener: () => void): () => void {
+  projectlessListeners.add(listener);
+  return () => {
+    projectlessListeners.delete(listener);
+  };
+}
+
+function notifyProjectlessChange(): void {
+  for (const listener of projectlessListeners) listener();
+}
+
 export async function upsertSession(
   session: Session,
 ): Promise<SessionSummary | null> {
@@ -256,6 +273,7 @@ export async function upsertSession(
       },
     });
   });
+  if (summary && session.cwd === "~") notifyProjectlessChange();
   return summary ? normalizeSummary(summary) : null;
 }
 
@@ -464,6 +482,7 @@ export async function deleteSession(
     await enqueueSessionWrite(sessionId, () =>
       invoke<void>("session_delete", { sessionId, imagePaths }),
     );
+    notifyProjectlessChange();
     const tombstone = setTimeout(() => deletedSessionIds.delete(sessionId), 60_000);
     if (typeof tombstone === "object") tombstone.unref();
   } catch (error) {
@@ -488,6 +507,7 @@ export async function setSessionArchived(
   await enqueueSessionWrite(sessionId, () =>
     invoke<void>("session_set_archived", { sessionId, archived }),
   );
+  notifyProjectlessChange();
 }
 
 export async function setSessionPinned(

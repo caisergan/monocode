@@ -46,6 +46,15 @@ describe("classifyClaudeUserRecord", () => {
     ).toEqual({ kind: "prompt", text: "/model opus", imageCount: 0 });
   });
 
+  it("keeps a prompt that only quotes a command wrapper", () => {
+    const text = "why does <command-name>/model</command-name> show up here?";
+    expect(classifyClaudeUserRecord(user(text))).toEqual({
+      kind: "prompt",
+      text,
+      imageCount: 0,
+    });
+  });
+
   it("skips meta, command output and tool results", () => {
     expect(classifyClaudeUserRecord(user("x", { isMeta: true })).kind).toBe(
       "skip",
@@ -75,9 +84,17 @@ describe("activeClaudeChain", () => {
   it("follows the latest branch and crosses compaction boundaries", () => {
     const records: Rec[] = [
       { uuid: "a", parentUuid: null, ...user("first") },
-      { uuid: "b", parentUuid: "a", ...assistant([{ type: "text", text: "old" }]) },
+      {
+        uuid: "b",
+        parentUuid: "a",
+        ...assistant([{ type: "text", text: "old" }]),
+      },
       // Rewound: a retry branches from `a`.
-      { uuid: "c", parentUuid: "a", ...assistant([{ type: "text", text: "new" }]) },
+      {
+        uuid: "c",
+        parentUuid: "a",
+        ...assistant([{ type: "text", text: "new" }]),
+      },
       {
         uuid: "d",
         parentUuid: null,
@@ -100,7 +117,11 @@ describe("activeClaudeChain", () => {
     const records: Rec[] = [
       { uuid: "a", parentUuid: null, ...user("first") },
       { uuid: "b", parentUuid: "a", type: "attachment", isSidechain: false },
-      { uuid: "c", parentUuid: "b", ...assistant([{ type: "text", text: "hi" }]) },
+      {
+        uuid: "c",
+        parentUuid: "b",
+        ...assistant([{ type: "text", text: "hi" }]),
+      },
     ];
     const session = claudeTranscriptToSession({
       records,
@@ -128,10 +149,9 @@ describe("claudeTranscriptToSession", () => {
             input: { command: "npm run build" },
           },
         ]),
-        user(
-          [{ type: "tool_result", tool_use_id: "tool-1", content: "ok" }],
-          { timestamp: "2026-09-01T10:00:05.000Z" },
-        ),
+        user([{ type: "tool_result", tool_use_id: "tool-1", content: "ok" }], {
+          timestamp: "2026-09-01T10:00:05.000Z",
+        }),
         assistant([{ type: "text", text: "Build passes now." }], {
           timestamp: "2026-09-01T10:00:09.000Z",
         }),
@@ -177,10 +197,68 @@ describe("claudeTranscriptToSession", () => {
 
   it("falls back to the first prompt for the title", () => {
     const session = claudeTranscriptToSession({
-      records: chain([user("add dark mode"), assistant([{ type: "text", text: "Done." }])]),
+      records: chain([
+        user("add dark mode"),
+        assistant([{ type: "text", text: "Done." }]),
+      ]),
       providerSessionId: "s",
       cwd: "/work/app",
     });
     expect(session.title).toBe("claude · add dark mode");
+  });
+
+  it("settles tool calls the transcript never answered", () => {
+    // Still running in the terminal: the last call has no result yet.
+    const session = claudeTranscriptToSession({
+      records: chain([
+        user("run the tests"),
+        assistant([
+          {
+            type: "tool_use",
+            id: "tool-9",
+            name: "Bash",
+            input: { command: "npm test" },
+          },
+          {
+            type: "tool_use",
+            id: "agent-1",
+            name: "Task",
+            input: { description: "Review", prompt: "Review it" },
+          },
+        ]),
+      ]),
+      providerSessionId: "s",
+      cwd: "/work/app",
+    });
+    const tools = session.blocks.filter((block) => block.tool);
+    expect(tools.map((block) => block.tool?.status)).toEqual([
+      "cancelled",
+      "cancelled",
+    ]);
+  });
+
+  it("uses an old summary record as the title and can skip resuming", () => {
+    const session = claudeTranscriptToSession({
+      records: [
+        { type: "summary", summary: "Invoice export", leafUuid: "x" },
+        ...chain([user("export invoices")]),
+      ],
+      cwd: "~",
+    });
+    expect(session.title).toBe("claude · Invoice export");
+    expect(session.providerSessionId).toBeUndefined();
+  });
+
+  it("records the worktree a conversation ran in", () => {
+    const session = claudeTranscriptToSession({
+      records: chain([user("fix it")]),
+      providerSessionId: "s",
+      cwd: "/work/app",
+      worktreeCwd: "/work/app/.worktrees/fix",
+      branch: "fix",
+    });
+    expect(session.cwd).toBe("/work/app");
+    expect(session.worktreeCwd).toBe("/work/app/.worktrees/fix");
+    expect(session.branch).toBe("fix");
   });
 });

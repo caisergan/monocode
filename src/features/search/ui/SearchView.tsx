@@ -44,11 +44,14 @@ import {
   type OpenFileFn,
 } from "../model/search";
 import { type Session } from "../../sessions/model/session";
+import type { ProjectlessChat } from "../../sessions/model/projectlessChats";
 import {
   cancelSessionSearch,
   searchSessions,
   type SessionSummary,
 } from "../../sessions/data/sessionStore";
+
+const NO_CHATS: readonly ProjectlessChat[] = [];
 
 const SCOPES: { id: SearchScope; label: string }[] = [
   { id: "all", label: "All" },
@@ -63,6 +66,8 @@ type Props = {
   recents: RecentProject[];
   history: SessionSummary[];
   sessions: Session[];
+  /** Chats without a project; no project's history holds them. */
+  chats?: readonly ProjectlessChat[];
   focusToken?: number;
   besideRail?: boolean;
   compactRail?: boolean;
@@ -79,6 +84,7 @@ export function SearchView({
   recents,
   history,
   sessions,
+  chats = NO_CHATS,
   focusToken = 0,
   besideRail = false,
   compactRail = false,
@@ -158,8 +164,8 @@ export function SearchView({
   }, [cwd, open]);
 
   const conversationRows = useMemo(
-    () => conversationRowsFrom(history, sessions),
-    [history, sessions],
+    () => conversationRowsFrom(history, sessions, chats),
+    [history, sessions, chats],
   );
   const fileHits = useMemo(
     () =>
@@ -602,7 +608,7 @@ function rowCopy(
     return {
       icon: <HarnessIcon harness={hit.harness} className="size-3.5" />,
       title: <MatchText text={hit.title} positions={hit.positions} active />,
-      meta: projectName(hit.cwd),
+      meta: hit.cwd === "~" ? "No project" : projectName(hit.cwd),
     };
   }
   if (hit.kind === "message") {
