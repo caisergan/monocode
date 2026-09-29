@@ -1,10 +1,12 @@
 import { claudeTranscriptToSession } from "../../../integrations/harness/providers/claude/claudeImport";
+import { piTranscriptToSession } from "../../../integrations/harness/providers/pi/piImport";
+import type { TranscriptImportInput } from "../../../integrations/harness/core/transcriptImport";
 import {
   readAgentSession,
   type AgentSessionSummary,
   type ImportableHarness,
 } from "../../../platform/tauri/agentSessions";
-import { HARNESS_TITLE } from "./session";
+import { HARNESS_TITLE, type Session } from "./session";
 import {
   listProjectlessSessions,
   listSessionsByProject,
@@ -90,6 +92,15 @@ export async function agentSessionsInMonoCode(
   return bound;
 }
 
+function transcriptToSession(
+  harness: ImportableHarness,
+  input: TranscriptImportInput,
+): Session {
+  return harness === "claude"
+    ? claudeTranscriptToSession(input)
+    : piTranscriptToSession({ ...input, harness });
+}
+
 /**
  * Save an agent's terminal conversation as a MonoCode chat. The chat keeps
  * the agent's session id, so the next message resumes that conversation.
@@ -108,7 +119,7 @@ export async function importAgentSession(
     summary.cwd,
     summary.id,
   );
-  let session = claudeTranscriptToSession({
+  let session = transcriptToSession(summary.harness, {
     records,
     cwd: plan.cwd,
     ...(plan.resumable ? { providerSessionId: summary.id } : {}),

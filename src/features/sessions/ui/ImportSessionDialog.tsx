@@ -72,8 +72,9 @@ function errorText(error: unknown): string {
 }
 
 /**
- * Lists sessions started in a terminal with a coding agent, and imports the
- * chosen one as a MonoCode session that resumes the same conversation. Reads like the sessions list: same search box, filter menu,
+ * Lists sessions started in a terminal with Claude Code, Pi or omp, and
+ * imports the chosen one as a MonoCode session that resumes the same
+ * conversation. Reads like the sessions list: same search box, filter menu,
  * row and empty states.
  */
 export function ImportSessionDialog({

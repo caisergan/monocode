@@ -436,4 +436,31 @@ describe("ImportSessionDialog", () => {
     );
     expect(button("Refresh").hasAttribute("aria-expanded")).toBe(false);
   });
+
+  it("shows each session's agent and filters by agent", async () => {
+    api.listAgentSessions.mockResolvedValue(
+      listing([
+        summary({ id: "c", title: "From Claude" }),
+        summary({ id: "p", title: "From Pi", harness: "pi" }),
+      ]),
+    );
+    await render({});
+    // Each row leads with its own agent's icon.
+    const icon = (title: string) => row(title).querySelector("svg")?.outerHTML;
+    expect(icon("From Pi")).toBeDefined();
+    expect(icon("From Pi")).not.toBe(icon("From Claude"));
+    expect(api.listAgentSessions.mock.lastCall![0].harnesses).toBeUndefined();
+
+    await act(async () => button("Filter sessions").click());
+    const claude = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitemcheckbox"]'),
+    ].find((item) => item.textContent?.includes("Claude Code"));
+    expect(claude).toBeDefined();
+    await act(async () => claude!.click());
+    await flush();
+    expect(api.listAgentSessions.mock.lastCall![0].harnesses).toEqual([
+      "pi",
+      "omp",
+    ]);
+  });
 });

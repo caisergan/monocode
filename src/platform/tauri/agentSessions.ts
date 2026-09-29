@@ -1,14 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 
 /** Agents whose terminal sessions MonoCode can import. */
-export const IMPORTABLE_HARNESSES = ["claude"] as const;
+export const IMPORTABLE_HARNESSES = ["claude", "pi", "omp"] as const;
 
 export type ImportableHarness = (typeof IMPORTABLE_HARNESSES)[number];
 
 /** Whether a session's folder can hold a MonoCode chat. */
 export type AgentSessionFolder = "ok" | "home" | "missing";
 
-/** A session an agent CLI saved on disk. */
+/** A session an agent CLI saved on disk (Claude Code, Pi, omp). */
 export type AgentSessionSummary = {
   harness: ImportableHarness;
   id: string;

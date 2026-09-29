@@ -8,6 +8,7 @@
 //! already resume natively.
 
 mod claude;
+mod pi;
 
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
@@ -46,20 +47,27 @@ const MAX_SUMMARIZED: usize = 500;
 #[serde(rename_all = "lowercase")]
 pub enum Harness {
     Claude,
+    Pi,
+    /// oh-my-pi, a fork of Pi with the same transcript format.
+    Omp,
 }
 
 impl Harness {
-    const ALL: [Harness; 1] = [Harness::Claude];
+    const ALL: [Harness; 3] = [Harness::Claude, Harness::Pi, Harness::Omp];
 
     fn id(self) -> &'static str {
         match self {
             Harness::Claude => "claude",
+            Harness::Pi => "pi",
+            Harness::Omp => "omp",
         }
     }
 
     fn label(self) -> &'static str {
         match self {
             Harness::Claude => "Claude Code",
+            Harness::Pi => "Pi",
+            Harness::Omp => "omp",
         }
     }
 }
@@ -145,6 +153,7 @@ fn sources(only: Option<&[Harness]>) -> Vec<Source> {
         .filter_map(|harness| {
             let root = match harness {
                 Harness::Claude => claude::root(),
+                Harness::Pi | Harness::Omp => pi::root(harness),
             }?;
             // Two agents pointed at one folder would list every file twice.
             seen.insert(root.clone())
@@ -195,6 +204,7 @@ pub fn agent_read_session(
         .ok_or_else(|| format!("{}'s session folder was not found", harness.label()))?;
     let path = match harness {
         Harness::Claude => claude::find(&source.root, &cwd, &session_id),
+        Harness::Pi | Harness::Omp => pi::find(&source.root, &session_id),
     }
     .ok_or_else(missing)?;
     let size = std::fs::metadata(&path)
@@ -208,6 +218,7 @@ pub fn agent_read_session(
     }
     Ok(match harness {
         Harness::Claude => read_records(&path, claude::slim_record)?,
+        Harness::Pi | Harness::Omp => read_records(&path, pi::slim_record)?,
     })
 }
 
@@ -302,6 +313,7 @@ fn candidates(sources: &[Source], cwd: Option<&str>) -> Vec<Candidate> {
         .iter()
         .flat_map(|source| match source.harness {
             Harness::Claude => claude::candidates(&source.root, cwd),
+            Harness::Pi | Harness::Omp => pi::candidates(source.harness, &source.root),
         })
         .collect();
     found.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
@@ -322,6 +334,7 @@ struct TranscriptInfo {
 fn transcript_info(candidate: &Candidate) -> Option<TranscriptInfo> {
     match candidate.harness {
         Harness::Claude => claude::transcript_info(candidate),
+        Harness::Pi | Harness::Omp => pi::transcript_info(candidate),
     }
 }
 
@@ -735,6 +748,15 @@ mod test_support {
                 .collect(),
         )])
     }
+
+    pub(super) fn list(
+        sources: &[Source],
+        request: &AgentSessionQuery,
+        known: &Known,
+        home: Option<&str>,
+    ) -> AgentSessionListing {
+        list_sessions(sources, request, known, home, &|| true)
+    }
 }
 
 #[cfg(test)]
@@ -780,7 +802,7 @@ mod tests {
 
     #[test]
     fn harnesses_serialize_as_monocode_ids() {
-        assert_eq!(serde_json::to_value(Harness::Claude).unwrap(), "claude");
+        assert_eq!(serde_json::to_value(Harness::Omp).unwrap(), "omp");
         assert_eq!(
             serde_json::from_value::<Harness>(Value::from("claude")).unwrap(),
             Harness::Claude

@@ -181,4 +181,39 @@ describe("importAgentSession", () => {
     expect(api.readAgentSession).not.toHaveBeenCalled();
     expect(api.upsertSession).not.toHaveBeenCalled();
   });
+
+  it("imports a Pi session through Pi's converter and resumes it", async () => {
+    api.listSessionsByProject.mockResolvedValue([
+      // A Claude chat with the same id is not this Pi conversation.
+      {
+        id: "m",
+        harness: "claude",
+        providerSessionId: "pi-1",
+      } as SessionSummary,
+    ]);
+    api.readAgentSession.mockResolvedValue([
+      { type: "session", version: 3, id: "pi-1", cwd: "/Users/me/code/app" },
+      {
+        type: "message",
+        id: "u1",
+        parentId: null,
+        message: { role: "user", content: [{ type: "text", text: "tidy up" }] },
+      },
+    ]);
+
+    const result = await importAgentSession(
+      summary({ id: "pi-1", harness: "pi" }),
+    );
+
+    expect(api.readAgentSession).toHaveBeenCalledWith(
+      "pi",
+      "/Users/me/code/app",
+      "pi-1",
+    );
+    const saved = api.upsertSession.mock.calls[0][0] as Session;
+    expect(saved.harness).toBe("pi");
+    expect(saved.providerSessionId).toBe("pi-1");
+    expect(saved.blocks[0]).toMatchObject({ role: "user", text: "tidy up" });
+    expect(result.existing).toBe(false);
+  });
 });
