@@ -95,6 +95,23 @@ describe("activeClaudeChain", () => {
       "e",
     ]);
   });
+
+  it("walks through the link stubs left for attachments", () => {
+    const records: Rec[] = [
+      { uuid: "a", parentUuid: null, ...user("first") },
+      { uuid: "b", parentUuid: "a", type: "attachment", isSidechain: false },
+      { uuid: "c", parentUuid: "b", ...assistant([{ type: "text", text: "hi" }]) },
+    ];
+    const session = claudeTranscriptToSession({
+      records,
+      providerSessionId: "s",
+      cwd: "/w",
+    });
+    expect(session.blocks.map((block) => block.role)).toEqual([
+      "user",
+      "assistant",
+    ]);
+  });
 });
 
 describe("claudeTranscriptToSession", () => {
