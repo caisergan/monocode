@@ -466,6 +466,7 @@ import {
   setWindowFocused,
 } from "../features/notifications/model/notifications";
 import { useInputNotifications } from "../features/notifications/hooks/useInputNotifications";
+import { useProjectlessChats } from "../features/sessions/hooks/useProjectlessChats";
 import { archiveFocusedSession } from "../features/sessions/model/archiveShortcut";
 import {
   adjacentItemId,
@@ -1594,6 +1595,8 @@ export default function App({
   }
   const unseenFinishedIds = unseenFinishedRef.current;
 
+  const projectlessChats = useProjectlessChats(sessions);
+
   const liveAgents = useMemo(
     () =>
       liveAgentsEnabled
@@ -1902,8 +1905,14 @@ export default function App({
         if (!looksLikeProject(cwd)) return;
         setProjectCwd(cwd);
         setRecents((prev) => (prev.length > 0 ? prev : rememberProject(cwd)));
+        // Only blank chats move; one with a conversation ran in the home
+        // folder, and its provider can only resume it there.
         setSessions((prev) =>
-          prev.map((s) => (s.cwd === "~" ? { ...s, cwd } : s)),
+          prev.map((s) =>
+            s.cwd === "~" && !s.blocks.some((block) => block.role === "user")
+              ? { ...s, cwd }
+              : s,
+          ),
         );
       })
       .catch(() => {});
@@ -3963,11 +3972,21 @@ export default function App({
   const onImportedSessionOpen = useCallback(
     (sessionId: string, cwd: string) => {
       setSessionImport(null);
+      if (cwd === "~") {
+        // A chat without a project opens in place, like a row under Chats,
+        // rather than switching to a project.
+        setSearchViewOpen(false);
+        setInboxViewOpen(false);
+        setNotesViewOpen(false);
+        setAutomationsViewOpen(false);
+        void onSelectHistorySession(sessionId);
+        return;
+      }
       void openReminderSession(sessionId)
         .then(() => refreshHistory(cwd))
         .catch(() => undefined);
     },
-    [openReminderSession, refreshHistory],
+    [onSelectHistorySession, openReminderSession, refreshHistory],
   );
 
   const ensureReminderSessionsSaved = useCallback(
@@ -10357,6 +10376,8 @@ export default function App({
               )}
               liveAgents={liveAgents}
               onSelectAgent={onSelectLiveAgent}
+              chats={projectlessChats}
+              onSelectChat={onSelectLiveAgent}
               onSelectProject={onSelectProject}
               onOpenProject={pickProject}
               onRemoveProject={onRemoveProject}

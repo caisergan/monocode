@@ -14,7 +14,11 @@ const api = vi.hoisted(() => ({
     vi.fn<(request: ClaudeSessionQuery) => Promise<ClaudeSessionListing>>(),
   importClaudeSession:
     vi.fn<
-      (cwd: string, id: string) => Promise<{ sessionId: string; existing: boolean }>
+      (
+        cwd: string,
+        id: string,
+        target?: string,
+      ) => Promise<{ sessionId: string; existing: boolean }>
     >(),
 }));
 
@@ -148,8 +152,8 @@ describe("ImportSessionDialog", () => {
     expect(row("Fix the build").textContent).toContain("2h");
     // A folder that is not a project yet shows its path.
     expect(row("restyle the header").textContent).toContain("~/code/site");
-    const home = row("No project folder");
-    expect(home.disabled).toBe(true);
+    // Home-folder sessions become chats that belong to no project.
+    expect(row("No project").disabled).toBe(false);
     expect(dialogText()).toContain("3 already in MonoCode · Show");
   });
 
@@ -171,6 +175,7 @@ describe("ImportSessionDialog", () => {
     expect(api.importClaudeSession).toHaveBeenCalledWith(
       "/Users/me/code/monocode",
       "old",
+      "/Users/me/code/monocode",
     );
     expect(open).toHaveBeenCalledWith("mono-1", "/Users/me/code/monocode");
 
@@ -183,7 +188,37 @@ describe("ImportSessionDialog", () => {
     expect(api.importClaudeSession).toHaveBeenLastCalledWith(
       "/Users/me/code/monocode",
       "live",
+      "/Users/me/code/monocode",
     );
+  });
+
+  it("imports a home-folder session as a chat without a project", async () => {
+    const open = vi.fn();
+    api.listClaudeSessions.mockResolvedValue(
+      listing([
+        summary({ id: "home", cwd: "/Users/me", folder: "home", title: "Notes" }),
+        summary({
+          id: "gone",
+          cwd: "/Users/me/deleted",
+          folder: "missing",
+          title: "Gone",
+        }),
+      ]),
+    );
+    api.importClaudeSession.mockResolvedValue({
+      sessionId: "mono-2",
+      existing: false,
+    });
+    await render({ onOpen: open });
+
+    expect(row("Notes").textContent).toContain("No project");
+    await act(async () => row("Notes").click());
+    expect(api.importClaudeSession).toHaveBeenCalledWith("/Users/me", "home", "~");
+    expect(open).toHaveBeenCalledWith("mono-2", "~");
+
+    // A deleted folder still has nothing to resume from.
+    expect(row("Gone").disabled).toBe(true);
+    expect(row("Gone").textContent).toContain("Folder was not found");
   });
 
   it("opens a session MonoCode already has instead of importing it", async () => {

@@ -68,6 +68,13 @@ import {
 import type { LiveAgent } from "../../features/sessions/model/liveAgents";
 import { LiveAgentsPreview } from "../../features/sessions/ui/LiveAgentsPreview";
 import { requestClaudeSessionImport } from "../../features/sessions/model/claudeSessionImport";
+import {
+  loadChatsHidden,
+  saveChatsHidden,
+  type ProjectlessChat,
+} from "../../features/sessions/model/projectlessChats";
+import { HarnessIcon } from "../../features/sessions/ui/HarnessIcon";
+import { formatRelative } from "../../shared/lib/relativeTime";
 import { ProjectLogoIcon } from "../../features/projects/ui/ProjectLogoIcon";
 import { ProjectMascot } from "../../features/projects/ui/ProjectMascot";
 import { RailAction, RailSearch } from "./RailAction";
@@ -110,6 +117,9 @@ type Props = {
   liveAgents?: LiveAgent[];
   activeSessionId?: string;
   onSelectAgent?: (sessionId: string) => void;
+  /** Chats that belong to no project. */
+  chats?: ProjectlessChat[];
+  onSelectChat?: (sessionId: string) => void;
   settingsOpen?: boolean;
   settingsSection?: SettingsSectionId;
   onOpenSettings?: () => void;
@@ -147,6 +157,8 @@ export function ProjectRail({
   liveAgents = [],
   activeSessionId,
   onSelectAgent,
+  chats = [],
+  onSelectChat,
   settingsOpen = false,
   settingsSection = "general",
   onOpenSettings,
@@ -508,6 +520,21 @@ export function ProjectRail({
               groupLogos={groupLogos}
               groupMascots={groupMascots}
             />
+
+            {chats.length > 0 && onSelectChat ? (
+              <ChatsSection
+                chats={chats}
+                activeSessionId={
+                  searchActive ||
+                  inboxActive ||
+                  notesActive ||
+                  automationsActive
+                    ? undefined
+                    : activeSessionId
+                }
+                onSelect={onSelectChat}
+              />
+            ) : null}
           </div>
           <LiveAgentsPreview
             agents={liveAgents}
@@ -651,17 +678,39 @@ function ProjectSectionHeader({
   onAdd,
   onImport,
   onAddGroup,
+  hidden,
+  onToggleHidden,
 }: {
   label: string;
   onAdd?: () => void;
   onImport?: () => void;
   onAddGroup?: (x: number, y: number) => void;
+  /** The section's rows are hidden; only with `onToggleHidden`. */
+  hidden?: boolean;
+  onToggleHidden?: () => void;
 }) {
+  const toggleLabel = `${hidden ? "Show" : "Hide"} ${label.toLowerCase()}`;
   return (
     <div className="flex items-center gap-1 px-3 pb-1.5 pt-1">
       <span className="min-w-0 flex-1 truncate px-1 text-xs text-content/50">
         {label}
       </span>
+      {onToggleHidden ? (
+        <button
+          type="button"
+          title={toggleLabel}
+          aria-label={toggleLabel}
+          aria-expanded={!hidden}
+          onClick={onToggleHidden}
+          className="grid size-5 shrink-0 place-items-center rounded-md text-content/50 hover:bg-content/8 hover:text-content"
+        >
+          {hidden ? (
+            <ChevronRight className="size-3.5" strokeWidth={1.75} />
+          ) : (
+            <ChevronDown className="size-3.5" strokeWidth={1.75} />
+          )}
+        </button>
+      ) : null}
       {onAddGroup ? (
         <button
           type="button"
@@ -857,6 +906,110 @@ function ProjectGroupSection({
 
 const nameClassName =
   "min-w-0 flex-1 truncate text-sm font-medium leading-tight";
+
+/** Chats shown before "Show more". */
+const CHATS_PREVIEW = 5;
+
+/**
+ * Chats that belong to no project, below Projects. Rows read like project
+ * rows; the header's chevron hides them and the choice is remembered.
+ */
+function ChatsSection({
+  chats,
+  activeSessionId,
+  onSelect,
+}: {
+  chats: ProjectlessChat[];
+  activeSessionId?: string;
+  onSelect: (sessionId: string) => void;
+}) {
+  const [hidden, setHidden] = useState(loadChatsHidden);
+  const [showAll, setShowAll] = useState(false);
+  const now = Date.now();
+  const shown = showAll ? chats : chats.slice(0, CHATS_PREVIEW);
+
+  return (
+    <div className="mb-2 shrink-0">
+      <ProjectSectionHeader
+        label="Chats"
+        hidden={hidden}
+        onToggleHidden={() => {
+          setHidden(!hidden);
+          saveChatsHidden(!hidden);
+        }}
+      />
+      {hidden ? null : (
+        <div className="flex flex-col gap-px px-2" aria-label="Chats">
+          {shown.map((chat) => (
+            <ChatRow
+              key={chat.id}
+              chat={chat}
+              now={now}
+              selected={chat.id === activeSessionId}
+              onSelect={onSelect}
+            />
+          ))}
+          {chats.length > CHATS_PREVIEW ? (
+            <button
+              type="button"
+              onClick={() => setShowAll(!showAll)}
+              className="self-start px-2 py-1 text-[11px] leading-tight text-content/40 hover:text-content/70"
+            >
+              {showAll
+                ? "Show less"
+                : `Show ${chats.length - CHATS_PREVIEW} more`}
+            </button>
+          ) : null}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ChatRow({
+  chat,
+  now,
+  selected,
+  onSelect,
+}: {
+  chat: ProjectlessChat;
+  now: number;
+  selected: boolean;
+  onSelect: (sessionId: string) => void;
+}) {
+  const title = chat.title.trim() || "New chat";
+  const age = chat.updatedAt ? formatRelative(chat.updatedAt, now) : "";
+  return (
+    <button
+      type="button"
+      data-selected={selected || undefined}
+      aria-current={selected ? "true" : undefined}
+      aria-label={chat.busy ? `${title}, working` : title}
+      onClick={() => onSelect(chat.id)}
+      className={`project-reorder-item flex h-8 cursor-default items-center gap-2 rounded-md px-2 text-left ${
+        selected ? "bg-selection-strong text-content" : "opacity-65"
+      }`}
+    >
+      <span className="grid size-4 shrink-0 place-items-center">
+        <HarnessIcon harness={chat.harness} className="size-3.5" />
+      </span>
+      {chat.busy ? (
+        <Shimmer as="span" duration={1.4} className={nameClassName}>
+          {title}
+        </Shimmer>
+      ) : (
+        <span title={title} className={nameClassName}>
+          {title}
+        </span>
+      )}
+      {age ? (
+        <span className="shrink-0 text-[11px] tabular-nums text-content/45">
+          {age}
+        </span>
+      ) : null}
+    </button>
+  );
+}
 
 function ProjectCard({
   item,

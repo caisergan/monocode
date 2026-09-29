@@ -115,6 +115,7 @@ import {
 } from "../../features/sessions/model/sessionFilters";
 import type { HarnessId, LinkedWorkItem } from "../../features/sessions/model/session";
 import type { LiveAgent } from "../../features/sessions/model/liveAgents";
+import type { ProjectlessChat } from "../../features/sessions/model/projectlessChats";
 import type { SessionSummary } from "../../features/sessions/data/sessionStore";
 import type { SettingsSectionId } from "../../features/settings/model/settings";
 import type { InstalledUpdate } from "../model/updateNotice";
@@ -259,6 +260,9 @@ type Props = {
   busyProjectPaths?: Iterable<string>;
   liveAgents?: LiveAgent[];
   onSelectAgent?: (sessionId: string) => void;
+  /** Chats that belong to no project, listed in the project rail. */
+  chats?: ProjectlessChat[];
+  onSelectChat?: (sessionId: string) => void;
   onSelectProject?: (path: string) => void;
   onOpenProject?: () => void;
   onRemoveProject?: (path: string, options: { purgeData: boolean }) => void;
@@ -346,6 +350,8 @@ function SidebarComponent({
   busyProjectPaths,
   liveAgents = [],
   onSelectAgent,
+  chats,
+  onSelectChat,
   onSelectProject,
   onOpenProject,
   onRemoveProject,
@@ -1952,6 +1958,8 @@ function SidebarComponent({
           liveAgents={liveAgents}
           activeSessionId={activeSessionId}
           onSelectAgent={onSelectAgent}
+          chats={chats}
+          onSelectChat={onSelectChat}
           canGoBack={canGoBack}
           canGoForward={canGoForward}
           onGoBack={onGoBack}
