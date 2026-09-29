@@ -886,6 +886,76 @@ describe("claude subagents", () => {
     ]);
   });
 
+  it("keeps heartbeats and retry notices off a subagent's steps", async () => {
+    const { events, turn } = await startTurn("s1");
+    emit({
+      type: "assistant",
+      session_id: "sess_1",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "toolu_agent",
+            name: "Agent",
+            input: { description: "Explore", subagent_type: "explorer" },
+          },
+        ],
+      },
+    });
+    emit({
+      type: "assistant",
+      parent_tool_use_id: "toolu_agent",
+      message: {
+        id: "msg_sub_1",
+        content: [
+          {
+            type: "tool_use",
+            id: "toolu_sub_bash",
+            name: "Bash",
+            input: { command: "git ls-files" },
+          },
+        ],
+      },
+    });
+    // What Claude Code streams while the run takes longer than 30s, and
+    // when the subagent's API request is retried and then recovers.
+    for (const n of [0, 1]) {
+      emit({
+        type: "tool_progress",
+        tool_use_id: `toolu_agent-heartbeat-${n}`,
+        tool_name: "Agent",
+        parent_tool_use_id: "toolu_agent",
+        elapsed_time_seconds: 30 * (n + 1),
+        heartbeat: true,
+      });
+    }
+    emit({
+      type: "tool_progress",
+      tool_use_id: "agent_msg_parent",
+      tool_name: "Agent",
+      parent_tool_use_id: "toolu_agent",
+      elapsed_time_seconds: 0,
+      subagent_type: "explorer",
+      subagent_retry: { agent_id: "a1", attempt: 1, max_retries: 10 },
+    });
+    emit({
+      type: "tool_progress",
+      tool_use_id: "agent_msg_parent",
+      tool_name: "Agent",
+      parent_tool_use_id: "toolu_agent",
+      elapsed_time_seconds: 0,
+      subagent_type: "explorer",
+    });
+    emit({ type: "result", subtype: "success", session_id: "sess_1" });
+    await turn;
+
+    const steps = events
+      .reduce(applyHarnessEvent, newSession("claude", "/repo"))
+      .blocks.find((block) => block.tool?.callId === "toolu_agent")?.agentRun
+      ?.steps;
+    expect(steps?.map((step) => step.id)).toEqual(["toolu_sub_bash"]);
+  });
+
   it("does not mirror a subagent result onto the parent tool row", async () => {
     const { events, turn } = await startTurn("s1");
     emit({

@@ -765,12 +765,18 @@ export type ClaudeToolProgress = {
   subagentType?: string;
 };
 
+// Claude Code pings every 30s while a tool runs, under the id
+// `<tool_use_id>-heartbeat-<n>`. A ping names no new call, so it must not
+// become a step: each one would show up as a stray "Subagent" row.
+const HEARTBEAT_ID = /-heartbeat-\d+$/;
+
 export function parseToolProgress(
   rec: Record<string, unknown>,
 ): ClaudeToolProgress | null {
   if (stringField(rec, "type") !== "tool_progress") return null;
   const toolUseId = stringField(rec, "tool_use_id");
   if (!toolUseId) return null;
+  if (rec.heartbeat === true || HEARTBEAT_ID.test(toolUseId)) return null;
   const parent = stringField(rec, "parent_tool_use_id");
   return {
     toolUseId,
