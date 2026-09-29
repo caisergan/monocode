@@ -73,6 +73,7 @@ export function SwitchBranchDialog({
 
   return createPortal(
     <div
+      data-dialog-layer
       className={host ? "relative" : "fixed inset-0"}
       style={{ zIndex: LAYER.dialog }}
     >

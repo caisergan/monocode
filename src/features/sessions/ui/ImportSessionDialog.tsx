@@ -60,6 +60,17 @@ type FolderIdentity = {
   mascot?: { seed: string; color: string; name: string | null | undefined };
 };
 
+/** Where a home-folder session goes: a chat that belongs to no project. */
+const NO_PROJECT: FolderIdentity = { label: "No project" };
+
+/**
+ * The MonoCode cwd a session is imported to. One started in the home folder
+ * becomes a chat without a project ("~"), which still runs from home.
+ */
+function importTarget(session: ClaudeSessionSummary): string {
+  return session.folder === "home" ? "~" : session.cwd;
+}
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -153,9 +164,10 @@ export function ImportSessionDialog({
   const filtersActive = hasActiveSessionFilters(filters);
 
   const pick = (session: ClaudeSessionSummary) => {
-    if (importing || session.folder !== "ok") return;
+    if (importing || session.folder === "missing") return;
+    const target = importTarget(session);
     if (session.monocodeSessionId) {
-      onOpen(session.monocodeSessionId, session.cwd);
+      onOpen(session.monocodeSessionId, target);
       return;
     }
     if (now - session.updatedAt < RECENT_MS && confirming !== session.id) {
@@ -164,8 +176,8 @@ export function ImportSessionDialog({
     }
     setImporting(session.id);
     setImportError("");
-    void importClaudeSession(session.cwd, session.id)
-      .then((result) => onOpen(result.sessionId, session.cwd))
+    void importClaudeSession(session.cwd, session.id, target)
+      .then((result) => onOpen(result.sessionId, target))
       .catch((reason: unknown) => setImportError(errorText(reason)))
       .finally(() => {
         setImporting(null);
@@ -196,12 +208,16 @@ export function ImportSessionDialog({
       onClose={onClose}
       className="h-[min(72vh,640px)]"
     >
-      <div className="flex min-h-full flex-col">
+      {/*
+        Only the list scrolls. The search bar sits above it rather than
+        sticking inside it, so rows never pass behind the translucent sheet.
+      */}
+      <div className="flex h-full flex-col">
         <div
           // While the box holds a query or the filter menu is open, Escape
           // belongs to them rather than closing the sheet.
           data-dialog-popover={query || filterMenu ? "" : undefined}
-          className="sticky top-0 z-10 mt-2 flex h-9 shrink-0 items-center gap-1 border-y border-stroke bg-background-base/80 px-2 backdrop-blur"
+          className="mt-2 flex h-9 shrink-0 items-center gap-1 border-y border-stroke px-2"
         >
           <SessionsSearchField
             value={query}
@@ -230,91 +246,99 @@ export function ImportSessionDialog({
           </SessionsHeaderButton>
         </div>
 
-        {scope ? (
-          <p className="px-3 pt-2 text-[12px] text-content/50">
-            In {scopeLabel} ·{" "}
-            <button
-              type="button"
-              onClick={() => {
-                setScope(undefined);
-                setPage(0);
-              }}
-              className="text-content/70 hover:text-content"
-            >
-              Show all
-            </button>
-          </p>
-        ) : null}
+        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-none">
+          {scope ? (
+            <p className="px-3 pt-2 text-[12px] text-content/50">
+              In {scopeLabel} ·{" "}
+              <button
+                type="button"
+                onClick={() => {
+                  setScope(undefined);
+                  setPage(0);
+                }}
+                className="text-content/70 hover:text-content"
+              >
+                Show all
+              </button>
+            </p>
+          ) : null}
 
-        {importError ? (
-          <p role="alert" className="px-3 pt-2 text-[12px] text-red-400">
-            {importError}
-          </p>
-        ) : null}
+          {importError ? (
+            <p role="alert" className="px-3 pt-2 text-[12px] text-red-400">
+              {importError}
+            </p>
+          ) : null}
 
-        {/*
+          {/*
           The first load stays blank, like the sessions list: it resolves in
           a moment and a placeholder would only flash.
         */}
-        {!listing ? (
-          loadError ? (
-            <p className="px-3 py-2 text-[12px] text-content/50">
-              Couldn’t load Claude Code sessions
-            </p>
-          ) : null
-        ) : sessions.length === 0 ? (
-          search ? (
-            <p className="px-3 py-2 text-[12px] text-content/50">
-              No matching sessions
-            </p>
-          ) : filtersActive ? (
-            <p className="px-3 py-2 text-[12px] text-content/50">
-              No sessions match these filters
-            </p>
-          ) : hiddenCount > 0 && !includeImported ? (
-            <p className="px-3 py-2 text-[12px] text-content/50">
-              Every recent session is already in MonoCode
-            </p>
+          {!listing ? (
+            loadError ? (
+              <p className="px-3 py-2 text-[12px] text-content/50">
+                Couldn’t load Claude Code sessions
+              </p>
+            ) : null
+          ) : sessions.length === 0 ? (
+            search ? (
+              <p className="px-3 py-2 text-[12px] text-content/50">
+                No matching sessions
+              </p>
+            ) : filtersActive ? (
+              <p className="px-3 py-2 text-[12px] text-content/50">
+                No sessions match these filters
+              </p>
+            ) : hiddenCount > 0 && !includeImported ? (
+              <p className="px-3 py-2 text-[12px] text-content/50">
+                Every recent session is already in MonoCode
+              </p>
+            ) : (
+              <div className="flex-1">
+                <SessionsEmpty message="Sessions you start in the terminal will show up here" />
+              </div>
+            )
           ) : (
-            <div className="flex-1">
-              <SessionsEmpty message="Sessions you start in the terminal will show up here" />
-            </div>
-          )
-        ) : (
-          <ul className="flex flex-col gap-0.5 p-1.5" aria-label="Sessions">
-            {sessions.map((session) => (
-              <ImportSessionRow
-                key={session.id}
-                session={session}
-                folder={scope ? null : identity(session.cwd)}
-                now={now}
-                importing={importing === session.id}
-                confirming={confirming === session.id}
-                disabled={importing != null}
-                onPick={pick}
-              />
-            ))}
-            {canLoadMore ? <li ref={sentinel} className="h-px" /> : null}
-          </ul>
-        )}
+            <ul className="flex flex-col gap-0.5 p-1.5" aria-label="Sessions">
+              {sessions.map((session) => (
+                <ImportSessionRow
+                  key={session.id}
+                  session={session}
+                  folder={
+                  scope
+                    ? null
+                    : session.folder === "home"
+                      ? NO_PROJECT
+                      : identity(session.cwd)
+                }
+                  now={now}
+                  importing={importing === session.id}
+                  confirming={confirming === session.id}
+                  disabled={importing != null}
+                  onPick={pick}
+                />
+              ))}
+              {canLoadMore ? <li ref={sentinel} className="h-px" /> : null}
+            </ul>
+          )}
 
-        {listing && (hiddenCount > 0 || includeImported) ? (
-          <p className="mt-auto px-3 py-2 text-[12px] text-content/50">
-            {includeImported
-              ? "Showing sessions already in MonoCode · "
-              : `${hiddenCount} already in MonoCode · `}
-            <button
-              type="button"
-              onClick={() => {
-                setIncludeImported((value) => !value);
-                setPage(0);
-              }}
-              className="text-content/70 hover:text-content"
-            >
-              {includeImported ? "Hide" : "Show"}
-            </button>
-          </p>
-        ) : null}
+          {listing && (hiddenCount > 0 || includeImported) ? (
+            <p className="mt-auto px-3 py-2 text-[12px] text-content/50">
+              {includeImported
+                ? "Showing sessions already in MonoCode · "
+                : `${hiddenCount} already in MonoCode · `}
+              <button
+                type="button"
+                onClick={() => {
+                  setIncludeImported((value) => !value);
+                  setPage(0);
+                }}
+                className="text-content/70 hover:text-content"
+              >
+                {includeImported ? "Hide" : "Show"}
+              </button>
+            </p>
+          ) : null}
+        </div>
       </div>
 
       {filterMenu ? (
@@ -354,12 +378,11 @@ function ImportSessionRow({
 }) {
   const title = session.title || session.firstPrompt;
   const unavailable =
-    session.folder === "home"
-      ? "No project folder"
-      : session.folder === "missing"
-        ? "Folder was not found"
-        : null;
-  const tooltip = [title, session.lastPrompt !== title ? session.lastPrompt : ""]
+    session.folder === "missing" ? "Folder was not found" : null;
+  const tooltip = [
+    title,
+    session.lastPrompt !== title ? session.lastPrompt : "",
+  ]
     .filter(Boolean)
     .join("\n");
   const note = unavailable
@@ -374,7 +397,6 @@ function ImportSessionRow({
     <li>
       <button
         type="button"
-        title={tooltip}
         disabled={disabled || !!unavailable}
         onClick={() => onPick(session)}
         className={`relative flex w-full cursor-default select-none flex-col rounded-md border border-transparent px-2.5 py-2 text-left outline-none focus-visible:ring-1 focus-visible:ring-accent/50 ${
@@ -418,6 +440,9 @@ function ImportSessionRow({
           </span>
         </span>
         <span
+          // Only the title carries the full prompts: on the whole row, one
+          // shown tooltip made every row it crossed pop its own at once.
+          title={tooltip}
           className={`mt-1 min-w-0 line-clamp-1 text-[13px] font-semibold leading-snug ${
             unavailable ? "" : "text-content"
           }`}

@@ -54,7 +54,13 @@ describe("CRLF editor Git boundaries", () => {
   beforeEach(() => {
     directory = mkdtempSync(join(tmpdir(), "monocode-crlf-git-"));
     gitEnvironment = {
-      ...process.env,
+      // Git hooks export GIT_DIR, GIT_INDEX_FILE and friends. Inherited, they
+      // point every command below at the repository being pushed instead of
+      // this temp folder: `init` marks it bare, `config` rewrites its
+      // identity and `commit` lands test commits on the real branch.
+      ...Object.fromEntries(
+        Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")),
+      ),
       GIT_CONFIG_NOSYSTEM: "1",
       GIT_CONFIG_GLOBAL: join(directory, "empty-config"),
     };

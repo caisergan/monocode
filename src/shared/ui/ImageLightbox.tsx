@@ -37,6 +37,7 @@ export function ImageLightbox({ src, alt, onClose }: Props) {
       role="dialog"
       aria-modal="true"
       aria-label={`Image preview: ${alt}`}
+      data-dialog-layer
       className="fixed inset-0 flex items-center justify-center bg-black/85 p-6 backdrop-blur-sm"
       style={{ zIndex: LAYER.dialog }}
       onMouseDown={(event) => {

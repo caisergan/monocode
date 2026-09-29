@@ -45,7 +45,11 @@ export function RemoveProjectDialog({ name, path, onCancel, onConfirm }: Props) 
   }, [onCancel]);
 
   return createPortal(
-    <div className="fixed inset-0" style={{ zIndex: LAYER.dialog }}>
+    <div
+      data-dialog-layer
+      className="fixed inset-0"
+      style={{ zIndex: LAYER.dialog }}
+    >
       <div className="absolute inset-0 bg-black/30" onMouseDown={onCancel} />
       <div
         role="dialog"

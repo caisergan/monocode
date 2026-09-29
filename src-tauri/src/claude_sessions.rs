@@ -54,6 +54,15 @@ const KEPT_KEYS: &[&str] = &[
     "customTitle",
 ];
 
+/// All that is kept of a record the transcript doesn't show.
+const LINK_KEYS: &[&str] = &[
+    "type",
+    "uuid",
+    "parentUuid",
+    "logicalParentUuid",
+    "isSidechain",
+];
+
 #[derive(Deserialize, Debug, Default)]
 #[serde(rename_all = "camelCase", default)]
 pub struct ClaudeSessionQuery {
@@ -575,7 +584,15 @@ fn slim_record(record: Map<String, Value>) -> Option<Map<String, Value>> {
         _ => false,
     };
     if !keep {
-        return None;
+        // Attachments and hook summaries sit between turns in the `parentUuid`
+        // chain; keep their links or the conversation can't be walked back.
+        record.get("uuid")?;
+        return Some(
+            record
+                .into_iter()
+                .filter(|(key, _)| LINK_KEYS.contains(&key.as_str()))
+                .collect(),
+        );
     }
     let mut slim: Map<String, Value> = record
         .into_iter()
@@ -887,6 +904,7 @@ mod tests {
             &[
                 json!({ "type": "attachment", "attachment": {} }),
                 json!({ "type": "system", "subtype": "turn_duration" }),
+                json!({ "type": "attachment", "uuid": "a", "parentUuid": "p", "attachment": { "big": "x" } }),
                 json!({ "type": "system", "subtype": "compact_boundary", "uuid": "c" }),
                 user(
                     "/w",
@@ -904,9 +922,13 @@ mod tests {
         write!(file, "{{\"type\":\"user\",\"partial").unwrap();
 
         let records = read_session(&root.join("s.jsonl")).unwrap();
-        assert_eq!(records.len(), 2);
-        assert_eq!(records[0]["subtype"], "compact_boundary");
-        let record = &records[1];
+        assert_eq!(records.len(), 3);
+        assert_eq!(
+            records[0],
+            json!({ "type": "attachment", "uuid": "a", "parentUuid": "p" })
+        );
+        assert_eq!(records[1]["subtype"], "compact_boundary");
+        let record = &records[2];
         assert!(record.get("toolUseResult").is_none());
         let content = record["message"]["content"].as_array().unwrap();
         assert!(content[0].get("source").is_none());

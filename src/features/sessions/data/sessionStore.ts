@@ -108,12 +108,13 @@ type SessionUpsertPayload = {
   automationId?: string;
 };
 
-/** Only real chats belong in project history — blank tabs stay ephemeral. */
+/**
+ * Only real chats are saved — blank tabs stay ephemeral. Chats without a
+ * project (`cwd` "~") are saved too; the rail lists them under Chats.
+ */
 export function shouldPersistSession(session: Session): boolean {
   return (
-    !session.inboxAsk &&
-    session.cwd !== "~" &&
-    session.blocks.some((block) => block.role === "user")
+    !session.inboxAsk && session.blocks.some((block) => block.role === "user")
   );
 }
 
@@ -288,6 +289,14 @@ export async function listSessionsByProject(
   if (!cwd || cwd === "~") return [];
   const rows = await invoke<SessionSummary[]>("session_list_by_project", {
     cwd: normalizeProjectPath(cwd),
+  });
+  return rows.map(normalizeSummary);
+}
+
+/** Saved chats that belong to no project, newest first. */
+export async function listProjectlessSessions(): Promise<SessionSummary[]> {
+  const rows = await invoke<SessionSummary[]>("session_list_by_project", {
+    cwd: "~",
   });
   return rows.map(normalizeSummary);
 }
