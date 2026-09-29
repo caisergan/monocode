@@ -46,8 +46,20 @@ describe("mergeProjectlessChats", () => {
       [open("b", { busy: true })],
     );
     expect(chats).toEqual([
-      { id: "a", title: "Saved a", harness: "claude", updatedAt: 200, busy: false },
-      { id: "b", title: "Open b", harness: "claude", updatedAt: 100, busy: true },
+      {
+        id: "a",
+        title: "Saved a",
+        harness: "claude",
+        updatedAt: 200,
+        busy: false,
+      },
+      {
+        id: "b",
+        title: "Open b",
+        harness: "claude",
+        updatedAt: 100,
+        busy: true,
+      },
     ]);
   });
 
@@ -59,7 +71,10 @@ describe("mergeProjectlessChats", () => {
 
   it("leaves out archived and draft rows, blank tabs, project chats and Ask", () => {
     const chats = mergeProjectlessChats(
-      [saved("archived", 3, { archived: true }), saved("draft", 2, { draft: true })],
+      [
+        saved("archived", 3, { archived: true }),
+        saved("draft", 2, { draft: true }),
+      ],
       [
         open("blank", { blocks: [] }),
         open("project", { cwd: "/work/site" }),
