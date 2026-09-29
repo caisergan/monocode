@@ -6,6 +6,7 @@ import {
   useState,
   type MouseEvent as ReactMouseEvent,
 } from "react";
+import { LAYER } from "../../../shared/lib/layers";
 import { Modal } from "../../../shared/ui/Modal";
 import { GitBranch, ListFilter, RefreshCw } from "../../../shared/ui/icons";
 import { prettyCwd, projectKey, projectName } from "../../../shared/lib/paths";
@@ -427,6 +428,7 @@ export function ImportSessionDialog({
           onClose={() => setFilterMenu(null)}
           archivedOption={false}
           statusOptions={false}
+          layer={LAYER.dialogPopover}
         />
       ) : null}
     </Modal>
