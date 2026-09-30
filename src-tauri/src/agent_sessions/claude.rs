@@ -340,7 +340,7 @@ mod tests {
     use super::super::test_support::{known_for, set_mtime, temp_root};
     use super::super::{
         list_sessions, main_checkout, read_records, AgentSessionListing, AgentSessionQuery, Known,
-        SessionFolder, Source, SUMMARY_HEAD_BYTES, SUMMARY_TAIL_BYTES,
+        SessionFolder, Source, MAX_SUMMARIZED, SUMMARY_HEAD_BYTES, SUMMARY_TAIL_BYTES,
     };
     use super::*;
     use crate::session_store::KnownSession;
@@ -520,6 +520,60 @@ mod tests {
         assert_eq!(search("9F3C2A"), 1);
         assert_eq!(search("  "), 1);
         assert_eq!(search("payroll"), 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn only_id_like_queries_match_the_session_id() {
+        let root = temp_root("id-words");
+        let dir = root.join(encode_project_dir("/work/app"));
+        write_session(
+            &dir,
+            "bedface1-0000",
+            &[user("/work/app", json!("fix the build"))],
+        );
+        let search = |query: &str| {
+            let request = AgentSessionQuery {
+                query: Some(query.into()),
+                ..Default::default()
+            };
+            list(&root, &request, &Known::new()).sessions.len()
+        };
+        assert_eq!(search("bed"), 0);
+        assert_eq!(search("bedface"), 1);
+        assert_eq!(search("face1-0"), 1);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn an_id_search_reaches_past_the_newest_transcripts() {
+        let root = temp_root("id-old");
+        let dir = root.join(encode_project_dir("/work/app"));
+        for n in 0..MAX_SUMMARIZED {
+            let id = format!("{n:08}-newer");
+            write_session(&dir, &id, &[user("/work/app", json!("newer work"))]);
+            touch(&dir, &id, 10_000 + n as u64);
+        }
+        write_session(
+            &dir,
+            "5eed0001-old",
+            &[user("/work/app", json!("oldest ask"))],
+        );
+        touch(&dir, "5eed0001-old", 1);
+        let search = |query: &str| {
+            let request = AgentSessionQuery {
+                query: Some(query.into()),
+                ..Default::default()
+            };
+            list(&root, &request, &Known::new())
+                .sessions
+                .into_iter()
+                .map(|session| session.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(search("5eed0001"), ["5eed0001-old"]);
+        // Prompts still need a read, so older transcripts stay out of reach.
+        assert!(search("oldest").is_empty());
         let _ = std::fs::remove_dir_all(&root);
     }
 

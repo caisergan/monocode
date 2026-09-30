@@ -125,6 +125,9 @@ export function ImportSessionDialog({
     // matching rows; filtering here instead kept loading hidden pages.
     const since = timeFilterStart(filters.time, Date.now());
     const hidden = new Set<string>(hiddenHarnessesKey.split(","));
+    // A search is looking for one conversation, so it also finds the ones
+    // MonoCode already has; picking one opens it rather than importing again.
+    const withImported = includeImported || !!search;
     void listAgentSessions({
       ...(hiddenHarnessesKey
         ? {
@@ -137,13 +140,13 @@ export function ImportSessionDialog({
       ...(chatsOnly ? { projectless: true } : {}),
       query: search || undefined,
       limit: PAGE_LIMITS[page],
-      includeImported,
+      includeImported: withImported,
       owner,
       ...(since > 0 ? { since } : {}),
     })
       .then((next) => {
         if (!active) return;
-        if (!includeImported) setHiddenCount(next.importedCount);
+        if (!withImported) setHiddenCount(next.importedCount);
         setListing(next);
         setLoadError(false);
       })

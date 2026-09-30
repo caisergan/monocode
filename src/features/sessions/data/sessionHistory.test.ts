@@ -315,6 +315,25 @@ describe("filterSessionsByQuery", () => {
       "a2",
     ]);
   });
+  it("matches the MonoCode and agent session ids", () => {
+    const rows = [
+      {
+        ...summary("89834b50-2930-4fe1", "/tmp/project-a"),
+        title: "claude · News scoring",
+        providerSessionId: "57edb681-4b4d-420e-8e69-9b2491d4fa38",
+      },
+      {
+        ...summary("0c1d2e3f-4a5b-6c7d", "/tmp/project-a"),
+        title: "claude · Added tests",
+      },
+    ];
+    const ids = (query: string) =>
+      filterSessionsByQuery(rows, query).map((row) => row.title);
+    expect(ids("9B2491D4FA38")).toEqual(["claude · News scoring"]);
+    expect(ids("89834b50")).toEqual(["claude · News scoring"]);
+    // Too short to be an id: an ordinary word, matched against titles only.
+    expect(ids("add")).toEqual(["claude · Added tests"]);
+  });
 });
 
 describe("replaceProjectHistory", () => {

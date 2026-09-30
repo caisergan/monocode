@@ -38,8 +38,12 @@ const SUMMARY_TAIL_BYTES: u64 = 256 * 1024;
 const MAX_SUMMARY_TAIL_BYTES: u64 = 4 * 1024 * 1024;
 const DEFAULT_LIST_LIMIT: usize = 15;
 const MAX_LIST_LIMIT: usize = 200;
-/// Newest transcripts summarized per listing; a search looks no further back.
+/// Newest transcripts summarized per listing; a search looks no further back,
+/// except for a session id, which the file name gives without a read.
 const MAX_SUMMARIZED: usize = 500;
+/// A query this long made only of hex digits and dashes can be part of a
+/// session id. Shorter ones ("add", "bed") are too often ordinary words.
+const MIN_ID_QUERY_LEN: usize = 6;
 
 /// Agents whose terminal sessions can be imported. Serialized as MonoCode's
 /// harness id.
@@ -420,6 +424,7 @@ fn list_sessions(
         .map(str::trim)
         .filter(|query| !query.is_empty())
         .map(str::to_lowercase);
+    let id_query = query.as_deref().filter(|query| is_id_fragment(query));
     let projectless = request.projectless && cwd.is_none();
     let candidates = candidates(sources, cwd);
     let bound_to = |candidate: &Candidate| {
@@ -456,8 +461,13 @@ fn list_sessions(
         if full {
             continue;
         }
-        if summarized == MAX_SUMMARIZED || !is_current() {
+        if !is_current() {
             full = true;
+            continue;
+        }
+        if summarized >= MAX_SUMMARIZED
+            && !id_query.is_some_and(|id| candidate.id.to_lowercase().contains(id))
+        {
             continue;
         }
         summarized += 1;
@@ -506,10 +516,14 @@ fn matches_query(summary: &AgentSessionSummary, query: &str) -> bool {
         &summary.first_prompt,
         &summary.last_prompt,
         folder,
-        &summary.id,
     ]
     .iter()
     .any(|text| text.to_lowercase().contains(query))
+        || (is_id_fragment(query) && summary.id.to_lowercase().contains(query))
+}
+
+fn is_id_fragment(query: &str) -> bool {
+    query.len() >= MIN_ID_QUERY_LEN && query.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
 }
 
 fn folder_state(cwd: &str, home: Option<&str>) -> SessionFolder {
