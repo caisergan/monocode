@@ -506,6 +506,7 @@ fn matches_query(summary: &AgentSessionSummary, query: &str) -> bool {
         &summary.first_prompt,
         &summary.last_prompt,
         folder,
+        &summary.id,
     ]
     .iter()
     .any(|text| text.to_lowercase().contains(query))

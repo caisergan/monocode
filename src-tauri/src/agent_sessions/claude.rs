@@ -494,12 +494,12 @@ mod tests {
     }
 
     #[test]
-    fn search_matches_title_prompts_and_folder_name() {
+    fn search_matches_title_prompts_folder_name_and_id() {
         let root = temp_root("search");
         let dir = root.join(encode_project_dir("/work/billing"));
         write_session(
             &dir,
-            "s",
+            "9f3c2a71-beef",
             &[
                 user("/work/billing", json!("first ask")),
                 user("/work/billing", json!("Then Add Tests")),
@@ -517,6 +517,7 @@ mod tests {
         assert_eq!(search("first"), 1);
         assert_eq!(search("add tests"), 1);
         assert_eq!(search("billing"), 1);
+        assert_eq!(search("9F3C2A"), 1);
         assert_eq!(search("  "), 1);
         assert_eq!(search("payroll"), 0);
         let _ = std::fs::remove_dir_all(&root);
