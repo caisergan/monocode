@@ -46,7 +46,7 @@ export type AgentSessionQuery = {
    * omitted.
    */
   cwd?: string;
-  /** Case-insensitive match on the title, prompts and folder name. */
+  /** Case-insensitive match on the title, prompts, folder name and session id. */
   query?: string;
   limit?: number;
   /** Also list conversations MonoCode already has. */

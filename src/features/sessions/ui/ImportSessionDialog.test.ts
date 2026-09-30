@@ -299,6 +299,20 @@ describe("ImportSessionDialog", () => {
     expect(api.importAgentSession).not.toHaveBeenCalled();
   });
 
+  it("shows each session's id, short on the row and whole on hover", async () => {
+    const id = "9f3c2a71-5b0e-4c1d-8a2f-0d6e7b9c1a34";
+    api.listAgentSessions.mockResolvedValue(
+      listing([summary({ id, title: "Fix the build" })]),
+    );
+    await render({});
+
+    expect(row("Fix the build").textContent).toContain("9f3c2a71");
+    expect(row("Fix the build").textContent).not.toContain("5b0e");
+    expect(
+      row("Fix the build").querySelector(`[title="${id}"]`),
+    ).not.toBeNull();
+  });
+
   it("searches after a pause and says when nothing matches", async () => {
     api.listAgentSessions.mockResolvedValue(listing([summary({ id: "a" })]));
     await render({});

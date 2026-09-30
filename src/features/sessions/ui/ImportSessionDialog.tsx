@@ -533,20 +533,32 @@ function ImportSessionRow({
         >
           {title}
         </span>
-        {note ? (
+        <span className="mt-1 flex min-w-0 items-center gap-2 text-[11px] text-content/45">
+          {note ? (
+            <span
+              className={`min-w-0 flex-1 truncate ${
+                confirming ? "text-amber-400" : ""
+              }`}
+            >
+              {note}
+            </span>
+          ) : (
+            <span className="flex min-w-0 flex-1 items-center gap-1">
+              {session.gitBranch ? (
+                <>
+                  <GitBranch className="size-3 shrink-0" strokeWidth={1.75} />
+                  <span className="min-w-0 truncate">{session.gitBranch}</span>
+                </>
+              ) : null}
+            </span>
+          )}
           <span
-            className={`mt-1 min-w-0 truncate text-[11px] ${
-              confirming ? "text-amber-400" : "text-content/45"
-            }`}
+            title={session.id}
+            className="shrink-0 font-mono text-[10.5px] tabular-nums text-content/35"
           >
-            {note}
+            {session.id.slice(0, 8)}
           </span>
-        ) : session.gitBranch ? (
-          <span className="mt-1 flex min-w-0 items-center gap-1 text-[11px] text-content/45">
-            <GitBranch className="size-3 shrink-0" strokeWidth={1.75} />
-            <span className="min-w-0 truncate">{session.gitBranch}</span>
-          </span>
-        ) : null}
+        </span>
       </button>
     </li>
   );
