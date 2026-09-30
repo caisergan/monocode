@@ -1,7 +1,7 @@
 # Terminal sessions: run a session in the agent's own CLI
 
 Branch `feat/terminal-profiles`, worktree `.worktrees/terminal-profiles`.
-Written 2026-09-30. Nothing is implemented yet.
+Written 2026-09-30. Steps 1 to 9 are implemented (see "As built" at the end). Not yet exercised by hand in the running app.
 
 ## Goal
 
@@ -27,12 +27,11 @@ between the two surfaces.
 
 ## What exists today
 
-Paths and line numbers are from `main` at `6ffc995`, unless marked **[import]**, which means
-`fix/import-filter-menu-layer` at `5b31eed`.
+Paths and line numbers are from this branch after merging `dev` at `74ee7e3`.
 
 **Terminals**
 - `src-tauri/src/pty.rs`: `pty_spawn(id, cwd, cols, rows)` always runs `default_shell()` (`:472`). It
-  cannot run a given command. A second spawn with the same id kills the first (`:139`).
+  cannot run a given command. A second spawn with the same id kills the first (`:138`).
 - `src/platform/tauri/pty.ts`: `spawnPty`, `writePty`, `resizePty`, `getPtyStatus`, `killPty`. Output that
   arrives while no view is subscribed is buffered for replay, up to 256 KB (`:24`).
 - `src/features/terminal/ui/TerminalView.tsx`: props are `{ id, cwd, active, onMetaChange }`. It spawns on
@@ -44,8 +43,8 @@ Paths and line numbers are from `main` at `6ffc995`, unless marked **[import]**,
 - `Session` (`src/features/sessions/model/session.ts:391`) has `harness`, `model`, `modelSettings`,
   `runtimeMode`, `providerSessionId`, `providerAccountId`, `cwd`, `worktreeCwd`, `blocks`.
 - A workspace leaf renders `SessionPane` (`src/features/workspace/ui/PaneTree.tsx:459`).
-- Persistence is `session_upsert` / `SessionUpsert` (`src-tauri/src/session_store.rs:98`). New columns are
-  added with `ensure_session_column` (`:616`).
+- Persistence is `session_upsert` / `SessionUpsert` (`src-tauri/src/session_store.rs:108`). New columns are
+  added with `ensure_session_column` (`:626`).
 
 **Chat launch, which the terminal launch must mirror**
 - Claude: args come from `claudeProtocol.ts:251-288`. A new conversation passes `--session-id <uuid>`; a
@@ -55,10 +54,10 @@ Paths and line numbers are from `main` at `6ffc995`, unless marked **[import]**,
 - Accounts: `apply_provider_account` (`src-tauri/src/harness.rs:665`) sets `CLAUDE_CONFIG_DIR` or
   `CODEX_HOME`.
 - Binaries: `resolve_claude()` (`harness.rs:1780`), `resolve_codex()` (`:1719`),
-  `resolve_configured_harness_binary` (`:1667`), and `gui_search_path()` (`:2051`) for a GUI-safe `PATH`.
+  `resolve_configured_harness_binary` (`:1667`), and `gui_search_path()` (`:2335`) for a GUI-safe `PATH`.
 - Stopping a chat child: `stopHarnessSession` (`src/integrations/harness/core/registry.ts:340`).
 
-**Reading CLI transcripts [import]**: not on `main` yet
+**Reading CLI transcripts** (the session-import work; on `dev`, not on `main` yet)
 - `src-tauri/src/agent_sessions/{mod,claude,pi}.rs`: `agent_list_sessions`, `agent_read_session`. Claude
   transcripts are found under `~/.claude/projects/<encoded cwd>/<id>.jsonl`.
 - `src/integrations/harness/core/transcriptImport.ts`: `TranscriptReplay` replays transcript records through
@@ -79,12 +78,11 @@ Paths and line numbers are from `main` at `6ffc995`, unless marked **[import]**,
 
 ## Base branch
 
-Decision 1 needs the transcript reader, which only exists on `fix/import-filter-menu-layer`. That branch
-sits directly on current `main`; this branch is 61 commits behind `main` with no commits of its own.
+This branch builds on `dev`, which was merged in on 2026-09-30 (`0b561b8`). `dev` holds everything on
+`main` plus the session-import work, so the transcript reader decision 1 needs is already here.
 
-**Plan: reset this branch onto `fix/import-filter-menu-layer` and stack on it.** If the import work lands on
-`main` first, rebase onto `main` instead. Steps 1 to 5 do not touch import code, so they could be split
-into their own PR against `main` if the import branch is slow to merge.
+The PR for this work targets `dev`. Steps 1 to 5 do not touch import code, so they could be split into
+their own PR against `main` if that is ever needed.
 
 ## Design
 
@@ -221,7 +219,7 @@ A provider conversation must never have the chat child and the terminal CLI writ
 - **Starting one**: an "Open in terminal" action on the empty session, shown only when the chosen provider
   is Claude or Codex. It creates the session and spawns the CLI with no first prompt.
 - **Switching**: "Open in Terminal" / "Open as Chat" in the session menu and the command palette, plus an
-  entry in the keybinding table (`src/features/settings/model/settings.ts:944`).
+  entry in the keybinding table (`src/features/settings/model/settings.ts:992`).
 - **Marking**: a terminal glyph before the title on the tab and the sidebar row, as in the Paseo screenshot.
 - **Unavailable in the terminal surface**: composer, message queue, handoff, second opinion, plan build,
   and checkpoint revert. Edits made by the CLI are not captured in MonoCode checkpoints, so the per-session
@@ -231,8 +229,8 @@ A provider conversation must never have the chat child and the terminal CLI writ
 
 Each step builds and passes tests on its own.
 
-0. **Base.** Reset the branch onto `fix/import-filter-menu-layer`. Run `npm ci` (this worktree has no
-   `node_modules`, and the pre-push hook needs it).
+0. **Base.** Done: `dev` is merged in and `npm ci` has been run in this worktree (the pre-push hook needs
+   `node_modules`).
 1. **PTY launch.** `PtyLaunch` in `pty.rs` for unix and windows; `spawnPty(…, launch?)` in `pty.ts`.
    Rust tests: unknown harness rejected, account env applied, `None` unchanged.
 2. **Launch builders.** `terminalLaunch.ts` with tests in the style of `claudeProtocol.test.ts`: new vs
@@ -286,3 +284,78 @@ Steps 1 to 5 give a usable terminal session without history. Steps 6 and 7 deliv
   to another MonoCode session removes most of what is left.
 - **Two writers.** Nothing stops a user from resuming the same conversation in an outside terminal while
   MonoCode has it open. That is already true for chat sessions and is not addressed here.
+
+## As built
+
+Everything in Steps 1 to 9 is in the working tree. Where the code differs from the design above, or settles a
+question the design left open:
+
+**The two Codex checks from Design 2**
+- `codex resume` accepts `-m`, `-s`, `-a` and `-C`. The thread id `thread/start` returns is the id in the
+  rollout file's name, so a chat session's `providerSessionId` resumes in the terminal.
+- `codex -a` accepts only `on-request` and `never` (0.157.1), so the chat path's `untrusted` cannot be passed.
+  Supervised is `-a on-request -s read-only`, auto-accept-edits is `-s workspace-write`, auto is
+  `--approve-for-me`, full access is `-s danger-full-access`. Effort is `-c model_reasoning_effort="…"`.
+
+**Data model.** `TerminalSync` gained `prefixBlocks` (how many leading blocks are frozen), `syncedSize`,
+`startedAt` (when the CLI started, for finding a new Codex conversation) and `error` (why sync stopped, shown
+in the pane). A session with no user block yet is saved once it is terminal-surface and bound to a
+conversation, so a restart can resume it; `isBlankSession` is false for terminal sessions.
+
+**PTY lifetime.** `pty.ts` holds the event bridge for a session's PTY (`holdPty`) and remembers its exit
+code, so output is buffered and an exit is not lost while no view is mounted. `TerminalView` takes
+`persistent`, `launch` and `onExit`; on remount it attaches, replays, and shrinks-then-restores the size so
+the TUI redraws. Closing asks through `confirmCloseSessionTerminals`, not `confirmCloseTerminal`: an agent is
+the PTY's own process, so the shell's "foreground job" check never sees it. Confirmations are remembered for
+five seconds so composed close flows do not ask twice. The kill points are the idle-detach effect (tab
+closed), `stopSessionForRemoval` (archive and delete), the switch to chat, and window reap.
+
+**Sync.**
+- Block ids are positional after the cursor (`<afterRecord>:<n>`), not derived from record ids.
+- The Claude cursor is a record `uuid`. The Codex cursor is `<record index>:<timestamp>`, checked against the
+  record at that index. A Codex rollout is appended to on resume, and the reader drops the same records every
+  time, so an index is stable.
+- The Codex replay reads prompts and answers from `event_msg` records (and app-server `item_completed`
+  items), and tools from `exec_command_end`, `patch_apply_end`, `mcp_tool_call_end`, `web_search_end` and the
+  model's own `function_call` / `custom_tool_call` records. It builds app-server items and reuses
+  `mapCodexNotification`, so a replayed command looks like a live one. A `thread_rolled_back` that reaches
+  before the cursor makes the slice a full replay.
+- A check every 5 seconds compares the transcript size for every loaded terminal session; it is not gated on
+  the PTY being alive, because a size check is cheap. A session is also synced when loaded, when its CLI
+  exits, when it moves to chat, and when its tab closes.
+- A new Codex conversation is found through `agent_list_sessions` (newest in the session's folder, saved since
+  `startedAt`, not owned by another MonoCode session). That command, and `agent_read_session`, take a
+  `providerAccountId`, so named accounts are read from their own config folder.
+- `agent_session_stat` is used at launch too: a Claude conversation is resumed only if its transcript exists,
+  and started with `--session-id` otherwise. Resuming an unsaved id and re-creating a saved one both fail.
+
+**UI.** `SessionPane` is a thin switch between `ChatSessionPane` and `SessionTerminalPane`. Entry points:
+empty session, sidebar session menu, command palette, and `Cmd/Ctrl+Shift+T` ("Session: Toggle Terminal").
+A terminal glyph marks the sidebar row and the tab. A chat submit to a terminal session is refused, so the
+chat child and the CLI never write to one conversation together.
+
+**Not verified.**
+- None of the "By hand" checks above have been run in the app; the PTY, xterm, focus and redraw behaviour is
+  only covered by unit tests of the pieces around it.
+- The Windows spawn path is written but was not compiled here (no Windows target installed).
+- Codex resume is assumed to append to the same rollout file, not fork one. If it forks, sync would stop
+  seeing new records; Step 7's discovery would need to follow the new file. Supporting evidence on the
+  author's machine: 34 of 4,994 rollouts hold more than one `session_meta`, and 20 span several days.
+- Claude resume is assumed to keep the session id and link new records to the old leaf. Supporting evidence:
+  all 272 local transcripts have one chain root and a `sessionId` equal to the file name.
+- `cargo clippy -- -D warnings` fails on `control.rs:368` (`nonminimal_bool`), which this work did not touch.
+
+**Known gaps**
+- Quitting the app kills running agents without asking, unlike closing a tab. The quit dialog counts busy chats
+  only, and its wording ("chats… will resume") does not fit an agent in a terminal, so it needs a wording
+  decision before it is extended.
+- When a cursor is no longer in the transcript (the user rewound in the CLI, or the file was deleted) the whole
+  history is replaced by the transcript, frozen prefix included. Checkpoint and plan blocks in the prefix are
+  lost in that case.
+- Each sync reads and saves the whole transcript. A session whose sync is slow is checked less often (four
+  times as long as the last sync took), but a very large transcript is still not incremental.
+
+**Tests beyond the units above.** `useSessionSurface`, `useTerminalSync` and `TerminalView` each have
+component-level tests (mutation-checked: removing the chat stop, the terminal-surface guard, or the
+no-kill-on-unmount guard makes one fail). Nothing drives a real PTY or a real agent.
+

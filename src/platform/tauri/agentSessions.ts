@@ -1,14 +1,14 @@
 import { invoke } from "@tauri-apps/api/core";
 
 /** Agents whose terminal sessions MonoCode can import. */
-export const IMPORTABLE_HARNESSES = ["claude", "pi", "omp"] as const;
+export const IMPORTABLE_HARNESSES = ["claude", "codex", "pi", "omp"] as const;
 
 export type ImportableHarness = (typeof IMPORTABLE_HARNESSES)[number];
 
 /** Whether a session's folder can hold a MonoCode chat. */
 export type AgentSessionFolder = "ok" | "home" | "missing";
 
-/** A session an agent CLI saved on disk (Claude Code, Pi, omp). */
+/** A session an agent CLI saved on disk (Claude Code, Codex, Pi, omp). */
 export type AgentSessionSummary = {
   harness: ImportableHarness;
   id: string;
@@ -56,6 +56,11 @@ export type AgentSessionQuery = {
   /** Only sessions changed at or after this time (ms since the epoch). */
   since?: number;
   /**
+   * List under a named MonoCode account's own config folder. Needs a single
+   * harness (Claude or Codex) in `harnesses`.
+   */
+  providerAccountId?: string;
+  /**
    * Only sessions that import as a chat without a project: started in the
    * home folder, or in one that no longer exists. Ignored with `cwd`.
    */
@@ -69,15 +74,41 @@ export function listAgentSessions(
   return invoke<AgentSessionListing>("agent_list_sessions", { request });
 }
 
-/** Transcript records with heavy payloads (images, raw tool output) removed. */
+/**
+ * Transcript records with heavy payloads (images, raw tool output) removed.
+ * `providerAccountId` reads from a named account's own config directory
+ * instead of the default one.
+ */
 export function readAgentSession(
   harness: ImportableHarness,
   cwd: string,
   sessionId: string,
+  providerAccountId?: string | null,
 ): Promise<Record<string, unknown>[]> {
   return invoke<Record<string, unknown>[]>("agent_read_session", {
     harness,
     cwd,
     sessionId,
+    ...(providerAccountId ? { providerAccountId } : {}),
+  });
+}
+
+export type AgentSessionStat = { size: number; modifiedAt: number };
+
+/**
+ * A transcript's size and change time without parsing it, or null while the
+ * agent has not saved that conversation yet.
+ */
+export function statAgentSession(
+  harness: ImportableHarness,
+  cwd: string,
+  sessionId: string,
+  providerAccountId?: string | null,
+): Promise<AgentSessionStat | null> {
+  return invoke<AgentSessionStat | null>("agent_session_stat", {
+    harness,
+    cwd,
+    sessionId,
+    ...(providerAccountId ? { providerAccountId } : {}),
   });
 }

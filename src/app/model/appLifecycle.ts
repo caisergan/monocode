@@ -18,12 +18,17 @@ import {
 } from "../../features/sessions/model/inFlight";
 import { leafIds, type WorkspaceTab } from "../../features/workspace/model/layout";
 import { killPty } from "../../platform/tauri/pty";
+import { sessionPtyId } from "../../features/terminal/model/sessionTerminal";
 import {
   projectTerminalFileIds,
   type DockSide,
   type ProjectTerminalDock,
 } from "../../features/projects/model/projectTerminal";
-import { sessionWorkCwd, type Session } from "../../features/sessions/model/session";
+import {
+  isTerminalSession,
+  sessionWorkCwd,
+  type Session,
+} from "../../features/sessions/model/session";
 import { sessionChildHarnesses } from "../../features/sessions/model/handoff";
 import {
   getSession,
@@ -499,9 +504,11 @@ export async function reapWindowRuntime(
     ),
   );
   await Promise.all(
-    [...terminalFileIds(tabs), ...projectTerminalFileIds(projectTerminals)].map(
-      (id) => killPty(id),
-    ),
+    [
+      ...terminalFileIds(tabs),
+      ...projectTerminalFileIds(projectTerminals),
+      ...sessions.filter(isTerminalSession).map(({ id }) => sessionPtyId(id)),
+    ].map((id) => killPty(id)),
   );
   // Catalog probes, title generators, and usage scrapers are not session
   // children. Drop them so an unused Pi/Codex probe cannot outlive the window.

@@ -89,7 +89,7 @@ pub(super) fn root(harness: Harness) -> Option<PathBuf> {
                 .join("agent")
                 .join("sessions")
         }
-        Harness::Claude => return None,
+        Harness::Claude | Harness::Codex => return None,
     };
     root.is_dir().then_some(root)
 }

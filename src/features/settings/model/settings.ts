@@ -949,6 +949,11 @@ export const KEYBINDINGS: KeybindingRow[] = [
     when: "sessionFocus && !overlay",
   },
   {
+    command: "Session: Toggle Terminal",
+    keys: `${MOD}${SHIFT}T`,
+    when: "sessionFocus && !overlay",
+  },
+  {
     command: "Session: Previous",
     keys: `${MOD}${SHIFT}↑`,
     when: "!overlay && (!textFocus || emptyComposer)",

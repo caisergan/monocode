@@ -388,6 +388,41 @@ export const RUNTIME_MODE_HINT: Record<RuntimeMode, string> = {
 
 export type WorkspaceMode = "current" | "worktree";
 
+/**
+ * Where a session runs. `chat` is MonoCode driving the agent over its protocol
+ * and rendering its own transcript; `terminal` is the agent's own CLI in a PTY.
+ * It is the same session either way.
+ */
+export type SessionSurface = "chat" | "terminal";
+
+/**
+ * Bookkeeping for reading a terminal session's CLI transcript back into
+ * `blocks`. Blocks that existed when the session moved to the terminal (the
+ * first `prefixBlocks`) are left alone, since they hold things a transcript
+ * replay cannot rebuild, such as checkpoints.
+ */
+export type TerminalSync = {
+  /** Id of the last transcript record already accounted for in the prefix. */
+  afterRecord?: string;
+  /** Leading blocks frozen at the switch to the terminal. */
+  prefixBlocks: number;
+  /** Transcript size at the last sync; a poll compares against it. */
+  syncedSize: number;
+  /** Why the transcript could not be read, shown in the pane until a sync succeeds. */
+  error?: string;
+  /**
+   * When the CLI was started for a conversation MonoCode has no id for yet
+   * (Codex picks its own). The conversation is the one saved after this.
+   */
+  startedAt?: number;
+};
+
+export function isTerminalSession(session: {
+  surface?: SessionSurface;
+}): boolean {
+  return session.surface === "terminal";
+}
+
 export type Session = {
   /** Receipt for an acknowledged floating-composer handoff. */
   quickLaunchAccepted?: boolean;
@@ -450,6 +485,10 @@ export type Session = {
   linkedWorkItem?: LinkedWorkItem;
   /** Automation that created or last launched this session. */
   automationId?: string;
+  /** Where the session runs. Absent means "chat". */
+  surface?: SessionSurface;
+  /** Transcript records already turned into blocks while in the terminal. */
+  terminalSync?: TerminalSync;
   /** New linked-item activity shown above the composer. In-memory, one-shot. */
   linkedWorkItemUpdateCard?: LinkedWorkItemUpdateCard;
   /** Note chip shown above the composer. In-memory, one-shot. */

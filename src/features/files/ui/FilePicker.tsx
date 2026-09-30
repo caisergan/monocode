@@ -2,6 +2,7 @@ import {
   FolderInput,
   RefreshCw,
   Search,
+  Terminal,
   type IconComponent,
 } from "../../../shared/ui/icons";
 import {
@@ -55,6 +56,8 @@ type Props = {
   cwd: string;
   openPaths?: string[];
   initialQuery?: string;
+  /** Commands that depend on what is focused, listed after the fixed ones. */
+  extraActions?: Array<{ id: string; label: string; hint?: string }>;
   onOpenFile: OpenFileFn;
   onRunAction: (id: string) => void;
   onClose: () => void;
@@ -65,6 +68,7 @@ export function FilePicker({
   cwd,
   openPaths = [],
   initialQuery = "",
+  extraActions = [],
   onOpenFile,
   onRunAction,
   onClose,
@@ -97,18 +101,22 @@ export function FilePicker({
   );
   const actionResults = useMemo((): RankedAction[] => {
     if (!paletteMode) return [];
+    const actions: Action[] = [
+      ...ACTIONS,
+      ...extraActions.map((action) => ({ ...action, icon: Terminal })),
+    ];
     if (!actionQuery) {
-      return ACTIONS.map((action) => ({
+      return actions.map((action) => ({
         ...action,
         score: 0,
         positions: [],
       }));
     }
-    return ACTIONS.flatMap((action) => {
+    return actions.flatMap((action) => {
       const hit = fuzzyMatch(actionQuery, action.label);
       return hit ? [{ ...action, ...hit }] : [];
     }).sort((a, b) => b.score - a.score);
-  }, [actionQuery, paletteMode]);
+  }, [actionQuery, extraActions, paletteMode]);
   const optionCount = paletteMode ? actionResults.length : results.length;
 
   useEffect(() => {

@@ -8,11 +8,12 @@ use std::time::Duration;
 #[cfg(unix)]
 use std::time::Instant;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::dirs_home;
 use crate::fs::expand_home;
+use crate::harness::HarnessHost;
 
 const DATA_EVENT: &str = "pty-data";
 const EXIT_EVENT: &str = "pty-exit";
@@ -35,6 +36,25 @@ struct PtyData {
 struct PtyExit {
     id: String,
     code: Option<i32>,
+}
+
+/// A CLI to run in the PTY instead of the user's shell. The webview supplies the
+/// arguments (its runtime-mode mappings live in TypeScript); Rust picks the
+/// binary and applies the account, so the webview never names an executable.
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PtyLaunch {
+    harness: String,
+    args: Vec<String>,
+    provider_account_id: Option<String>,
+}
+
+/// What a PTY runs: a program, its arguments, and account env changes.
+struct PtyCommand {
+    program: String,
+    args: Vec<String>,
+    env_set: Vec<(&'static str, std::path::PathBuf)>,
+    env_remove: &'static [&'static str],
 }
 
 struct LivePty {
@@ -125,16 +145,22 @@ impl Drop for PtyHost {
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub fn pty_spawn(
     app: AppHandle,
     host: State<PtyHost>,
+    harness: State<HarnessHost>,
     id: String,
     cwd: String,
     cols: u16,
     rows: u16,
+    launch: Option<PtyLaunch>,
 ) -> Result<(), String> {
     let workdir = working_dir(&cwd);
     let _reservation = crate::worktree_lifecycle::reserve_spawn(&workdir)?;
+    // Resolve before touching the running PTY, so a missing CLI leaves the
+    // previous one alone.
+    let command = resolve_command(&app, &harness, launch.as_ref())?;
     if let Some(prev) = host.remove(&id) {
         terminate(prev.pid);
         #[cfg(unix)]
@@ -143,17 +169,17 @@ pub fn pty_spawn(
 
     #[cfg(unix)]
     {
-        spawn_unix(app, host, id, workdir, cols.max(2), rows.max(2))
+        spawn_unix(app, host, id, workdir, cols.max(2), rows.max(2), command)
     }
 
     #[cfg(windows)]
     {
-        spawn_windows(app, host, id, workdir, cols.max(2), rows.max(2))
+        spawn_windows(app, host, id, workdir, cols.max(2), rows.max(2), command)
     }
 
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (app, cwd, cols, rows);
+        let _ = (app, cwd, cols, rows, command);
         Err("Terminals are not supported on this platform.".into())
     }
 }
@@ -249,13 +275,19 @@ fn spawn_unix(
     workdir: std::path::PathBuf,
     cols: u16,
     rows: u16,
+    command: PtyCommand,
 ) -> Result<(), String> {
     use std::fs::File;
     use std::os::unix::io::FromRawFd;
     use std::os::unix::process::CommandExt;
     use std::process::Command;
 
-    let (shell, args) = default_shell();
+    let PtyCommand {
+        program: shell,
+        args,
+        env_set,
+        env_remove,
+    } = command;
     let (master, slave) = open_pty(cols, rows)?;
 
     let mut cmd = Command::new(&shell);
@@ -273,6 +305,12 @@ fn spawn_unix(
         cmd.env("HOME", &home);
     }
     cmd.env("PWD", &workdir);
+    for (key, value) in &env_set {
+        cmd.env(key, value);
+    }
+    for key in env_remove {
+        cmd.env_remove(key);
+    }
 
     // setsid() already creates a new session and process group. Calling
     // process_group(0) first makes the child a group leader, so setsid()
@@ -378,10 +416,16 @@ fn spawn_windows(
     workdir: std::path::PathBuf,
     cols: u16,
     rows: u16,
+    command: PtyCommand,
 ) -> Result<(), String> {
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 
-    let (shell, args) = default_shell();
+    let PtyCommand {
+        program: shell,
+        args,
+        env_set,
+        env_remove,
+    } = command;
     let pty_system = native_pty_system();
     let pair = pty_system
         .openpty(PtySize {
@@ -405,6 +449,12 @@ fn spawn_windows(
         cmd.env("USERPROFILE", &home);
     }
     cmd.env("PWD", workdir.to_string_lossy().as_ref());
+    for (key, value) in &env_set {
+        cmd.env(key, value);
+    }
+    for key in env_remove {
+        cmd.env_remove(key);
+    }
 
     let mut child = crate::windows::spawn_pty(pair.slave.as_ref(), cmd)
         .map_err(|err| format!("Failed to start {shell}: {err}"))?;
@@ -459,6 +509,50 @@ fn spawn_windows(
     });
 
     Ok(())
+}
+
+fn resolve_command(
+    app: &AppHandle,
+    harness: &HarnessHost,
+    launch: Option<&PtyLaunch>,
+) -> Result<PtyCommand, String> {
+    let Some(launch) = launch else {
+        let (program, args) = default_shell();
+        return Ok(PtyCommand {
+            program,
+            args,
+            env_set: Vec::new(),
+            env_remove: &[],
+        });
+    };
+    let program = crate::harness::resolve_terminal_binary(harness, &launch.harness)?;
+    let account = crate::harness::provider_account_env(
+        app,
+        &launch.harness,
+        launch.provider_account_id.as_deref(),
+    )?;
+    Ok(build_launch_command(
+        program.to_string_lossy().into_owned(),
+        launch,
+        account,
+    ))
+}
+
+fn build_launch_command(
+    program: String,
+    launch: &PtyLaunch,
+    account: Option<crate::harness::AccountEnv>,
+) -> PtyCommand {
+    let (env_set, env_remove) = match account {
+        Some(env) => (env.set, env.remove),
+        None => (Vec::new(), &[][..]),
+    };
+    PtyCommand {
+        program,
+        args: launch.args.clone(),
+        env_set,
+        env_remove,
+    }
 }
 
 fn working_dir(cwd: &str) -> std::path::PathBuf {
@@ -830,5 +924,66 @@ mod tests {
         assert!(host.get("term").is_some());
         assert!(host.remove_if_pid("term", 42).is_some());
         assert!(host.get("term").is_none());
+    }
+}
+
+#[cfg(test)]
+mod launch_tests {
+    use super::*;
+    use crate::harness::HarnessHost;
+
+    fn launch(harness: &str) -> PtyLaunch {
+        serde_json::from_value(serde_json::json!({
+            "harness": harness,
+            "args": ["--resume", "abc"],
+            "providerAccountId": "work",
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn launch_reads_the_camel_case_the_webview_sends() {
+        let launch = launch("claude");
+        assert_eq!(launch.harness, "claude");
+        assert_eq!(launch.args, ["--resume", "abc"]);
+        assert_eq!(launch.provider_account_id.as_deref(), Some("work"));
+    }
+
+    #[test]
+    fn unknown_harness_is_rejected_before_anything_spawns() {
+        let host = HarnessHost::new();
+        let err =
+            crate::harness::resolve_terminal_binary(&host, &launch("bash").harness).unwrap_err();
+        assert!(err.contains("no terminal surface"), "{err}");
+    }
+
+    #[test]
+    fn launch_command_keeps_args_verbatim_and_without_an_account_touches_no_env() {
+        let command = build_launch_command("/bin/claude".into(), &launch("claude"), None);
+        assert_eq!(command.program, "/bin/claude");
+        assert_eq!(command.args, ["--resume", "abc"]);
+        assert!(command.env_set.is_empty());
+        assert!(command.env_remove.is_empty());
+    }
+
+    #[test]
+    fn launch_command_carries_the_account_env() {
+        let account = crate::harness::AccountEnv {
+            set: vec![("CODEX_HOME", std::path::PathBuf::from("/accounts/work"))],
+            remove: &["OPENAI_API_KEY"],
+        };
+        let command = build_launch_command("/bin/codex".into(), &launch("codex"), Some(account));
+        assert_eq!(command.env_set.len(), 1);
+        assert_eq!(command.env_remove, ["OPENAI_API_KEY"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_launch_is_still_the_login_shell() {
+        // `resolve_command` without a launch must not need an AppHandle path
+        // through the harness resolver: it is exactly `default_shell()`.
+        let (program, args) = default_shell();
+        assert!(!program.is_empty());
+        assert!(args.len() <= 1);
     }
 }

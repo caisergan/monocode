@@ -13,14 +13,22 @@ import {
 } from "../../settings/model/settings";
 import { useLockOverscroll } from "../../../shared/hooks/useLockOverscroll";
 import { TerminalGridBackground } from "../../terminal/ui/TerminalGridBackground";
+import { Terminal } from "../../../shared/ui/icons";
 
 type Props = {
   cwd: string;
   composer?: ReactNode;
   hasChatBackground?: boolean;
+  /** Runs the session in the agent's own CLI instead. Absent when it cannot. */
+  onOpenInTerminal?: () => void;
 };
 
-export function EmptySession({ cwd, composer, hasChatBackground }: Props) {
+export function EmptySession({
+  cwd,
+  composer,
+  hasChatBackground,
+  onOpenInTerminal,
+}: Props) {
   const lockOverscroll = useLockOverscroll<HTMLDivElement>();
   const arcadeEnabled = useSyncExternalStore(
     subscribeGridArcadeEnabled,
@@ -64,6 +72,18 @@ export function EmptySession({ cwd, composer, hasChatBackground }: Props) {
           </div>
 
           <div className="pointer-events-auto w-full">{composer}</div>
+          {onOpenInTerminal ? (
+            <div className="pointer-events-auto mt-2 px-2.5">
+              <button
+                type="button"
+                className="inline-flex items-center gap-1.5 rounded px-1.5 py-1 text-xs text-content/55 hover:bg-content/5 hover:text-content"
+                onClick={onOpenInTerminal}
+              >
+                <Terminal className="size-3.5" strokeWidth={1.75} />
+                Open in terminal
+              </button>
+            </div>
+          ) : null}
         </div>
       ) : null}
     </div>

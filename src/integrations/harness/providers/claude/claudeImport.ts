@@ -4,8 +4,11 @@ import {
   recordTimestamp,
   TranscriptReplay,
   type TranscriptImportInput,
+  type TranscriptImportTarget,
 } from "../../core/transcriptImport";
+import type { TranscriptSlice } from "../../core/terminalSync";
 import {
+  formatSessionTitle,
   newSession,
   type Session,
 } from "../../../../features/sessions/model/session";
@@ -171,8 +174,56 @@ export function claudeTranscriptToSession({
   ...target
 }: ClaudeImportInput): Session {
   const chain = activeClaudeChain(records);
+  return replayClaudeChain(chain, records, target, lastModelId(chain));
+}
+
+/**
+ * The id of the last record on the conversation's current branch, which a
+ * terminal session keeps as its cursor into the transcript.
+ */
+export function claudeLastRecordId(records: ClaudeRecord[]): string | undefined {
+  return stringField(activeClaudeChain(records).at(-1), "uuid");
+}
+
+/**
+ * The transcript after `afterRecord`, as blocks. A cursor that is no longer on
+ * the current branch (the user rewound inside the CLI) replays everything.
+ * Records before the cursor are not replayed, so a tool result whose call
+ * came before it, or an assistant reply to an earlier prompt, is skipped.
+ */
+export function claudeTranscriptSlice(
+  records: ClaudeRecord[],
+  afterRecord: string | undefined,
+  cwd: string,
+): TranscriptSlice {
+  const chain = activeClaudeChain(records);
+  const at = afterRecord
+    ? chain.findIndex((record) => stringField(record, "uuid") === afterRecord)
+    : -1;
+  const rewound = !!afterRecord && at < 0;
+  const replayed = replayClaudeChain(
+    chain.slice(at + 1),
+    records,
+    { cwd },
+    lastModelId(chain),
+  );
+  const title = transcriptTitle(records);
+  return {
+    blocks: replayed.blocks,
+    rewound,
+    ...(title ? { title: formatSessionTitle("claude", title) } : {}),
+    ...(replayed.context ? { contextUsed: replayed.context.used } : {}),
+  };
+}
+
+function replayClaudeChain(
+  chain: ClaudeRecord[],
+  records: ClaudeRecord[],
+  target: TranscriptImportTarget,
+  model: string | undefined,
+): Session {
   const replay = new TranscriptReplay(
-    newSession("claude", target.cwd, lastModelId(chain)),
+    newSession("claude", target.cwd, model),
     target,
   );
   const tools = new Map<string, ImportedTool>();

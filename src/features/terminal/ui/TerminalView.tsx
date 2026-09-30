@@ -2,11 +2,14 @@ import { Terminal } from "@xterm/xterm";
 import { useEffect, useRef } from "react";
 import {
   getPtyStatus,
+  holdPty,
   killPty,
+  ptyExitCode,
   resizePty,
   spawnPty,
   subscribePty,
   writePty,
+  type PtyLaunch,
 } from "../../../platform/tauri/pty";
 import { isOscColorQuery, oscColorReply } from "../model/terminalChrome";
 import {
@@ -33,6 +36,18 @@ type Props = {
   cwd: string;
   active: boolean;
   onMetaChange?: (patch: TerminalMetaPatch) => void;
+  /**
+   * Runs an agent CLI instead of the user's shell. Called only when a PTY has
+   * to be started, so it can look at the conversation's state at that moment.
+   */
+  launch?: () => Promise<PtyLaunch>;
+  /**
+   * The PTY belongs to whoever owns `id`, not to this view: unmounting leaves
+   * it running, and mounting attaches to it when it is still alive.
+   */
+  persistent?: boolean;
+  /** The PTY ended (also reported on mount if it ended while unmounted). */
+  onExit?: (code: number | null) => void;
 };
 
 function cssColor(expr: string, fallback: string): string {
@@ -138,7 +153,15 @@ function oscColors() {
   };
 }
 
-export function TerminalView({ id, cwd, active, onMetaChange }: Props) {
+export function TerminalView({
+  id,
+  cwd,
+  active,
+  onMetaChange,
+  launch,
+  persistent = false,
+  onExit,
+}: Props) {
   const outerRef = useRef<HTMLDivElement>(null);
   const hostRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -146,6 +169,10 @@ export function TerminalView({ id, cwd, active, onMetaChange }: Props) {
   const applySizeRef = useRef<() => void>(() => {});
   const onMetaChangeRef = useRef(onMetaChange);
   onMetaChangeRef.current = onMetaChange;
+  const launchRef = useRef(launch);
+  launchRef.current = launch;
+  const onExitRef = useRef(onExit);
+  onExitRef.current = onExit;
   const runningProcessRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -240,10 +267,42 @@ export function TerminalView({ id, cwd, active, onMetaChange }: Props) {
         if (closed) return;
         const status = code == null ? "" : ` (${code})`;
         term.writeln(`\r\n[process exited${status}]`);
+        onExitRef.current?.(code);
       },
     );
 
-    const starting = spawnPty(id, cwd, term.cols, term.rows)
+    // A persistent PTY is attached to if it is still running, and only
+    // started when it is not. `attached` tells the resize below to make the
+    // program redraw, since this terminal has none of its screen.
+    let attached = false;
+    const start = async () => {
+      if (!persistent) {
+        await spawnPty(id, cwd, term.cols, term.rows);
+        return;
+      }
+      // Ended while unmounted: `subscribePty` already reported it. Starting
+      // again is the owner's decision (Restart), not a side effect of mounting.
+      if (ptyExitCode(id) !== undefined) return;
+      // Held before either branch, so an exit during startup is not missed.
+      holdPty(id);
+      const alive = await getPtyStatus(id).then(
+        () => true,
+        () => false,
+      );
+      if (alive) {
+        attached = true;
+        return;
+      }
+      try {
+        const spec = await launchRef.current?.();
+        await spawnPty(id, cwd, term.cols, term.rows, spec);
+      } catch (error) {
+        await killPty(id);
+        throw error;
+      }
+    };
+
+    const starting = start()
       .then(() => {
         if (!closed) spawned.current = true;
       })
@@ -343,12 +402,28 @@ export function TerminalView({ id, cwd, active, onMetaChange }: Props) {
     const bufferSub = term.buffer.onBufferChange(syncAltScreenMode);
     syncAltScreenMode();
     const frame = requestAnimationFrame(applySize);
+    let redraw = 0;
+    void starting
+      .then(() => {
+        if (!attached) return;
+        // A running TUI redraws on a size change and not otherwise; shrink by
+        // a row and restore, once this terminal has been fitted.
+        redraw = requestAnimationFrame(() => {
+          if (closed) return;
+          const { cols, rows } = term;
+          void resizePty(id, cols, Math.max(2, rows - 1))
+            .then(() => (closed ? undefined : resizePty(id, cols, rows)))
+            .catch(() => undefined);
+        });
+      })
+      .catch(() => undefined);
     const observer = new ResizeObserver(schedule);
     observer.observe(host);
 
     return () => {
       closed = true;
       cancelAnimationFrame(frame);
+      if (redraw) cancelAnimationFrame(redraw);
       if (raf) cancelAnimationFrame(raf);
       observer.disconnect();
       outer.classList.remove("monocode-terminal--alt-screen");
@@ -363,7 +438,9 @@ export function TerminalView({ id, cwd, active, onMetaChange }: Props) {
       renderSub.dispose();
       bufferSub.dispose();
       unsubscribe();
-      void starting.catch(() => undefined).then(() => killPty(id));
+      if (!persistent) {
+        void starting.catch(() => undefined).then(() => killPty(id));
+      }
       term.dispose();
       termRef.current = null;
       spawned.current = false;

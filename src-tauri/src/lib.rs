@@ -279,6 +279,7 @@ pub fn run() {
             reminders::reminder_open,
             agent_sessions::agent_list_sessions,
             agent_sessions::agent_read_session,
+            agent_sessions::agent_session_stat,
             automations::automations_list,
             automations::automations_upsert,
             automations::automations_delete,

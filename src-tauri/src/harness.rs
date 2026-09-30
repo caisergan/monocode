@@ -662,6 +662,46 @@ pub fn provider_account_remove(
     })
 }
 
+/// Environment a provider account changes for its CLI: variables to set and
+/// variables to strip so a shell-level key cannot override the account.
+pub(crate) struct AccountEnv {
+    pub set: Vec<(&'static str, PathBuf)>,
+    pub remove: &'static [&'static str],
+}
+
+fn account_env_for(provider: &str, dir: &Path) -> AccountEnv {
+    match provider {
+        // Claude scopes both its ordinary config and its macOS Keychain
+        // credential to these exact strings. Setting both keeps profiles
+        // isolated on every supported platform.
+        "claude" => AccountEnv {
+            set: vec![
+                ("CLAUDE_CONFIG_DIR", dir.to_path_buf()),
+                ("CLAUDE_SECURESTORAGE_CONFIG_DIR", dir.to_path_buf()),
+            ],
+            remove: &[
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_AUTH_TOKEN",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+            ],
+        },
+        "codex" => AccountEnv {
+            set: vec![("CODEX_HOME", dir.to_path_buf())],
+            remove: &["OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"],
+        },
+        _ => unreachable!("provider_account_dir validates the provider"),
+    }
+}
+
+/// The env for a named account, or `None` for the default account.
+pub(crate) fn provider_account_env(
+    app: &AppHandle,
+    provider: &str,
+    account_id: Option<&str>,
+) -> Result<Option<AccountEnv>, String> {
+    Ok(provider_account_dir(app, provider, account_id)?.map(|dir| account_env_for(provider, &dir)))
+}
+
 fn apply_provider_account(
     app: &AppHandle,
     cmd: &mut Command,
@@ -670,27 +710,14 @@ fn apply_provider_account(
     let Some(account) = account else {
         return Ok(());
     };
-    let Some(dir) = provider_account_dir(app, &account.provider, Some(&account.id))? else {
+    let Some(env) = provider_account_env(app, &account.provider, Some(&account.id))? else {
         return Ok(());
     };
-    match account.provider.as_str() {
-        "claude" => {
-            // Claude scopes both its ordinary config and its macOS Keychain
-            // credential to these exact strings. Setting both keeps profiles
-            // isolated on every supported platform.
-            cmd.env("CLAUDE_CONFIG_DIR", &dir)
-                .env("CLAUDE_SECURESTORAGE_CONFIG_DIR", &dir)
-                .env_remove("ANTHROPIC_API_KEY")
-                .env_remove("ANTHROPIC_AUTH_TOKEN")
-                .env_remove("CLAUDE_CODE_OAUTH_TOKEN");
-        }
-        "codex" => {
-            cmd.env("CODEX_HOME", &dir)
-                .env_remove("OPENAI_API_KEY")
-                .env_remove("CODEX_API_KEY")
-                .env_remove("CODEX_ACCESS_TOKEN");
-        }
-        _ => unreachable!("provider_account_dir validates the provider"),
+    for (key, value) in &env.set {
+        cmd.env(key, value);
+    }
+    for key in env.remove {
+        cmd.env_remove(key);
     }
     Ok(())
 }
@@ -1713,6 +1740,38 @@ fn validate_configured_harness_binary_identity(
         Err(format!(
             "Configured path is not a valid {provider} binary: {binary_path}"
         ))
+    }
+}
+
+/// The CLI a terminal session runs: the user's configured binary if they set
+/// one, otherwise the same lookup the chat path uses. Only the two providers
+/// with a terminal surface are accepted, so the webview never names an
+/// executable.
+pub(crate) fn resolve_terminal_binary(
+    host: &HarnessHost,
+    provider: &str,
+) -> Result<PathBuf, String> {
+    let (found, missing): (fn() -> Option<PathBuf>, &str) = match provider {
+        "claude" => (
+            resolve_claude,
+            "Claude Code CLI not found. Install it from https://claude.com/product/claude-code and run `claude auth login`, then retry.",
+        ),
+        "codex" => (
+            resolve_codex,
+            "Codex CLI not found. Install it from https://developers.openai.com/codex/cli and run `codex login`, then retry.",
+        ),
+        other => return Err(format!("{other} has no terminal surface.")),
+    };
+    let configured = host
+        .runtime_binary_paths
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|paths| paths.get(provider).cloned())
+        .filter(|path| !path.trim().is_empty());
+    match configured {
+        Some(path) => resolve_harness_binary_override(provider, path.trim()),
+        None => found().ok_or_else(|| missing.to_string()),
     }
 }
 
@@ -3461,5 +3520,53 @@ mod reap_logic_tests {
         assert!(!is_legacy_orphaned_cursor_acp(
             "node /usr/local/bin/typescript-language-server --stdio"
         ));
+    }
+}
+
+#[cfg(test)]
+mod terminal_binary_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_binary_rejects_providers_without_a_terminal_surface() {
+        let host = HarnessHost::new();
+        for provider in ["pi", "cursor", "sh", "/bin/sh", ""] {
+            let err = resolve_terminal_binary(&host, provider).unwrap_err();
+            assert!(err.contains("no terminal surface"), "{provider}: {err}");
+        }
+    }
+
+    #[test]
+    fn terminal_binary_honors_a_configured_path_that_is_not_the_provider() {
+        let host = HarnessHost::new();
+        *host.runtime_binary_paths.lock().unwrap() = Some(HashMap::from([(
+            "claude".to_string(),
+            "relative/claude".to_string(),
+        )]));
+        let err = resolve_terminal_binary(&host, "claude").unwrap_err();
+        assert!(err.contains("must be absolute"), "{err}");
+    }
+
+    #[test]
+    fn claude_account_env_sets_both_config_dirs_and_drops_shell_credentials() {
+        let env = account_env_for("claude", Path::new("/accounts/work"));
+        let set: Vec<_> = env.set.iter().map(|(key, _)| *key).collect();
+        assert_eq!(
+            set,
+            ["CLAUDE_CONFIG_DIR", "CLAUDE_SECURESTORAGE_CONFIG_DIR"]
+        );
+        assert!(env
+            .set
+            .iter()
+            .all(|(_, dir)| dir == Path::new("/accounts/work")));
+        assert!(env.remove.contains(&"ANTHROPIC_API_KEY"));
+        assert!(env.remove.contains(&"CLAUDE_CODE_OAUTH_TOKEN"));
+    }
+
+    #[test]
+    fn codex_account_env_sets_codex_home_and_drops_shell_credentials() {
+        let env = account_env_for("codex", Path::new("/accounts/work"));
+        assert_eq!(env.set, [("CODEX_HOME", PathBuf::from("/accounts/work"))]);
+        assert!(env.remove.contains(&"OPENAI_API_KEY"));
     }
 }

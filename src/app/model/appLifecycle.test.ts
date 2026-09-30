@@ -9,6 +9,7 @@ import {
   closeBusyWindow,
   commitQuit,
   confirmReload,
+  reapWindowRuntime,
   reportQuitPoll,
   setQuitWorkspace,
 } from "./appLifecycle";
@@ -505,5 +506,26 @@ describe("remembering the terminal dock side across restarts", () => {
     const { handleQuitRequested } = await import("./appLifecycle");
     await handleQuitRequested();
     expect(await lastSavedDockSide()).toBe("left");
+  });
+});
+
+describe("closing a window with terminal sessions", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("kills each terminal session's agent and leaves chat sessions alone", async () => {
+    const chat = { ...newSession("claude", "/alpha"), id: "chat-1" };
+    const terminal = {
+      ...newSession("claude", "/alpha"),
+      id: "term-1",
+      surface: "terminal" as const,
+    };
+    await reapWindowRuntime([chat, terminal], [], [], false);
+    const killed = vi
+      .mocked(invoke)
+      .mock.calls.filter(([command]) => command === "pty_kill")
+      .map(([, args]) => (args as { id: string }).id);
+    expect(killed).toEqual(["session:term-1"]);
   });
 });

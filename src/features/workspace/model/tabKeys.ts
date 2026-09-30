@@ -54,6 +54,7 @@ export type TabCommand =
   | "prev-session-in-tab"
   | "next-session-in-tab"
   | "archive-session"
+  | "toggle-session-surface"
   | "prev-project"
   | "next-project"
   | { activate: number }
@@ -87,6 +88,7 @@ export function tabCommand(e: KeyboardEvent): TabCommand | null {
 
   if (e.shiftKey) {
     if (key === "a" && !e.repeat) return "archive-session";
+    if (key === "t" && !e.repeat) return "toggle-session-surface";
     if (e.key === "]" || e.key === "}") return "next";
     if (e.key === "[" || e.key === "{") return "prev";
     if (e.key === "ArrowUp") return "prev-session";
@@ -132,6 +134,7 @@ const TAB_COMMAND_KEYBINDINGS: Record<Exclude<TabCommand, object>, string> = {
   "prev-session-in-tab": "Session: Previous in Current Tab",
   "next-session-in-tab": "Session: Next in Current Tab",
   "archive-session": "Session: Archive",
+  "toggle-session-surface": "Session: Toggle Terminal",
   "prev-project": "Project: Previous",
   "next-project": "Project: Next",
 };
