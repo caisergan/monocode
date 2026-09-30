@@ -93,11 +93,25 @@ export function filterSessionsByQuery(
   return rows.filter((row) => sessionSearchHit(row, needle));
 }
 
+/**
+ * A query this long made only of hex digits and dashes can be part of a
+ * session id. Shorter ones ("add", "bed") are too often ordinary words.
+ */
+const ID_QUERY = /^[0-9a-f-]{6,}$/i;
+
 function sessionSearchHit(row: SessionSummary, query: string): boolean {
   const title = sessionDisplayTitle(row.title, row.harness);
   const git = [row.repo, row.branch].filter(Boolean).join("/");
   const fields = [title, row.title, row.model, row.harness, git];
-  return fields.some((field) => field && fuzzyMatch(query, field) != null);
+  if (fields.some((field) => field && fuzzyMatch(query, field) != null)) {
+    return true;
+  }
+  if (!ID_QUERY.test(query)) return false;
+  // Ids match exactly, not fuzzily: scattered hex digits hit almost any id.
+  const id = query.toLowerCase();
+  return [row.id, row.providerSessionId].some((field) =>
+    field?.toLowerCase().includes(id),
+  );
 }
 
 export function summaryFromSession(

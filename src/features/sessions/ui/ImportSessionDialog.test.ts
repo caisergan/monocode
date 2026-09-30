@@ -335,7 +335,8 @@ describe("ImportSessionDialog", () => {
     });
     await flush();
     expect(api.listAgentSessions).toHaveBeenLastCalledWith(
-      expect.objectContaining({ query: "billing" }),
+      // A search also finds sessions MonoCode already has.
+      expect.objectContaining({ query: "billing", includeImported: true }),
     );
     expect(dialogText()).toContain("No matching sessions");
   });
