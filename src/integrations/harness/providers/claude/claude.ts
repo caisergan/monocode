@@ -24,6 +24,7 @@ import {
   buildClaudeUserMessage,
   buildControlRequest,
   buildControlResponse,
+  claudeCommandsFromRecord,
   claudeSettingsKey,
   extractAskUserQuestionTitle,
   extractExitPlanModePlan,
@@ -65,6 +66,7 @@ import {
   type ClaudeCliSettings,
   type ClaudeControlRequest,
 } from "./claudeProtocol";
+import { noteClaudeCommands } from "./claudeCommands";
 import { isAgentToolName } from "../../core/preview";
 import { joinStreamText, snapshotRemainder } from "../../core/streamText";
 import {
@@ -566,6 +568,9 @@ function handleLine(sessionId: string, live: Live, line: string): void {
 
   const type = stringField(rec, "type");
   if (type === "keep_alive") return;
+
+  const commands = claudeCommandsFromRecord(rec);
+  if (commands) noteClaudeCommands(live.cwd, commands);
 
   const cancelId = parseControlCancelId(rec);
   if (cancelId) {

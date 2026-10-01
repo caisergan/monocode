@@ -44,6 +44,8 @@ const {
   stopClaudeSession,
   __claudeTestReset,
 } = await import("./claude");
+const { claudeCommandProvider, __claudeCommandsTestReset } =
+  await import("./claudeCommands");
 import type { HarnessEvent } from "../../core/types";
 import type { RuntimeMode, TurnIntent } from "../../../../features/sessions/model/session";
 
@@ -261,6 +263,7 @@ beforeEach(() => {
   onExit = undefined;
   writeChild.mockClear();
   __claudeTestReset();
+  __claudeCommandsTestReset();
 });
 
 afterEach(async () => {
@@ -1323,5 +1326,108 @@ describe("claude manual compaction", () => {
       text: "Compacted context",
     });
     expect(events.some((event) => event.type === "message.delta")).toBe(false);
+  });
+});
+
+describe("claude slash commands", () => {
+  /** Send one prompt as the first turn of a fresh session. */
+  async function sendCommand(
+    text: string,
+    modelSettings: Record<string, string> = {},
+  ) {
+    const events: HarnessEvent[] = [];
+    const turn = sendClaudeTurn({
+      sessionId: "s1",
+      cwd: "/repo",
+      model: "claude:claude-sonnet-5",
+      modelSettings,
+      runtimeMode: "supervised",
+      text,
+      attachments: [],
+      onEvent: (event) => events.push(event),
+    });
+    await waitFor(() => parse().length > 0, "initialize");
+    emit({ type: "system", subtype: "init", session_id: "sess_1" });
+    await waitFor(() => parse().some((m) => m.type === "user"), "command");
+    return { events, turn };
+  }
+
+  /** Claude answers a built-in command itself, without a model call. */
+  function emitCommandReply(text: string, init: Record<string, unknown> = {}) {
+    emit({ type: "system", subtype: "init", session_id: "sess_1", ...init });
+    emit({
+      type: "assistant",
+      session_id: "sess_1",
+      message: {
+        model: "<synthetic>",
+        content: [{ type: "text", text }],
+        usage: { input_tokens: 0, output_tokens: 0 },
+      },
+    });
+    emit({
+      type: "result",
+      subtype: "success",
+      num_turns: 0,
+      session_id: "sess_1",
+      result: text,
+      usage: { input_tokens: 0, output_tokens: 0 },
+    });
+  }
+
+  it("sends a command as typed and shows Claude's reply as the answer", async () => {
+    const { events, turn } = await sendCommand("/advisor opus", {
+      effort: "ultrathink",
+    });
+    expect(parse().find((m) => m.type === "user")).toMatchObject({
+      message: { content: [{ type: "text", text: "/advisor opus" }] },
+    });
+
+    emitCommandReply("Advisor set to Opus 5.5");
+    await turn;
+
+    expect(events).toContainEqual({
+      type: "message.delta",
+      text: "Advisor set to Opus 5.5",
+    });
+    expect(events.some((event) => event.type === "context")).toBe(false);
+    expect(events.some((event) => event.type === "session.configChanged")).toBe(
+      false,
+    );
+  });
+
+  it("offers the commands a running session reports, and its later changes", async () => {
+    const onCommands = vi.fn();
+    claudeCommandProvider.subscribe!({ cwd: "/repo" }, onCommands);
+    const { turn } = await startTurn("s1");
+    emit({
+      type: "control_response",
+      response: {
+        subtype: "success",
+        request_id: "monocode_2",
+        response: {
+          commands: [
+            { name: "advisor", description: "", argumentHint: "[opus|off]" },
+          ],
+        },
+      },
+    });
+
+    await expect(
+      claudeCommandProvider.discover({ cwd: "/repo", sessionId: "s1" }),
+    ).resolves.toMatchObject([{ name: "advisor", inputHint: "[opus|off]" }]);
+    expect(spawned).toHaveLength(1);
+
+    emit({
+      type: "system",
+      subtype: "commands_changed",
+      commands: [{ name: "advisor" }, { name: "new-skill" }],
+    });
+    expect(onCommands).toHaveBeenLastCalledWith([
+      expect.objectContaining({ name: "advisor" }),
+      expect.objectContaining({ name: "new-skill" }),
+    ]);
+
+    emit({ type: "result", subtype: "success", session_id: "sess_1" });
+    await turn;
   });
 });
