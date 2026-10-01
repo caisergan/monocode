@@ -668,6 +668,11 @@ function handleLine(sessionId: string, live: Live, line: string): void {
     live.usageLimit = usageLimitFromRateLimitEvent(rec);
     return;
   }
+  if (type === "conversation_reset") {
+    // `/clear` answers with an empty result, so say what happened.
+    live.onEvent({ type: "status", text: "Started a new conversation" });
+    return;
+  }
   if (type === "system") {
     const text = statusTextFromSystem(rec);
     if (text) {

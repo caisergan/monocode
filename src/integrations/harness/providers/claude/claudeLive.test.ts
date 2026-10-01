@@ -1430,4 +1430,32 @@ describe("claude slash commands", () => {
     emit({ type: "result", subtype: "success", session_id: "sess_1" });
     await turn;
   });
+
+  it("says so when /clear starts a new conversation", async () => {
+    const { events, turn } = await sendCommand("/clear");
+    emit({
+      type: "conversation_reset",
+      new_conversation_id: "conv_2",
+      trigger: "clear",
+      session_id: "sess_1",
+    });
+    emit({ type: "system", subtype: "init", session_id: "sess_2" });
+    emit({
+      type: "result",
+      subtype: "success",
+      num_turns: 0,
+      session_id: "sess_2",
+      result: "",
+    });
+    await turn;
+
+    expect(events).toContainEqual({
+      type: "status",
+      text: "Started a new conversation",
+    });
+    expect(events).toContainEqual({
+      type: "session.providerBound",
+      providerSessionId: "sess_2",
+    });
+  });
 });
