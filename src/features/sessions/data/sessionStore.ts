@@ -28,13 +28,15 @@ import type {
   RuntimeMode,
   SecondOpinionMeta,
   Session,
+  SessionSurface,
   TaskListMeta,
+  TerminalSync,
   PlanBlockMeta,
   TurnModel,
   TurnMetrics,
 } from "../model/session";
 
-import { HARNESSES, RUNTIME_MODES } from "../model/session";
+import { HARNESSES, RUNTIME_MODES, isTerminalSession } from "../model/session";
 
 import { restoreOrchestrationProposal } from "../../orchestration/model/orchestrationPlan";
 
@@ -63,6 +65,8 @@ export type SessionSummary = {
   draft?: boolean;
   linkedWorkItem?: LinkedWorkItem;
   automationId?: string;
+  /** Only present for terminal sessions; absent means chat. */
+  surface?: SessionSurface;
 };
 
 type SessionRecord = {
@@ -84,6 +88,8 @@ type SessionRecord = {
   worktreeRemoved?: boolean;
   linkedWorkItem?: LinkedWorkItem | null;
   automationId?: string | null;
+  surface?: string | null;
+  terminalSync?: unknown;
   createdAt: number;
   updatedAt: number;
 };
@@ -106,6 +112,8 @@ type SessionUpsertPayload = {
   worktreeRemoved?: boolean;
   linkedWorkItem?: LinkedWorkItem;
   automationId?: string;
+  surface?: SessionSurface;
+  terminalSync?: TerminalSync;
 };
 
 /**
@@ -113,9 +121,11 @@ type SessionUpsertPayload = {
  * project (`cwd` "~") are saved too; the rail lists them under Chats.
  */
 export function shouldPersistSession(session: Session): boolean {
-  return (
-    !session.inboxAsk && session.blocks.some((block) => block.role === "user")
-  );
+  if (session.inboxAsk) return false;
+  if (session.blocks.some((block) => block.role === "user")) return true;
+  // A terminal session's prompts live in the CLI until they are read back, so
+  // the binding to that conversation is saved before there is a block to show.
+  return isTerminalSession(session) && !!session.providerSessionId;
 }
 
 /** Matches Rust `validate_id` — a path here fails the whole upsert. */
@@ -152,6 +162,38 @@ function persistableMeta(
     ...(session.automationId && isPersistableId(session.automationId)
       ? { automationId: session.automationId }
       : {}),
+    // The sync cursor only means something while the CLI owns the session.
+    ...(isTerminalSession(session)
+      ? {
+          surface: "terminal" as const,
+          ...(session.terminalSync ? { terminalSync: session.terminalSync } : {}),
+        }
+      : {}),
+  };
+}
+
+export function sanitizeTerminalSync(value: unknown): TerminalSync | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  const sync = value as Record<string, unknown>;
+  const count = (raw: unknown) =>
+    typeof raw === "number" && Number.isFinite(raw) && raw >= 0
+      ? Math.floor(raw)
+      : 0;
+  const afterRecord =
+    typeof sync.afterRecord === "string" && sync.afterRecord
+      ? sync.afterRecord
+      : undefined;
+  const error =
+    typeof sync.error === "string" && sync.error ? sync.error : undefined;
+  const startedAt = count(sync.startedAt);
+  return {
+    ...(afterRecord ? { afterRecord } : {}),
+    prefixBlocks: count(sync.prefixBlocks),
+    syncedSize: count(sync.syncedSize),
+    ...(error ? { error } : {}),
+    ...(startedAt ? { startedAt } : {}),
   };
 }
 
@@ -1067,6 +1109,7 @@ function normalizeSummary(summary: SessionSummary): SessionSummary {
     isPersistableId(summary.automationId)
       ? { automationId: summary.automationId }
       : {}),
+    ...(summary.surface === "terminal" ? { surface: "terminal" as const } : {}),
   };
 }
 
@@ -1108,6 +1151,15 @@ function recordToSession(record: SessionRecord): Session {
     ...(linkedWorkItem ? { linkedWorkItem } : {}),
     ...(record.automationId && isPersistableId(record.automationId)
       ? { automationId: record.automationId }
+      : {}),
+    ...(record.surface === "terminal"
+      ? {
+          surface: "terminal" as const,
+          terminalSync: sanitizeTerminalSync(record.terminalSync) ?? {
+            prefixBlocks: 0,
+            syncedSize: 0,
+          },
+        }
       : {}),
     ...(contextFromRecord(record) ?? {}),
   };

@@ -109,7 +109,12 @@ import {
   loadProjectSidebarTab,
   saveProjectSidebarTab,
 } from "../features/settings/model/projectSidebarTab";
-import { HAS_NATIVE_GLASS, IS_MAC } from "../platform/tauri/platform";
+import {
+  HAS_NATIVE_GLASS,
+  IS_MAC,
+  MOD,
+  SHIFT,
+} from "../platform/tauri/platform";
 import {
   applyUiScale,
   loadUiScale,
@@ -218,6 +223,15 @@ import {
   confirmCloseTerminal,
   confirmCloseTerminals,
 } from "../features/terminal/model/terminalClose";
+import {
+  confirmCloseSessionTerminals,
+  countLiveSessionTerminals,
+  killSessionTerminal,
+} from "../features/terminal/model/sessionTerminal";
+import { supportsTerminalSurface } from "../integrations/harness/core/terminalLaunch";
+import { useSessionSurface } from "./model/useSessionSurface";
+import { useTerminalSync } from "./model/useTerminalSync";
+import { syncTerminalSession } from "../integrations/harness/core/terminalSyncRunner";
 import {
   listRunningTerminals,
   terminalTabLabel,
@@ -390,6 +404,7 @@ import {
   canReplaceSessionTitle,
   formatSessionTitle,
   sessionNeedsInput,
+  isTerminalSession,
   newDefaultSession,
   newSession,
   retargetSessionToProject,
@@ -575,6 +590,7 @@ import {
   loadNotesEnabled,
   loadDiffViewer,
   loadFollowUpBehavior,
+  keybindingShortcutLabel,
   loadKeybindingOverrides,
   loadSettingsSection,
   keybindingPressed,
@@ -843,6 +859,8 @@ function titleTabsEqual(a: TitleTab[], b: TitleTab[]): boolean {
 
 // Register capabilities before composer hooks choose their discovery strategy.
 registerBuiltinHarnesses();
+
+const TOGGLE_SURFACE_KEYS = `${MOD}${SHIFT}T`;
 
 export default function App({
   windowTransfer = null,
@@ -1205,6 +1223,9 @@ export default function App({
       const open = sessionsRef.current.find(
         (session) => session.id === sessionId,
       );
+      if (open && isTerminalSession(open)) {
+        await killSessionTerminal(sessionId);
+      }
       if (!open?.busy) return open;
 
       turnGen.current.set(sessionId, (turnGen.current.get(sessionId) ?? 0) + 1);
@@ -1218,6 +1239,26 @@ export default function App({
       return sessionsRef.current.find((session) => session.id === sessionId);
     },
     [flushHarnessEvents],
+  );
+
+  // Closing flows call one another (a pane close ends in a tab close), and
+  // each must not ask about the same running agent again.
+  const confirmedSessionCloses = useRef(new Set<string>());
+  const confirmSessionTerminals = useCallback(
+    async (sessionIds: Iterable<string>): Promise<boolean> => {
+      const ids = new Set(sessionIds);
+      const asking = sessionsRef.current.filter(
+        (session) =>
+          ids.has(session.id) && !confirmedSessionCloses.current.has(session.id),
+      );
+      if (!(await confirmCloseSessionTerminals(asking))) return false;
+      for (const { id } of asking) {
+        confirmedSessionCloses.current.add(id);
+        window.setTimeout(() => confirmedSessionCloses.current.delete(id), 5000);
+      }
+      return true;
+    },
+    [],
   );
 
   const applyApprovalEvent = useCallback(
@@ -1549,6 +1590,32 @@ export default function App({
     return !!focused && ids.has(focused.id);
   }, [activeTab, currentProjectDock, runningTerminals]);
 
+  const focusedSurfaceSession = activeTab
+    ? sessions.find((session) => session.id === activeTab.focusedId)
+    : undefined;
+  const sessionSurfaceActions = useMemo(() => {
+    const session = focusedSurfaceSession;
+    if (!session) return [];
+    if (isTerminalSession(session)) {
+      return [
+        {
+          id: "toggle-session-surface",
+          label: "Open Session as Chat",
+          hint: keybindingShortcutLabel("Session: Toggle Terminal", TOGGLE_SURFACE_KEYS) ?? undefined,
+        },
+      ];
+    }
+    return supportsTerminalSurface(session.harness) && !session.inboxAsk
+      ? [
+          {
+            id: "toggle-session-surface",
+            label: "Open Session in Terminal",
+            hint: keybindingShortcutLabel("Session: Toggle Terminal", TOGGLE_SURFACE_KEYS) ?? undefined,
+          },
+        ]
+      : [];
+  }, [focusedSurfaceSession]);
+
   const nextApprovalSessionIds = useMemo(() => {
     const ids = new Set<string>();
     for (const session of sessions) {
@@ -1670,30 +1737,40 @@ export default function App({
         // Listening here makes close our job. Letting the default path run
         // calls JS `window.destroy`, which Tauri denies without a permission.
         event.preventDefault();
-        const toTray = loadCloseToTray();
-        if (hasInFlightSessions(sessionsRef.current)) {
-          flushHarnessEvents();
-          if (!toTray && !IS_MAC) {
-            void closeBusyWindow();
+        void (async () => {
+          const toTray = loadCloseToTray();
+          // Closing for real ends the agents in this window's terminals. On
+          // Linux and Windows the last window closing is the quit itself, and
+          // the quit poll finds no window left to ask, so this is the only
+          // place it can be asked. Hiding to the tray leaves them running.
+          const closesForReal = !toTray && !IS_MAC;
+          const agents = closesForReal
+            ? await countLiveSessionTerminals(sessionsRef.current).catch(() => 0)
+            : 0;
+          if (hasInFlightSessions(sessionsRef.current) || agents > 0) {
+            flushHarnessEvents();
+            if (closesForReal) {
+              void closeBusyWindow();
+              return;
+            }
+            // Not `persistQuitState`: that marks the live turns interrupted.
+            void persistLiveTranscripts(sessionsRef.current);
+            void hideCurrentWindow();
             return;
           }
-          // Not `persistQuitState`: that marks the live turns interrupted.
-          void persistLiveTranscripts(sessionsRef.current);
-          void hideCurrentWindow();
-          return;
-        }
-        void persistQuitState(
-          sessionsRef.current,
-          tabsRef.current,
-          activeTabIdRef.current,
-          projectCwdRef.current,
-          readProjectReturnMemory(),
-          "unload",
-          projectTerminalsRef.current,
-          lastDockSideRef.current ?? undefined,
-        ).finally(() => {
-          void (toTray ? hideCurrentWindow() : closeCurrentWindow());
-        });
+          void persistQuitState(
+            sessionsRef.current,
+            tabsRef.current,
+            activeTabIdRef.current,
+            projectCwdRef.current,
+            readProjectReturnMemory(),
+            "unload",
+            projectTerminalsRef.current,
+            lastDockSideRef.current ?? undefined,
+          ).finally(() => {
+            void (toTray ? hideCurrentWindow() : closeCurrentWindow());
+          });
+        })();
       })
       .then((fn) => {
         unlistenClose = fn;
@@ -1981,6 +2058,14 @@ export default function App({
         rememberLoadedSession(loadedSessionCache.current, session);
       }
       persistSession(session);
+      // No tab shows this session any more, so its agent stops with it. What
+      // it wrote last is read back into the saved history before it is dropped.
+      if (isTerminalSession(session)) {
+        void killSessionTerminal(session.id)
+          .then(() => syncTerminalSession(session))
+          .then((synced) => synced && persistSession(synced))
+          .catch(() => undefined);
+      }
       for (const harness of sessionChildHarnesses(session)) {
         void forgetHarnessSession(harness, session.id);
       }
@@ -2707,10 +2792,18 @@ export default function App({
           const ok = await confirmCloseTerminals(terminals);
           if (!ok) return;
         }
+        if (!(await confirmSessionTerminals(leafIds(closing.layout)))) return;
         finishClose();
       })();
     },
-    [activateTab, persistSession, refreshHistory, sidebarCwd, tabCloseScope],
+    [
+      activateTab,
+      confirmSessionTerminals,
+      persistSession,
+      refreshHistory,
+      sidebarCwd,
+      tabCloseScope,
+    ],
   );
 
   const onCloseTabs = useCallback(
@@ -2772,10 +2865,18 @@ export default function App({
           const ok = await confirmCloseTerminals(terminals);
           if (!ok) return;
         }
+        const sessionIds = closing.flatMap((tab) => leafIds(tab.layout));
+        if (!(await confirmSessionTerminals(sessionIds))) return;
         finishClose();
       })();
     },
-    [activateTab, persistSession, refreshHistory, sidebarCwd],
+    [
+      activateTab,
+      confirmSessionTerminals,
+      persistSession,
+      refreshHistory,
+      sidebarCwd,
+    ],
   );
 
   const onCloseOtherTabs = useCallback(() => {
@@ -3035,15 +3136,20 @@ export default function App({
         void refreshHistory(sidebarCwd);
       };
 
-      if (unsaved.length === 0) {
+      void (async () => {
+        if (
+          unsaved.length > 0 &&
+          !(await confirmDiscardUnsaved(
+            "Close this conversation with unsaved files?",
+          ))
+        ) {
+          return;
+        }
+        if (!(await confirmSessionTerminals([oldSession.id]))) return;
         finishClear();
-        return;
-      }
-      void confirmDiscardUnsaved(
-        "Close this conversation with unsaved files?",
-      ).then((ok) => ok && finishClear());
+      })();
     },
-    [tabs, persistSession, refreshHistory, sidebarCwd],
+    [tabs, confirmSessionTerminals, persistSession, refreshHistory, sidebarCwd],
   );
 
   const onCloseAllTabs = useCallback(() => {
@@ -3156,6 +3262,10 @@ export default function App({
         const ok = await confirmCloseTerminals(terminals);
         if (!ok) return;
       }
+      const closingSessionIds = tabsRef.current
+        .filter((entry) => entry.id === tab.id || otherIds.includes(entry.id))
+        .flatMap((entry) => leafIds(entry.layout));
+      if (!(await confirmSessionTerminals(closingSessionIds))) return;
       if (otherIds.length > 0) {
         onCloseTabs(otherIds, tab.id, { confirmed: true });
       }
@@ -3177,8 +3287,16 @@ export default function App({
       );
       setComposerFocused(true);
     })();
-  }, [onCloseTab, onCloseTabs, onClearTabSession, projectCwd, tabCloseScope]);
+  }, [
+    confirmSessionTerminals,
+    onCloseTab,
+    onCloseTabs,
+    onClearTabSession,
+    projectCwd,
+    tabCloseScope,
+  ]);
 
+  const closePaneRef = useRef<(sessionId?: string) => void>(() => undefined);
   const onClosePane = useCallback(
     (sessionId?: string) => {
       // The project terminal is shared by every workspace tab in the project.
@@ -3196,6 +3314,19 @@ export default function App({
         sessionsRef.current.some((session) => session.id === paneId),
       );
       if (!sessionIds.includes(closingId)) return;
+      const closing = sessionsRef.current.find(
+        (session) => session.id === closingId,
+      );
+      if (
+        closing &&
+        isTerminalSession(closing) &&
+        !confirmedSessionCloses.current.has(closingId)
+      ) {
+        void confirmSessionTerminals([closingId]).then(
+          (ok) => ok && closePaneRef.current(closingId),
+        );
+        return;
+      }
       const nextTab = closeLeaf(activeTab, closingId);
       if (!nextTab) {
         const closePlan = planWorkspaceTabClose({
@@ -3228,6 +3359,7 @@ export default function App({
     },
     [
       activeTab,
+      confirmSessionTerminals,
       onCloseFile,
       onCloseTab,
       onClearTabSession,
@@ -3237,6 +3369,7 @@ export default function App({
       tabCloseScope,
     ],
   );
+  closePaneRef.current = onClosePane;
 
   const onCloseTitleTab = useCallback(
     (id: string) => {
@@ -4495,8 +4628,14 @@ export default function App({
             )
               return false;
             const terminals = files.filter((file) => file.terminal);
-            return (
-              terminals.length === 0 || (await confirmCloseTerminals(terminals))
+            if (
+              terminals.length > 0 &&
+              !(await confirmCloseTerminals(terminals))
+            ) {
+              return false;
+            }
+            return confirmSessionTerminals(
+              closedTabs.flatMap((tab) => leafIds(tab.layout)),
             );
           },
           stop: stopSessionForRemoval,
@@ -5637,6 +5776,66 @@ export default function App({
     [],
   );
 
+  const stopChatForTerminal = useCallback(
+    async (sessionId: string) => {
+      await stopSessionForRemoval(sessionId);
+      const session = sessionsRef.current.find((entry) => entry.id === sessionId);
+      if (!session) return;
+      await Promise.all(
+        sessionChildHarnesses(session).map((harness) =>
+          stopHarnessSession(harness, sessionId).catch(() => undefined),
+        ),
+      );
+    },
+    [stopSessionForRemoval],
+  );
+  const {
+    bindProviderSession: onBindProviderSession,
+    openInTerminal: onOpenSessionInTerminal,
+    openAsChat: onOpenSessionAsChat,
+  } = useSessionSurface({
+    sessionsRef,
+    setSessions,
+    stopChat: stopChatForTerminal,
+  });
+  const { syncNow: syncTerminalNow } = useTerminalSync({
+    sessions,
+    sessionsRef,
+    setSessions,
+  });
+  const onTerminalExit = useCallback(
+    (sessionId: string) => void syncTerminalNow(sessionId),
+    [syncTerminalNow],
+  );
+  const toggleLoadedSessionSurface = useCallback(
+    (sessionId: string): boolean => {
+      const session = sessionsRef.current.find((entry) => entry.id === sessionId);
+      if (!session) return false;
+      void (isTerminalSession(session)
+        ? onOpenSessionAsChat(sessionId)
+        : onOpenSessionInTerminal(sessionId));
+      return true;
+    },
+    [onOpenSessionAsChat, onOpenSessionInTerminal],
+  );
+  /** A row in the session list: it may not be open yet, so open it first. */
+  const onToggleHistorySessionSurface = useCallback(
+    async (sessionId: string) => {
+      if (toggleLoadedSessionSurface(sessionId)) return;
+      await onSelectHistorySession(sessionId);
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        if (toggleLoadedSessionSurface(sessionId)) return;
+        await new Promise((resolve) => window.setTimeout(resolve, 50));
+      }
+    },
+    [onSelectHistorySession, toggleLoadedSessionSurface],
+  );
+  /** The focused conversation, from the keyboard or the command palette. */
+  const onToggleFocusedSessionSurface = useCallback(() => {
+    const tab = tabsRef.current.find((entry) => entry.id === activeTabIdRef.current);
+    if (tab) toggleLoadedSessionSurface(tab.focusedId);
+  }, [toggleLoadedSessionSurface]);
+
   const onSaveDraft = useCallback(
     (
       sessionId: string,
@@ -5734,6 +5933,21 @@ export default function App({
       options?: SubmitOptions,
     ): SubmissionAcceptance => {
       if (editedResends.isActive(sessionId)) return false;
+      // The CLI in the terminal owns this conversation. A chat turn would start
+      // a second writer on it.
+      const inTerminal = sessionsRef.current.find((s) => s.id === sessionId);
+      if (inTerminal && isTerminalSession(inTerminal)) {
+        options?.onSettled?.({
+          status: "failed",
+          text: "",
+          error: "This session runs in the terminal",
+        });
+        void message(
+          "This session runs in the terminal. Open it as chat to send from MonoCode.",
+          { title: "MonoCode", kind: "info" },
+        );
+        return false;
+      }
       const controlError = orchestrator.submissionError(
         sessionId,
         options?.managed,
@@ -9807,6 +10021,7 @@ export default function App({
   const actions = useRef({
     onNew,
     onArchiveFocusedSession,
+    onToggleFocusedSessionSurface,
     onCloseOtherTabs,
     onCloseAllTabs,
     onClosePane,
@@ -9838,6 +10053,7 @@ export default function App({
   actions.current = {
     onNew,
     onArchiveFocusedSession,
+    onToggleFocusedSessionSurface,
     onCloseOtherTabs,
     onCloseAllTabs,
     onClosePane,
@@ -9921,6 +10137,12 @@ export default function App({
         if (cmd === "archive-session") {
           if (e.repeat) return;
           actions.current.onArchiveFocusedSession(e);
+          return;
+        }
+        if (cmd === "toggle-session-surface") {
+          if (e.repeat) return;
+          e.preventDefault();
+          actions.current.onToggleFocusedSessionSurface();
           return;
         }
         const target = e.target instanceof Element ? e.target : null;
@@ -10262,6 +10484,10 @@ export default function App({
     onBtwStop,
     onBtwModelChange,
     onNewTerminal: onNewTerminalInSession,
+    onBindProviderSession,
+    onOpenSessionAsChat,
+    onOpenSessionInTerminal,
+    onTerminalExit,
   };
 
   const chromeSurfaceOpen =
@@ -10338,6 +10564,7 @@ export default function App({
               onSessionNavigationOrder={onSessionNavigationOrder}
               onPlaceSessionOnPane={onPlaceSessionOnPane}
               onRenameSession={onRenameHistorySession}
+              onToggleSessionSurface={onToggleHistorySessionSurface}
               onArchiveSession={onArchiveHistorySession}
               onArchiveSessions={onArchiveHistorySessions}
               onPinSession={onPinHistorySession}
@@ -10773,9 +11000,12 @@ export default function App({
               openPaths={openFilePaths}
               initialQuery={filePickerInitialQuery}
               onOpenFile={onOpenFile}
+              extraActions={sessionSurfaceActions}
               onRunAction={(id) => {
                 if (id === "reload") actions.current.onReload();
-                else if (id === "import-session") {
+                else if (id === "toggle-session-surface") {
+                  actions.current.onToggleFocusedSessionSurface();
+                } else if (id === "import-session") {
                   setFilePickerOpen(false);
                   setSessionImport({});
                 }
@@ -10999,6 +11229,9 @@ function toTitleTab(
     files,
     multiPane,
     fileFocused,
+    ...(focused && !fileFocused && isTerminalSession(focused)
+      ? { sessionTerminal: true }
+      : {}),
     blank: isBlankWorkspaceTab(tab, sessions),
     dirty: tab.editorPanes.some((pane) =>
       pane.files.some(

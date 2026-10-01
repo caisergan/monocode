@@ -158,6 +158,30 @@ describe("tabCommand", () => {
     ).toBeNull();
   });
 
+  it("toggles a session between chat and terminal with Cmd/Ctrl+Shift+T", () => {
+    expect(tabCommand(key({ key: "T", metaKey: true, shiftKey: true }))).toBe(
+      "toggle-session-surface",
+    );
+    expect(tabCommand(key({ key: "t", ctrlKey: true, shiftKey: true }))).toBe(
+      "toggle-session-surface",
+    );
+    // Auto-repeat must not flip the session back and forth.
+    expect(
+      tabCommand(key({ key: "t", metaKey: true, shiftKey: true, repeat: true })),
+    ).toBeNull();
+    // A new tab is still Cmd+T.
+    expect(tabCommand(key({ key: "t", metaKey: true }))).toBe("new");
+  });
+
+  it("names the toggle so it can be rebound", () => {
+    expect(tabCommandKeybinding("toggle-session-surface")).toBe(
+      "Session: Toggle Terminal",
+    );
+    expect(
+      tabCommandForKeybinding("Session: Toggle Terminal", key({ key: "y" })),
+    ).toBe("toggle-session-surface");
+  });
+
   it("maps parsed commands to configurable keybinding rows", () => {
     expect(tabCommandKeybinding("new")).toBe("Tab: New");
     expect(tabCommandKeybinding("cycle-next")).toBe("Tab: Cycle Next");

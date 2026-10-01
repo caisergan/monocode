@@ -8,6 +8,7 @@
 //! already resume natively.
 
 mod claude;
+mod codex;
 mod pi;
 
 use std::collections::{HashMap, HashSet};
@@ -18,7 +19,7 @@ use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::dirs_home;
 use crate::session_store::{KnownSession, SessionStore};
@@ -51,17 +52,19 @@ const MIN_ID_QUERY_LEN: usize = 6;
 #[serde(rename_all = "lowercase")]
 pub enum Harness {
     Claude,
+    Codex,
     Pi,
     /// oh-my-pi, a fork of Pi with the same transcript format.
     Omp,
 }
 
 impl Harness {
-    const ALL: [Harness; 3] = [Harness::Claude, Harness::Pi, Harness::Omp];
+    const ALL: [Harness; 4] = [Harness::Claude, Harness::Codex, Harness::Pi, Harness::Omp];
 
     fn id(self) -> &'static str {
         match self {
             Harness::Claude => "claude",
+            Harness::Codex => "codex",
             Harness::Pi => "pi",
             Harness::Omp => "omp",
         }
@@ -70,6 +73,7 @@ impl Harness {
     fn label(self) -> &'static str {
         match self {
             Harness::Claude => "Claude Code",
+            Harness::Codex => "Codex",
             Harness::Pi => "Pi",
             Harness::Omp => "omp",
         }
@@ -96,6 +100,10 @@ pub struct AgentSessionQuery {
     /// Only sessions that import as a chat without a project: started in the
     /// home folder, or in one that no longer exists. Ignored with `cwd`.
     projectless: bool,
+    /// List one agent's conversations under a named MonoCode account instead
+    /// of the default config folder. Needs exactly one of Claude or Codex in
+    /// `harnesses`.
+    provider_account_id: Option<String>,
 }
 
 /// Whether a session's folder can hold a MonoCode chat.
@@ -157,6 +165,7 @@ fn sources(only: Option<&[Harness]>) -> Vec<Source> {
         .filter_map(|harness| {
             let root = match harness {
                 Harness::Claude => claude::root(),
+                Harness::Codex => codex::root(),
                 Harness::Pi | Harness::Omp => pi::root(harness),
             }?;
             // Two agents pointed at one folder would list every file twice.
@@ -168,10 +177,19 @@ fn sources(only: Option<&[Harness]>) -> Vec<Source> {
 
 #[tauri::command(async)]
 pub fn agent_list_sessions(
+    app: AppHandle,
     store: State<'_, SessionStore>,
     request: AgentSessionQuery,
 ) -> Result<AgentSessionListing, String> {
-    let sources = sources(request.harnesses.as_deref());
+    let sources = match (
+        request.provider_account_id.as_deref(),
+        request.harnesses.as_deref(),
+    ) {
+        (Some(account), Some([harness])) => account_source(&app, *harness, Some(account))?
+            .into_iter()
+            .collect(),
+        _ => sources(request.harnesses.as_deref()),
+    };
     let mut known = Known::new();
     for source in &sources {
         known.insert(
@@ -194,23 +212,51 @@ pub fn agent_list_sessions(
     ))
 }
 
+/// Where `harness` keeps the transcripts of one account. Only Claude has named
+/// account profiles here: each has its own config directory, which is where
+/// the CLI writes `projects/` when MonoCode launches it for that account.
+fn account_source(
+    app: &AppHandle,
+    harness: Harness,
+    account: Option<&str>,
+) -> Result<Option<Source>, String> {
+    if matches!(harness, Harness::Claude | Harness::Codex) {
+        if let Some(dir) = crate::harness::provider_account_dir(app, harness.id(), account)? {
+            let folder = if harness == Harness::Claude {
+                "projects"
+            } else {
+                "sessions"
+            };
+            return Ok(Some(Source {
+                harness,
+                root: dir.join(folder),
+            }));
+        }
+    }
+    Ok(sources(Some(&[harness])).into_iter().next())
+}
+
+fn locate(source: &Source, cwd: &str, session_id: &str) -> Option<PathBuf> {
+    match source.harness {
+        Harness::Claude => claude::find(&source.root, cwd, session_id),
+        Harness::Codex => codex::find(&source.root, session_id),
+        Harness::Pi | Harness::Omp => pi::find(&source.root, session_id),
+    }
+}
+
 #[tauri::command(async)]
 pub fn agent_read_session(
+    app: AppHandle,
     harness: Harness,
     cwd: String,
     session_id: String,
+    provider_account_id: Option<String>,
 ) -> Result<Vec<Value>, String> {
     validate_session_id(&session_id)?;
     let missing = || format!("That {} session no longer exists", harness.label());
-    let source = sources(Some(&[harness]))
-        .into_iter()
-        .next()
+    let source = account_source(&app, harness, provider_account_id.as_deref())?
         .ok_or_else(|| format!("{}'s session folder was not found", harness.label()))?;
-    let path = match harness {
-        Harness::Claude => claude::find(&source.root, &cwd, &session_id),
-        Harness::Pi | Harness::Omp => pi::find(&source.root, &session_id),
-    }
-    .ok_or_else(missing)?;
+    let path = locate(&source, &cwd, &session_id).ok_or_else(missing)?;
     let size = std::fs::metadata(&path)
         .map_err(|error| error.to_string())?
         .len();
@@ -222,8 +268,52 @@ pub fn agent_read_session(
     }
     Ok(match harness {
         Harness::Claude => read_records(&path, claude::slim_record)?,
+        Harness::Codex => read_records(&path, codex::slim_record)?,
         Harness::Pi | Harness::Omp => read_records(&path, pi::slim_record)?,
     })
+}
+
+/// How big a transcript is and when it last changed.
+#[derive(Serialize, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentSessionStat {
+    size: u64,
+    modified_at: u64,
+}
+
+fn stat_transcript(
+    source: Option<&Source>,
+    cwd: &str,
+    session_id: &str,
+) -> Option<AgentSessionStat> {
+    let path = locate(source?, cwd, session_id)?;
+    let metadata = std::fs::metadata(path).ok().filter(|meta| meta.is_file())?;
+    let modified_at = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0);
+    Some(AgentSessionStat {
+        size: metadata.len(),
+        modified_at,
+    })
+}
+
+/// The size of a conversation's transcript without parsing it, so a poll can
+/// tell whether anything was written. `None` while the agent has not saved the
+/// conversation yet (a new one is saved with its first prompt).
+#[tauri::command(async)]
+pub fn agent_session_stat(
+    app: AppHandle,
+    harness: Harness,
+    cwd: String,
+    session_id: String,
+    provider_account_id: Option<String>,
+) -> Result<Option<AgentSessionStat>, String> {
+    validate_session_id(&session_id)?;
+    let source = account_source(&app, harness, provider_account_id.as_deref())?;
+    Ok(stat_transcript(source.as_ref(), &cwd, &session_id))
 }
 
 /// Latest listing per owner. The picker lists again on every search pause;
@@ -317,10 +407,11 @@ fn candidates(sources: &[Source], cwd: Option<&str>) -> Vec<Candidate> {
         .iter()
         .flat_map(|source| match source.harness {
             Harness::Claude => claude::candidates(&source.root, cwd),
+            Harness::Codex => codex::candidates(&source.root),
             Harness::Pi | Harness::Omp => pi::candidates(source.harness, &source.root),
         })
         .collect();
-    found.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    found.sort_by_key(|candidate| std::cmp::Reverse(candidate.updated_at));
     found
 }
 
@@ -338,6 +429,7 @@ struct TranscriptInfo {
 fn transcript_info(candidate: &Candidate) -> Option<TranscriptInfo> {
     match candidate.harness {
         Harness::Claude => claude::transcript_info(candidate),
+        Harness::Codex => codex::transcript_info(candidate),
         Harness::Pi | Harness::Omp => pi::transcript_info(candidate),
     }
 }
@@ -822,5 +914,29 @@ mod tests {
             serde_json::from_value::<Harness>(Value::from("claude")).unwrap(),
             Harness::Claude
         );
+    }
+
+    #[test]
+    fn stat_reports_a_saved_transcript_and_nothing_for_an_unsaved_one() {
+        let root = temp_root("stat");
+        let cwd = "/work/app";
+        let dir = root.join("-work-app");
+        std::fs::create_dir_all(&dir).unwrap();
+        let id = "5b0f4d3e-7c1a-4a0e-9d55-2f1c8a6b9e10";
+        let source = Source {
+            harness: Harness::Claude,
+            root: root.clone(),
+        };
+
+        assert_eq!(stat_transcript(Some(&source), cwd, id), None);
+
+        std::fs::write(dir.join(format!("{id}.jsonl")), "{\"type\":\"user\"}\n").unwrap();
+        let stat = stat_transcript(Some(&source), cwd, id).unwrap();
+        assert_eq!(stat.size, 16);
+        assert!(stat.modified_at > 0);
+
+        // A missing agent folder is the same as an unsaved conversation.
+        assert_eq!(stat_transcript(None, cwd, id), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

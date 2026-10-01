@@ -8,6 +8,7 @@ import {
   inFlightRefs,
   isInFlightSession,
   markTurnInterrupted,
+  closeWindowWhileBusyMessage,
   quitWhileBusyMessage,
   shouldWriteInFlightSnapshot,
   workspaceFromResumed,
@@ -212,6 +213,35 @@ describe("quitWhileBusyMessage", () => {
   it("mentions resume on reopen", () => {
     expect(quitWhileBusyMessage(1)).toContain("1 chat is still running");
     expect(quitWhileBusyMessage(3)).toContain("3 chats are still running");
+  });
+});
+
+describe("quitWhileBusyMessage with terminal agents", () => {
+  it("names agents on their own, and says they stop rather than resume", () => {
+    const one = quitWhileBusyMessage(0, 1);
+    expect(one).toContain("1 terminal agent is still running");
+    expect(one).toContain("It will stop");
+    expect(quitWhileBusyMessage(0, 3)).toContain("3 terminal agents are still running");
+    expect(quitWhileBusyMessage(0, 3)).toContain("They will stop");
+  });
+
+  it("separates chats, which resume, from agents, which stop", () => {
+    const both = quitWhileBusyMessage(2, 1);
+    expect(both).toContain("2 chats and 1 terminal agent are still running");
+    expect(both).toMatch(/Chats resume.*terminal agents stop/);
+  });
+
+  it("is the chat message, unchanged, when no agent is running", () => {
+    expect(quitWhileBusyMessage(2, 0)).toBe(quitWhileBusyMessage(2));
+  });
+});
+
+describe("closeWindowWhileBusyMessage", () => {
+  it("says what the window holds", () => {
+    expect(closeWindowWhileBusyMessage(1)).toContain("its running chats?");
+    expect(closeWindowWhileBusyMessage(0, 1)).toContain("its running terminal agents?");
+    expect(closeWindowWhileBusyMessage(1, 1)).toContain("running chats and terminal agents?");
+    expect(closeWindowWhileBusyMessage(0, 2)).toContain("Other windows will stay open");
   });
 });
 

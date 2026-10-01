@@ -59,12 +59,17 @@ void listen<number>("quit_poll", (event) => {
 // Scoped to this window on purpose: a global `listen` is registered as `Any`,
 // which Tauri matches for every event regardless of the emitter's target, so
 // one dialog would become one per window.
-void getCurrentWebviewWindow().listen<{ id: number; inFlight: number }>(
-  "quit_confirm",
-  (event) => {
-    void askQuitConfirmation(event.payload.id, event.payload.inFlight);
-  },
-);
+void getCurrentWebviewWindow().listen<{
+  id: number;
+  inFlight: number;
+  agents?: number;
+}>("quit_confirm", (event) => {
+  void askQuitConfirmation(
+    event.payload.id,
+    event.payload.inFlight,
+    event.payload.agents,
+  );
+});
 void listen<number>("quit_commit", (event) => {
   void commitQuit(event.payload);
 });

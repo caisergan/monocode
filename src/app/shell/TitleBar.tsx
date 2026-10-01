@@ -74,6 +74,8 @@ export type Tab = {
   groupId?: string;
   dirty?: boolean;
   terminal?: boolean;
+  /** The focused conversation runs in the agent's own CLI. */
+  sessionTerminal?: boolean;
   /** File id when the whole tab is one preview file; double-click pins it. */
   previewFileId?: string;
 };
@@ -359,6 +361,13 @@ function TitleTabItem({
         {/* Keep two-line tabs compact while leaving room for descenders. */}
         <span className="flex min-w-0 flex-1 flex-col justify-center">
           <span className="flex min-w-0 items-center gap-1">
+            {tab.sessionTerminal ? (
+              <Terminal
+                aria-label="Runs in the terminal"
+                className="size-3 shrink-0 text-content/55"
+                strokeWidth={1.75}
+              />
+            ) : null}
             <span
               className={`min-w-0 truncate leading-tight ${tab.previewFileId ? "italic" : ""} ${
                 meta

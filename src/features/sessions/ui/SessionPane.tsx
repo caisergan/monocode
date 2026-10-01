@@ -1,4 +1,4 @@
-import { ChevronDown, GripVertical, X } from "../../../shared/ui/icons";
+import { ChevronDown } from "../../../shared/ui/icons";
 import {
   memo,
   useCallback,
@@ -10,6 +10,9 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { Composer } from "./Composer";
+import { SessionPaneHeader } from "./SessionPaneHeader";
+import { SessionTerminalPane } from "./SessionTerminalPane";
+import { supportsTerminalSurface } from "../../../integrations/harness/core/terminalLaunch";
 import type { Worktree } from "../../source-control/model/worktrees";
 import {
   orchestrationCheckoutCwd,
@@ -30,6 +33,7 @@ import {
   type RecentProject,
 } from "../../projects/model/recents";
 import {
+  isTerminalSession,
   sessionDisplayTitle,
   sessionDraftBlock,
   sessionWorkCwd,
@@ -56,7 +60,6 @@ import {
 } from "../model/transcriptJump";
 import { EmptySession } from "./EmptySession";
 import { useComposerDockMotion } from "./useComposerDockMotion";
-import { MOD } from "../../../platform/tauri/platform";
 import {
   acknowledgeQuoteRequest,
   ADD_TO_CHAT_EVENT,
@@ -206,13 +209,44 @@ type Props = {
     modelSettings: Record<string, string>,
   ) => void;
   onNewTerminal: (sessionId: string) => void;
+  /** Stores the provider conversation id MonoCode picked for a new terminal session. */
+  onBindProviderSession?: (sessionId: string, providerSessionId: string) => void;
+  /** Moves a terminal session back to MonoCode's own chat. */
+  onOpenSessionAsChat?: (sessionId: string) => void;
+  /** Runs a session in the agent's own CLI instead of MonoCode's chat. */
+  onOpenSessionInTerminal?: (sessionId: string) => void;
+  /** The session's CLI ended, so its transcript is complete. */
+  onTerminalExit?: (sessionId: string) => void;
 
   onPaneDragStart?: (event: ReactPointerEvent<HTMLElement>) => void;
   /** Keeps this transcript mounted after the pane closes. */
   transcriptPool?: TranscriptPool;
 };
 
-export const SessionPane = memo(function SessionPane({
+/**
+ * A session is either MonoCode's chat or the agent's own CLI in a terminal.
+ * Each is its own component, so neither carries the other's hooks.
+ */
+export const SessionPane = memo(function SessionPane(props: Props) {
+  return isTerminalSession(props.session) ? (
+    <SessionTerminalPane
+      session={props.session}
+      visible={props.visible}
+      focused={props.focused}
+      inSplit={props.inSplit}
+      onFocus={props.onFocus}
+      onClose={props.onClose}
+      onBindProviderSession={props.onBindProviderSession}
+      onOpenSessionAsChat={props.onOpenSessionAsChat}
+      onTerminalExit={props.onTerminalExit}
+      onPaneDragStart={props.onPaneDragStart}
+    />
+  ) : (
+    <ChatSessionPane {...props} />
+  );
+});
+
+const ChatSessionPane = memo(function ChatSessionPane({
   session,
   reviewUndoLocked = false,
   visible,
@@ -270,6 +304,7 @@ export const SessionPane = memo(function SessionPane({
   onBtwStop,
   onBtwModelChange,
   onNewTerminal,
+  onOpenSessionInTerminal,
   onPaneDragStart,
   transcriptPool,
 }: Props) {
@@ -662,51 +697,13 @@ export const SessionPane = memo(function SessionPane({
         )
       ) : null}
       {inSplit ? (
-        <div
-          className={`flex h-9 shrink-0 touch-none items-center gap-1.5 border-b border-stroke px-2 select-none ${
-            onPaneDragStart ? "cursor-grab active:cursor-grabbing" : ""
-          }`}
-          onPointerDown={(event) => {
-            if (event.button !== 0 || !onPaneDragStart) return;
-            if (
-              (event.target as HTMLElement | null)?.closest("[data-no-drag]")
-            ) {
-              return;
-            }
-            onPaneDragStart(event);
-          }}
-        >
-          {onPaneDragStart ? (
-            <GripVertical
-              className="size-3.5 shrink-0 text-content/35"
-              strokeWidth={1.75}
-            />
-          ) : null}
-          <span
-            className={`size-2 shrink-0 rounded-full ${focused ? "bg-accent" : "bg-transparent"}`}
-          />
-          <span
-            className="min-w-0 flex-1 truncate text-xs text-content"
-            title={title}
-          >
-            {title}
-          </span>
-          <button
-            type="button"
-            title={`Close Pane (${MOD}W)`}
-            aria-label="Close pane"
-            data-no-drag
-            className="grid size-5 shrink-0 place-items-center rounded text-content/50 hover:bg-content/10 hover:text-content"
-            onPointerDown={(e) => e.stopPropagation()}
-            onMouseDown={(e) => e.stopPropagation()}
-            onClick={(e) => {
-              e.stopPropagation();
-              onClose(session.id);
-            }}
-          >
-            <X className="size-3" strokeWidth={1.75} />
-          </button>
-        </div>
+        <SessionPaneHeader
+          sessionId={session.id}
+          title={title}
+          focused={focused}
+          onClose={onClose}
+          onPaneDragStart={onPaneDragStart}
+        />
       ) : null}
       <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
         <div
@@ -748,6 +745,13 @@ export const SessionPane = memo(function SessionPane({
             ) : (
               <EmptySession
                 cwd={session.cwd}
+                onOpenInTerminal={
+                  onOpenSessionInTerminal &&
+                  supportsTerminalSurface(session.harness) &&
+                  !session.worktreeRemoved
+                    ? () => onOpenSessionInTerminal(session.id)
+                    : undefined
+                }
                 hasChatBackground={Boolean(
                   projectBackground || globalBackgroundPath,
                 )}

@@ -61,6 +61,7 @@ export class TranscriptReplay {
   private turnEnd: number | undefined;
   private firstPrompt: string | undefined;
   private lastContext: number | undefined;
+  private lastWindow: number | undefined;
 
   constructor(base: Session, target: TranscriptImportTarget) {
     this.session = {
@@ -100,9 +101,10 @@ export class TranscriptReplay {
     if (this.turnOpen && at != null) this.turnEnd = at;
   }
 
-  /** Tokens in context after the latest reply. */
-  context(used: number | undefined): void {
+  /** Tokens in context after the latest reply, and the window when known. */
+  context(used: number | undefined, window?: number): void {
     if (used !== undefined) this.lastContext = used;
+    if (window !== undefined) this.lastWindow = window;
   }
 
   /** The user stopped the running turn. */
@@ -160,7 +162,11 @@ export class TranscriptReplay {
   finish(harness: HarnessId, title: string | undefined): Session {
     this.closeTurn();
     if (this.lastContext !== undefined) {
-      this.emit({ type: "context", used: this.lastContext });
+      this.emit({
+        type: "context",
+        used: this.lastContext,
+        ...(this.lastWindow !== undefined ? { window: this.lastWindow } : {}),
+      });
     }
     return {
       ...this.session,

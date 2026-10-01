@@ -24,6 +24,7 @@ import {
   Share,
   Settings,
   StickyNote,
+  Terminal,
   Zap,
 } from "../../shared/ui/icons";
 import {
@@ -58,6 +59,7 @@ import { IS_MAC, MOD } from "../../platform/tauri/platform";
 import { resolveModel } from "../../features/sessions/model/models";
 import type { OpenFileFn } from "../../features/search/model/search";
 import { sessionDisplayTitle } from "../../features/sessions/model/session";
+import { supportsTerminalSurface } from "../../integrations/harness/core/terminalLaunch";
 import { nextUnseenFinishedSessions } from "../../features/sessions/model/sessionDone";
 import { orchestrationTaskLabel } from "../../features/orchestration/model/orchestrationSummary";
 import {
@@ -219,6 +221,8 @@ type Props = {
     edge: PaneEdge,
   ) => void;
   onRenameSession?: (sessionId: string, title: string) => void;
+  /** Moves the session between MonoCode's chat and the agent's own CLI. */
+  onToggleSessionSurface?: (sessionId: string) => void;
   onArchiveSession?: (sessionId: string, archived: boolean) => void;
   onArchiveSessions?: (
     sessionIds: readonly string[],
@@ -318,6 +322,7 @@ function SidebarComponent({
   onPrefetchSession,
   onPlaceSessionOnPane,
   onRenameSession,
+  onToggleSessionSurface,
   onArchiveSession,
   onArchiveSessions,
   onPinSession,
@@ -922,6 +927,21 @@ function SidebarComponent({
           },
         ]
       : []),
+    ...(!multipleMenuSessions &&
+    onToggleSessionSurface &&
+    menuSessions[0] &&
+    supportsTerminalSurface(menuSessions[0].harness)
+      ? [
+          {
+            kind: "item" as const,
+            id: "toggle-surface",
+            label:
+              menuSessions[0].surface === "terminal"
+                ? "Open as Chat"
+                : "Open in Terminal",
+          },
+        ]
+      : []),
     ...(!multipleMenuSessions && onSetSessionLinkedWorkItem
       ? [
           {
@@ -1058,6 +1078,10 @@ function SidebarComponent({
     }
     if (id === "rename") {
       setRenamingSessionId(sessionId);
+      return;
+    }
+    if (id === "toggle-surface") {
+      onToggleSessionSurface?.(sessionId);
       return;
     }
     if (id === "link-work-item") {
@@ -3095,6 +3119,13 @@ const SessionCard = memo(function SessionCard({
           >
             {session.pinned ? (
               <Pin
+                className="size-3 shrink-0 text-content/45"
+                strokeWidth={1.75}
+              />
+            ) : null}
+            {session.surface === "terminal" ? (
+              <Terminal
+                aria-label="Runs in the terminal"
                 className="size-3 shrink-0 text-content/45"
                 strokeWidth={1.75}
               />

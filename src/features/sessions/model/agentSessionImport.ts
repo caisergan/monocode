@@ -1,4 +1,5 @@
 import { claudeTranscriptToSession } from "../../../integrations/harness/providers/claude/claudeImport";
+import { codexTranscriptToSession } from "../../../integrations/harness/providers/codex/codexImport";
 import { piTranscriptToSession } from "../../../integrations/harness/providers/pi/piImport";
 import type { TranscriptImportInput } from "../../../integrations/harness/core/transcriptImport";
 import {
@@ -96,9 +97,9 @@ function transcriptToSession(
   harness: ImportableHarness,
   input: TranscriptImportInput,
 ): Session {
-  return harness === "claude"
-    ? claudeTranscriptToSession(input)
-    : piTranscriptToSession({ ...input, harness });
+  if (harness === "claude") return claudeTranscriptToSession(input);
+  if (harness === "codex") return codexTranscriptToSession(input);
+  return piTranscriptToSession({ ...input, harness });
 }
 
 /**

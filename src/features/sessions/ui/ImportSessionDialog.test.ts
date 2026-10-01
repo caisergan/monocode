@@ -474,6 +474,7 @@ describe("ImportSessionDialog", () => {
     await act(async () => claude!.click());
     await flush();
     expect(api.listAgentSessions.mock.lastCall![0].harnesses).toEqual([
+      "codex",
       "pi",
       "omp",
     ]);

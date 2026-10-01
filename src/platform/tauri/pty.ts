@@ -15,6 +15,14 @@ const dataBufferBytes = new Map<string, number>();
  * in the process; decoding those in a window that never mounted them was
  * megabytes of base64 work and a 256KB replay buffer per stranger id. */
 const openedPtys = new Set<string>();
+/**
+ * PTYs that must outlive their view (an agent CLI in a session pane). The
+ * event bridge stays up for them, so output keeps being buffered for replay
+ * and their exit is not lost while nothing is mounted.
+ */
+const heldPtys = new Set<string>();
+/** Exit codes of held PTYs that ended, so a view mounted later can show it. */
+const exitedPtys = new Map<string, number | null>();
 
 /**
  * Replay budget for a PTY whose view is not mounted. Chunks arrive at up to
@@ -101,6 +109,10 @@ function ensureBridge() {
     }),
     listen<ExitPayload>("pty-exit", (event) => {
       const { id, code } = event.payload;
+      if (heldPtys.has(id)) {
+        exitedPtys.set(id, code);
+        releaseHold(id);
+      }
       exitHandlers.get(id)?.(code);
     }),
   ]);
@@ -127,13 +139,45 @@ function release() {
   }, 500);
 }
 
+/**
+ * A CLI to run in the PTY instead of the user's shell. Rust picks the binary
+ * (and rejects anything but these two), so only the arguments come from here.
+ */
+export type PtyLaunch = {
+  harness: "claude" | "codex";
+  args: string[];
+  providerAccountId?: string | null;
+};
+
+/** Keep `id`'s output and exit flowing while no view is subscribed. */
+export function holdPty(id: string): void {
+  if (heldPtys.has(id)) return;
+  heldPtys.add(id);
+  openedPtys.add(id);
+  retain();
+}
+
+function releaseHold(id: string): void {
+  if (heldPtys.delete(id)) release();
+}
+
+/** The exit code of a held PTY that has ended; `undefined` while it runs. */
+export function ptyExitCode(id: string): number | null | undefined {
+  return exitedPtys.get(id);
+}
+
 export async function spawnPty(
   id: string,
   cwd: string,
   cols: number,
   rows: number,
+  launch?: PtyLaunch,
 ): Promise<void> {
-  await invoke("pty_spawn", { id, cwd, cols, rows });
+  exitedPtys.delete(id);
+  await invoke(
+    "pty_spawn",
+    launch ? { id, cwd, cols, rows, launch } : { id, cwd, cols, rows },
+  );
 }
 
 export async function writePty(id: string, data: string): Promise<void> {
@@ -158,6 +202,8 @@ export async function killPty(id: string): Promise<void> {
   dataHandlers.delete(id);
   exitHandlers.delete(id);
   openedPtys.delete(id);
+  exitedPtys.delete(id);
+  releaseHold(id);
   clearBuffered(id);
   await invoke("pty_kill", { id }).catch(() => undefined);
 }
@@ -166,6 +212,8 @@ export async function killAllPtys(): Promise<void> {
   dataHandlers.clear();
   exitHandlers.clear();
   openedPtys.clear();
+  exitedPtys.clear();
+  for (const id of [...heldPtys]) releaseHold(id);
   dataBuffer.clear();
   dataBufferBytes.clear();
   await invoke("pty_kill_all").catch(() => undefined);
@@ -185,6 +233,8 @@ export function subscribePty(
     clearBuffered(id);
     for (const chunk of queued) onData(chunk);
   }
+  const exited = exitedPtys.get(id);
+  if (exited !== undefined) onExit(exited);
   return () => {
     if (dataHandlers.get(id) === onData) dataHandlers.delete(id);
     if (exitHandlers.get(id) === onExit) exitHandlers.delete(id);

@@ -9,6 +9,7 @@ import {
   closeBusyWindow,
   commitQuit,
   confirmReload,
+  reapWindowRuntime,
   reportQuitPoll,
   setQuitWorkspace,
 } from "./appLifecycle";
@@ -300,7 +301,7 @@ describe("coordinated quit", () => {
     const release = busyWorkspace();
     try {
       await reportQuitPoll(7);
-      expect(invokedWith("quit_poll_reply")).toEqual({ id: 7, inFlight: 1 });
+      expect(invokedWith("quit_poll_reply")).toEqual({ id: 7, inFlight: 1, agents: 0 });
     } finally {
       release();
     }
@@ -322,7 +323,7 @@ describe("coordinated quit", () => {
     );
     try {
       await reportQuitPoll(1);
-      expect(invokedWith("quit_poll_reply")).toEqual({ id: 1, inFlight: 1 });
+      expect(invokedWith("quit_poll_reply")).toEqual({ id: 1, inFlight: 1, agents: 0 });
     } finally {
       release();
     }
@@ -330,7 +331,7 @@ describe("coordinated quit", () => {
 
   it("reports nothing from a window with no workspace yet", async () => {
     await reportQuitPoll(2);
-    expect(invokedWith("quit_poll_reply")).toEqual({ id: 2, inFlight: 0 });
+    expect(invokedWith("quit_poll_reply")).toEqual({ id: 2, inFlight: 0, agents: 0 });
   });
 
   it("passes a declined dialog back as a refusal", async () => {
@@ -507,3 +508,134 @@ describe("remembering the terminal dock side across restarts", () => {
     expect(await lastSavedDockSide()).toBe("left");
   });
 });
+
+describe("closing a window with terminal sessions", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("kills each terminal session's agent and leaves chat sessions alone", async () => {
+    const chat = { ...newSession("claude", "/alpha"), id: "chat-1" };
+    const terminal = {
+      ...newSession("claude", "/alpha"),
+      id: "term-1",
+      surface: "terminal" as const,
+    };
+    await reapWindowRuntime([chat, terminal], [], [], false);
+    const killed = vi
+      .mocked(invoke)
+      .mock.calls.filter(([command]) => command === "pty_kill")
+      .map(([, args]) => (args as { id: string }).id);
+    expect(killed).toEqual(["session:term-1"]);
+  });
+});
+
+describe("terminal agents when quitting or closing", () => {
+  const terminal = {
+    ...newSession("claude", "/alpha"),
+    id: "term-1",
+    surface: "terminal" as const,
+  };
+  const idle = { ...newSession("claude", "/alpha"), id: "chat-1" };
+
+  function open(sessions: Parameters<typeof setQuitWorkspace>[0] extends () => infer S ? S : never) {
+    const tab = newTab(sessions[0].id);
+    return setQuitWorkspace(
+      () => sessions,
+      () => [tab],
+      () => tab.id,
+      () => "/alpha",
+      () => [],
+      () => new Map(),
+      vi.fn(),
+    );
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(ask).mockResolvedValue(true);
+    // pty_status answers: the agent is running.
+    vi.mocked(invoke).mockResolvedValue({ foreground: null });
+  });
+
+  it("reports a running agent in the quit poll, as part of the total and on its own", async () => {
+    const release = open([terminal, idle]);
+    try {
+      await reportQuitPoll(7);
+      expect(invoke).toHaveBeenCalledWith("quit_poll_reply", {
+        id: 7,
+        inFlight: 1,
+        agents: 1,
+      });
+    } finally {
+      release();
+    }
+  });
+
+  it("does not count an agent that has already exited", async () => {
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === "pty_status") throw new Error("Terminal is not running");
+      return undefined;
+    });
+    const release = open([terminal]);
+    try {
+      await reportQuitPoll(8);
+      expect(invoke).toHaveBeenCalledWith("quit_poll_reply", {
+        id: 8,
+        inFlight: 0,
+        agents: 0,
+      });
+    } finally {
+      release();
+    }
+  });
+
+  it("asks the quit question in terms of agents when only agents are running", async () => {
+    await askQuitConfirmation(3, 2, 2);
+    expect(vi.mocked(ask).mock.calls[0][0]).toContain("2 terminal agents are still running");
+    expect(invoke).toHaveBeenCalledWith("quit_decision", { id: 3, confirmed: true });
+  });
+
+  it("keeps the chat wording when no agent is among the running work", async () => {
+    await askQuitConfirmation(4, 1);
+    expect(vi.mocked(ask).mock.calls[0][0]).toContain("1 chat is still running");
+  });
+
+  it("asks before closing a window whose only running work is a terminal agent", async () => {
+    const release = open([terminal]);
+    try {
+      await closeBusyWindow();
+      expect(vi.mocked(ask).mock.calls[0][0]).toContain("running terminal agents");
+      expect(invoke).toHaveBeenCalledWith("destroy_window");
+    } finally {
+      release();
+    }
+  });
+
+  it("leaves the agent and the window alone when closing is declined", async () => {
+    vi.mocked(ask).mockResolvedValue(false);
+    const release = open([terminal]);
+    try {
+      await closeBusyWindow();
+      expect(invoke).not.toHaveBeenCalledWith("destroy_window");
+      expect(invoke).not.toHaveBeenCalledWith("pty_kill", expect.anything());
+    } finally {
+      release();
+    }
+  });
+
+  it("closes a window with no running work without asking", async () => {
+    vi.mocked(invoke).mockImplementation(async (command: string) => {
+      if (command === "pty_status") throw new Error("Terminal is not running");
+      return undefined;
+    });
+    const release = open([terminal]);
+    try {
+      await closeBusyWindow();
+      expect(ask).not.toHaveBeenCalled();
+    } finally {
+      release();
+    }
+  });
+});
+

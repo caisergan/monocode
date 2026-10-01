@@ -133,6 +133,13 @@ pub struct SessionUpsert {
     pub linked_work_item: Option<Value>,
     #[serde(default)]
     pub automation_id: Option<String>,
+    /// Where the session runs: absent or `chat` is MonoCode's own transcript,
+    /// `terminal` is the agent's CLI in a PTY.
+    #[serde(default)]
+    pub surface: Option<String>,
+    /// Bookkeeping for reading a terminal session's CLI transcript back.
+    #[serde(default)]
+    pub terminal_sync: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,6 +179,8 @@ pub struct SessionSummary {
     pub linked_work_item: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub automation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub surface: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -205,15 +214,15 @@ pub struct SessionRecord {
     pub linked_work_item: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub automation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub surface: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub terminal_sync: Option<Value>,
     pub created_at: i64,
     pub updated_at: i64,
 }
 
-#[tauri::command(async)]
-pub fn session_upsert(
-    store: State<'_, SessionStore>,
-    session: SessionUpsert,
-) -> Result<SessionSummary, String> {
+fn validate_upsert(session: &SessionUpsert) -> Result<(), String> {
     validate_id(&session.id, "session")?;
     if session.cwd.trim().is_empty() {
         return Err("cwd is required".into());
@@ -233,13 +242,33 @@ pub fn session_upsert(
             validate_id(automation_id, "automation")?;
         }
     }
+    if let Some(surface) = &session.surface {
+        if !matches!(surface.as_str(), "" | "chat" | "terminal") {
+            return Err("surface must be chat or terminal".into());
+        }
+    }
+    if session
+        .terminal_sync
+        .as_ref()
+        .is_some_and(|sync| !sync.is_object())
+    {
+        return Err("terminalSync must be an object".into());
+    }
     if !session.model_settings.is_object() {
         return Err("modelSettings must be an object".into());
     }
     if !session.blocks.is_array() {
         return Err("blocks must be an array".into());
     }
+    Ok(())
+}
 
+#[tauri::command(async)]
+pub fn session_upsert(
+    store: State<'_, SessionStore>,
+    session: SessionUpsert,
+) -> Result<SessionSummary, String> {
+    validate_upsert(&session)?;
     let conn = store.conn.lock().map_err(|_| "Session store is locked")?;
     let summary = upsert_session(&conn, &session).map_err(|e| e.to_string())?;
     Ok(summary)
@@ -772,6 +801,8 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
         ("worktree_removed", "INTEGER NOT NULL DEFAULT 0"),
         ("is_draft", "INTEGER NOT NULL DEFAULT 0"),
         ("automation_id", "TEXT"),
+        ("surface", "TEXT"),
+        ("terminal_sync", "TEXT"),
     ] {
         ensure_session_column(conn, column, decl)?;
     }
@@ -919,6 +950,25 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             params![now_millis()],
         )?;
     }
+    if current < 19 {
+        // Sidebar rows mark sessions that run in the agent's terminal, so the
+        // listing projection carries `surface` and the covering index with it.
+        ensure_session_column(conn, "surface", "TEXT")?;
+        ensure_session_column(conn, "terminal_sync", "TEXT")?;
+        conn.execute_batch(
+            "DROP INDEX IF EXISTS sessions_cwd_cover_idx;
+             CREATE INDEX sessions_cwd_cover_idx
+               ON sessions (cwd, has_user_message, updated_at DESC, id, harness,
+                            model, runtime_mode, title, provider_session_id,
+                            created_at, branch, archived, pinned,
+                            linked_work_item_json, worktree_cwd, worktree_removed,
+                            is_draft, automation_id, surface);",
+        )?;
+        conn.execute(
+            "INSERT INTO schema_migrations (version, applied_at) VALUES (19, ?1)",
+            params![now_millis()],
+        )?;
+    }
     // Create even when a version row already exists (another build may have
     // used the same numbers, or a previous run recorded the version without
     // the table). Restore writes into these; missing tables look like a
@@ -958,7 +1008,7 @@ fn migrate(conn: &Connection) -> rusqlite::Result<()> {
                         model, runtime_mode, title, provider_session_id,
                         created_at, branch, archived, pinned,
                         linked_work_item_json, worktree_cwd, worktree_removed,
-                        is_draft, automation_id);",
+                        is_draft, automation_id, surface);",
     )?;
     crate::notes::ensure_notes_table(conn)?;
     crate::reminders::ensure_table(conn)?;
@@ -1102,6 +1152,19 @@ fn upsert_session(conn: &Connection, session: &SessionUpsert) -> rusqlite::Resul
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
+    // `chat` is the default surface, so it is stored as no value at all and a
+    // row from before the column existed reads the same as a chat session.
+    let surface = session
+        .surface
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "chat");
+    let terminal_sync = session
+        .terminal_sync
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
     let provider_session_id = session
         .provider_session_id
         .as_ref()
@@ -1174,8 +1237,8 @@ fn upsert_session(conn: &Connection, session: &SessionUpsert) -> rusqlite::Resul
            provider_session_id, blocks_json, created_at, updated_at, branch,
            context_used, context_window, worktree_cwd, has_user_message,
            linked_work_item_json, provider_account_id, worktree_removed, is_draft,
-           automation_id
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+           automation_id, surface, terminal_sync
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
          ON CONFLICT(id) DO UPDATE SET
            cwd = excluded.cwd,
            harness = excluded.harness,
@@ -1195,7 +1258,9 @@ fn upsert_session(conn: &Connection, session: &SessionUpsert) -> rusqlite::Resul
            provider_account_id = excluded.provider_account_id,
            worktree_removed = excluded.worktree_removed,
            is_draft = excluded.is_draft,
-           automation_id = excluded.automation_id",
+           automation_id = excluded.automation_id,
+           surface = excluded.surface,
+           terminal_sync = excluded.terminal_sync",
         params![
             session.id,
             session.cwd,
@@ -1218,6 +1283,8 @@ fn upsert_session(conn: &Connection, session: &SessionUpsert) -> rusqlite::Resul
             i64::from(session.worktree_removed),
             i64::from(is_draft),
             automation_id,
+            surface,
+            terminal_sync,
         ],
     )?;
 
@@ -1245,6 +1312,7 @@ fn upsert_session(conn: &Connection, session: &SessionUpsert) -> rusqlite::Resul
         draft: is_draft,
         linked_work_item: session.linked_work_item.clone(),
         automation_id: automation_id.map(str::to_owned),
+        surface: surface.map(str::to_owned),
     })
 }
 
@@ -1578,7 +1646,7 @@ fn list_by_project(conn: &Connection, cwd: &str) -> rusqlite::Result<Vec<Session
                 created_at, updated_at, branch, archived, pinned,
                 linked_work_item_json,
                 (SELECT summary FROM orchestration_sidebar WHERE lead_id = sessions.id), worktree_cwd,
-                worktree_removed, is_draft, automation_id
+                worktree_removed, is_draft, automation_id, surface
          FROM sessions
          WHERE cwd = ?1
            AND has_user_message = 1
@@ -1618,6 +1686,7 @@ fn list_by_project(conn: &Connection, cwd: &str) -> rusqlite::Result<Vec<Session
             draft: row.get::<_, i64>(16)? != 0,
             linked_work_item,
             automation_id: nonempty(row.get(17)?),
+            surface: nonempty(row.get(18)?),
         })
     })?;
     rows.collect()
@@ -1697,7 +1766,7 @@ fn list_linked(conn: &Connection) -> rusqlite::Result<Vec<SessionSummary>> {
                 created_at, updated_at, branch, archived, pinned,
                 linked_work_item_json,
                 (SELECT summary FROM orchestration_sidebar WHERE lead_id = sessions.id), worktree_cwd,
-                worktree_removed, is_draft, automation_id
+                worktree_removed, is_draft, automation_id, surface
          FROM sessions
          WHERE has_user_message = 1
            AND linked_work_item_json IS NOT NULL
@@ -1731,6 +1800,7 @@ fn list_linked(conn: &Connection) -> rusqlite::Result<Vec<SessionSummary>> {
             draft: row.get::<_, i64>(16)? != 0,
             linked_work_item: optional_json(row.get(12)?),
             automation_id: nonempty(row.get(17)?),
+            surface: nonempty(row.get(18)?),
         })
     })?;
     rows.collect()
@@ -1919,7 +1989,7 @@ fn get_session(conn: &Connection, session_id: &str) -> rusqlite::Result<Option<S
                 provider_session_id, blocks_json, created_at, updated_at,
                 context_used, context_window, branch, worktree_cwd,
                 linked_work_item_json, provider_account_id, worktree_removed,
-                automation_id
+                automation_id, surface, terminal_sync
          FROM sessions
          WHERE id = ?1 AND inbox_ask IS NULL",
         params![session_id],
@@ -1959,6 +2029,8 @@ fn get_session(conn: &Connection, session_id: &str) -> rusqlite::Result<Option<S
                 linked_work_item: optional_json(row.get(15)?),
                 provider_account_id: row.get(16)?,
                 automation_id: nonempty(row.get(18)?),
+                surface: nonempty(row.get(19)?),
+                terminal_sync: optional_json(row.get(20)?),
                 created_at: row.get(9)?,
                 updated_at: row.get(10)?,
             })
@@ -2139,6 +2211,8 @@ mod tests {
             worktree_removed: false,
             linked_work_item: None,
             automation_id: None,
+            surface: None,
+            terminal_sync: None,
         }
     }
 
@@ -2275,7 +2349,7 @@ mod tests {
                        ON sessions (cwd, has_user_message, updated_at DESC, id, harness,
                                     model, runtime_mode, title, provider_session_id,
                                     created_at, branch, archived, pinned, linked_work_item_json);
-                     DELETE FROM schema_migrations WHERE version IN (16, 17, 18);",
+                     DELETE FROM schema_migrations WHERE version IN (16, 17, 18, 19);",
                 )
                 .unwrap();
                 migrate(&conn).unwrap();
@@ -2286,7 +2360,7 @@ mod tests {
                  SELECT id, cwd, harness, model, runtime_mode, title, provider_session_id,
                         created_at, updated_at, branch, archived, pinned,
                         linked_work_item_json, worktree_cwd, worktree_removed, is_draft,
-                        automation_id,
+                        automation_id, surface,
                         (SELECT summary FROM orchestration_sidebar WHERE lead_id = sessions.id)
                  FROM sessions
                  WHERE cwd = ?1
@@ -2536,6 +2610,75 @@ mod tests {
         assert_eq!(listed[0].automation_id.as_deref(), Some("automation-id"));
         let stored = get_session(&conn, "s1").unwrap().unwrap();
         assert_eq!(stored.automation_id.as_deref(), Some("automation-id"));
+    }
+
+    #[test]
+    fn terminal_surface_round_trips_through_summaries_and_records() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let conn = store.conn.lock().unwrap();
+        let mut row = sample("s1", "/tmp/a", "In the terminal");
+        row.surface = Some("terminal".into());
+        row.terminal_sync = Some(json!({ "afterRecord": "r9", "syncedSize": 1234 }));
+
+        let summary = upsert_session(&conn, &row).unwrap();
+        assert_eq!(summary.surface.as_deref(), Some("terminal"));
+        let listed = list_by_project(&conn, "/tmp/a").unwrap();
+        assert_eq!(listed[0].surface.as_deref(), Some("terminal"));
+        let stored = get_session(&conn, "s1").unwrap().unwrap();
+        assert_eq!(stored.surface.as_deref(), Some("terminal"));
+        assert_eq!(
+            stored.terminal_sync,
+            Some(json!({ "afterRecord": "r9", "syncedSize": 1234 }))
+        );
+
+        // Back to chat clears both, so a later sync starts clean.
+        row.surface = Some("chat".into());
+        row.terminal_sync = None;
+        upsert_session(&conn, &row).unwrap();
+        let stored = get_session(&conn, "s1").unwrap().unwrap();
+        assert_eq!(stored.surface, None);
+        assert_eq!(stored.terminal_sync, None);
+    }
+
+    #[test]
+    fn a_row_from_before_the_surface_column_reads_back_as_chat() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let conn = store.conn.lock().unwrap();
+        upsert_session(&conn, &sample("old", "/tmp/a", "Old")).unwrap();
+        // What an old database has: the columns exist but were never written.
+        conn.execute(
+            "UPDATE sessions SET surface = NULL, terminal_sync = NULL WHERE id = 'old'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(list_by_project(&conn, "/tmp/a").unwrap()[0].surface, None);
+        let stored = get_session(&conn, "old").unwrap().unwrap();
+        assert_eq!(stored.surface, None);
+        assert_eq!(stored.terminal_sync, None);
+    }
+
+    #[test]
+    fn migrating_a_v18_database_adds_the_surface_columns() {
+        let store = SessionStore::open_in_memory().unwrap();
+        let conn = store.conn.lock().unwrap();
+        conn.execute_batch(
+            "DROP INDEX sessions_cwd_cover_idx;
+             ALTER TABLE sessions DROP COLUMN surface;
+             ALTER TABLE sessions DROP COLUMN terminal_sync;
+             DELETE FROM schema_migrations WHERE version = 19;",
+        )
+        .unwrap();
+        migrate(&conn).unwrap();
+        upsert_session(&conn, &sample("s1", "/tmp/a", "After migration")).unwrap();
+        assert_eq!(list_by_project(&conn, "/tmp/a").unwrap()[0].surface, None);
+    }
+
+    #[test]
+    fn upsert_rejects_an_unknown_surface() {
+        let mut row = sample("s1", "/tmp/a", "Bad");
+        row.surface = Some("browser".into());
+        let err = validate_upsert(&row).unwrap_err();
+        assert!(err.contains("surface"), "{err}");
     }
 
     #[test]

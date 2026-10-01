@@ -11,6 +11,7 @@ import {
   inFlightRefs,
   isInFlightSession,
   markTurnInterrupted,
+  closeWindowWhileBusyMessage,
   quitWhileBusyMessage,
   wasTurnInterrupted,
   workspaceFromResumed,
@@ -19,11 +20,19 @@ import {
 import { leafIds, type WorkspaceTab } from "../../features/workspace/model/layout";
 import { killPty } from "../../platform/tauri/pty";
 import {
+  countLiveSessionTerminals,
+  sessionPtyId,
+} from "../../features/terminal/model/sessionTerminal";
+import {
   projectTerminalFileIds,
   type DockSide,
   type ProjectTerminalDock,
 } from "../../features/projects/model/projectTerminal";
-import { sessionWorkCwd, type Session } from "../../features/sessions/model/session";
+import {
+  isTerminalSession,
+  sessionWorkCwd,
+  type Session,
+} from "../../features/sessions/model/session";
 import { sessionChildHarnesses } from "../../features/sessions/model/handoff";
 import {
   getSession,
@@ -144,25 +153,35 @@ export async function handleQuitRequested(): Promise<boolean> {
 /** Each window counts its own live turns; Rust sums them into one decision. */
 export async function reportQuitPoll(id: number): Promise<void> {
   let inFlight = 0;
+  let agents = 0;
   if (liveWorkspace) {
     liveWorkspace.flush();
     // Every running turn, not just the resumable ones `inFlightRefs` keeps:
     // an Inbox Ask still counts as work nobody agreed to throw away.
     inFlight = liveWorkspace.sessions().filter(isInFlightSession).length;
+    // An agent in a terminal is killed by the quit as surely as a chat child,
+    // and nothing can say whether it is mid-task, so each one counts.
+    agents = await countLiveSessionTerminals(liveWorkspace.sessions()).catch(
+      () => 0,
+    );
   }
-  await invoke("quit_poll_reply", { id, inFlight }).catch(() => undefined);
+  await invoke("quit_poll_reply", { id, inFlight: inFlight + agents, agents }).catch(
+    () => undefined,
+  );
 }
 
 /** The one quit dialog, shown by whichever window the coordinator picked. */
 export async function askQuitConfirmation(
   id: number,
   inFlight: number,
+  /** How many of `inFlight` are agents in a terminal rather than chat turns. */
+  agents = 0,
 ): Promise<void> {
   let confirmed = false;
   if (!quitDialogOpen) {
     quitDialogOpen = true;
     try {
-      confirmed = await ask(quitWhileBusyMessage(inFlight), {
+      confirmed = await ask(quitWhileBusyMessage(inFlight - agents, agents), {
         title: "MonoCode",
         kind: "warning",
         okLabel: "Quit",
@@ -454,11 +473,13 @@ async function confirmAndCloseWindow(
   quitDialogOpen = true;
   try {
     const refs = inFlightRefs(sessions, tabs);
-    if (refs.length > 0) {
-      const ok = await ask(
-        "Close this window and stop its running chats? Other windows will stay open.",
-        { title: "MonoCode", kind: "warning", okLabel: "Close window" },
-      );
+    const agents = await countLiveSessionTerminals(sessions).catch(() => 0);
+    if (refs.length > 0 || agents > 0) {
+      const ok = await ask(closeWindowWhileBusyMessage(refs.length, agents), {
+        title: "MonoCode",
+        kind: "warning",
+        okLabel: "Close window",
+      });
       if (!ok) return;
     }
     quitting = true;
@@ -499,9 +520,11 @@ export async function reapWindowRuntime(
     ),
   );
   await Promise.all(
-    [...terminalFileIds(tabs), ...projectTerminalFileIds(projectTerminals)].map(
-      (id) => killPty(id),
-    ),
+    [
+      ...terminalFileIds(tabs),
+      ...projectTerminalFileIds(projectTerminals),
+      ...sessions.filter(isTerminalSession).map(({ id }) => sessionPtyId(id)),
+    ].map((id) => killPty(id)),
   );
   // Catalog probes, title generators, and usage scrapers are not session
   // children. Drop them so an unused Pi/Codex probe cannot outlive the window.

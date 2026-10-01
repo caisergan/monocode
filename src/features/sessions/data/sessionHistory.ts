@@ -3,6 +3,7 @@ import { summarizeOrchestration } from "../../orchestration/model/orchestrationS
 import { fuzzyMatch } from "../../../shared/lib/fuzzy";
 import { projectName } from "../../../shared/lib/paths";
 import { sameProjectPath } from "../../projects/model/recents";
+import { isTerminalSession } from "../model/session";
 import {
   sessionDisplayTitle,
   sessionDraftBlock,
@@ -134,6 +135,7 @@ export function summaryFromSession(
       ? { linkedWorkItem: session.linkedWorkItem }
       : {}),
     ...(session.automationId ? { automationId: session.automationId } : {}),
+    ...(isTerminalSession(session) ? { surface: "terminal" as const } : {}),
     ...(!session.worktreeRemoved && (session.branch || git?.branch)
       ? { branch: session.branch || git?.branch }
       : {}),
@@ -201,10 +203,16 @@ export function historyWithLiveSessions(
       const stored = rows[storedIndex];
       const draft = !!sessionDraftBlock(session);
       const automationId = session.automationId || stored.automationId;
-      if (!!stored.draft !== draft || stored.automationId !== automationId) {
+      const surface = isTerminalSession(session) ? "terminal" : undefined;
+      if (
+        !!stored.draft !== draft ||
+        stored.automationId !== automationId ||
+        stored.surface !== surface
+      ) {
         rows[storedIndex] = {
           ...stored,
           draft: draft || undefined,
+          surface,
           ...(automationId ? { automationId } : {}),
         };
       }

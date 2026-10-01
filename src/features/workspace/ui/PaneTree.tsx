@@ -184,6 +184,10 @@ type Shared = {
     position: TitleTabDropPosition,
   ) => void;
   onNewTerminal: (sessionId: string) => void;
+  onBindProviderSession?: (sessionId: string, providerSessionId: string) => void;
+  onOpenSessionAsChat?: (sessionId: string) => void;
+  onOpenSessionInTerminal?: (sessionId: string) => void;
+  onTerminalExit?: (sessionId: string) => void;
   onTerminalMetaChange?: (fileId: string, patch: TerminalMetaPatch) => void;
   transcriptPool?: TranscriptPool;
 };
@@ -270,6 +274,10 @@ function PaneTreeComponent({
   onMovePane,
   onDetachPane,
   onNewTerminal,
+  onBindProviderSession,
+  onOpenSessionAsChat,
+  onOpenSessionInTerminal,
+  onTerminalExit,
   onTerminalMetaChange,
   transcriptPool,
 }: Props) {
@@ -524,6 +532,10 @@ function PaneTreeComponent({
                 onBtwStop={onBtwStop}
                 onBtwModelChange={onBtwModelChange}
                 onNewTerminal={onNewTerminal}
+                onBindProviderSession={onBindProviderSession}
+                onOpenSessionAsChat={onOpenSessionAsChat}
+                onOpenSessionInTerminal={onOpenSessionInTerminal}
+                onTerminalExit={onTerminalExit}
                 onPaneDragStart={onPaneDragStart}
                 transcriptPool={transcriptPool}
               />

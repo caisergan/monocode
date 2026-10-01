@@ -61,11 +61,40 @@ export function inFlightRefs(
   return refs;
 }
 
-export function quitWhileBusyMessage(count: number): string {
-  if (count === 1) {
-    return "1 chat is still running. Quit anyway? It will resume when you reopen MonoCode.";
+const chatsPhrase = (count: number) =>
+  count === 1 ? "1 chat" : `${count} chats`;
+const agentsPhrase = (count: number) =>
+  count === 1 ? "1 terminal agent" : `${count} terminal agents`;
+
+/**
+ * What the quit dialog says. A chat turn is saved and continued on reopen; an
+ * agent in a terminal is stopped, and only its conversation comes back, when
+ * its tab is shown again.
+ */
+export function quitWhileBusyMessage(chats: number, agents = 0): string {
+  if (agents === 0) {
+    if (chats === 1) {
+      return "1 chat is still running. Quit anyway? It will resume when you reopen MonoCode.";
+    }
+    return `${chats} chats are still running. Quit anyway? They will resume when you reopen MonoCode.`;
   }
-  return `${count} chats are still running. Quit anyway? They will resume when you reopen MonoCode.`;
+  if (chats === 0) {
+    return agents === 1
+      ? "1 terminal agent is still running. Quit anyway? It will stop, and its conversation resumes when you reopen its tab."
+      : `${agents} terminal agents are still running. Quit anyway? They will stop, and their conversations resume when you reopen their tabs.`;
+  }
+  return `${chatsPhrase(chats)} and ${agentsPhrase(agents)} are still running. Quit anyway? Chats resume when you reopen MonoCode; terminal agents stop, and their conversations resume when you reopen their tabs.`;
+}
+
+/** What closing one window of several says about the work only it holds. */
+export function closeWindowWhileBusyMessage(chats: number, agents = 0): string {
+  const what =
+    agents === 0
+      ? "running chats"
+      : chats === 0
+        ? "running terminal agents"
+        : "running chats and terminal agents";
+  return `Close this window and stop its ${what}? Other windows will stay open.`;
 }
 
 /**

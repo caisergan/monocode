@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A Claude Code or Codex session can run in the agent's own terminal UI instead of MonoCode's chat. Use **Open in terminal** on an empty session, **Open in Terminal** in the session menu, the command palette, or `Cmd/Ctrl+Shift+T` (Session: Toggle Terminal). It is the same session either way: one sidebar row, one conversation, and switching back to chat continues it.
+- Terminal sessions keep running while their tab is hidden, and resume the same conversation after a restart when their tab is next shown. Closing a tab or window with an agent still running asks first.
+- What the agent writes in the terminal is read back into the session's history, so it appears in the sidebar and in search. Edits made in the terminal are not captured by MonoCode's per-session checkpoints; Source Control still shows them.
+- The session import sheet lists Codex conversations, and reads Claude conversations saved under a named provider account.
+
 ## [0.4.3] - 2026-09-28
 
 ### Fixed
