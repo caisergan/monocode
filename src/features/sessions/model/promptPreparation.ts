@@ -13,7 +13,7 @@ export async function preparePrompt(
   context: SkillCatalogContext,
 ): Promise<string> {
   warmNativeSkills(context);
-  if (isNativeCommandPrompt(text, context.harness))
+  if (isNativeCommandPrompt(text, context))
     return nativeCommandPrompt(context.harness, text);
   const withFiles = await applyFileMentionsToTurn(text, context.cwd);
   const withNotes = await applyNotesToTurn(withFiles);

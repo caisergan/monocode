@@ -52,8 +52,9 @@ describe("native command composer behavior", () => {
   });
 
   it("only treats leading command tokens as native invocations", () => {
-    expect(isNativeCommandPrompt("/workflow foo @README.md", "omp")).toBe(true);
-    expect(isNativeCommandPrompt("/omp:plan investigate", "omp")).toBe(true);
+    const omp = { harness: "omp" as const, cwd: "/repo" };
+    expect(isNativeCommandPrompt("/workflow foo @README.md", omp)).toBe(true);
+    expect(isNativeCommandPrompt("/omp:plan investigate", omp)).toBe(true);
     for (const text of [
       "Explain /workflow",
       "> /workflow",
@@ -61,9 +62,11 @@ describe("native command composer behavior", () => {
       "/tmp\\file.ts",
       "hello",
     ]) {
-      expect(isNativeCommandPrompt(text, "omp")).toBe(false);
+      expect(isNativeCommandPrompt(text, omp)).toBe(false);
     }
-    expect(isNativeCommandPrompt("/review foo", "claude")).toBe(false);
+    expect(
+      isNativeCommandPrompt("/review foo", { harness: "cursor", cwd: "/repo" }),
+    ).toBe(false);
   });
 });
 

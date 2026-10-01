@@ -22,6 +22,8 @@ export type NativeCommandProvider = {
   ): () => void;
   /** Full command runtimes own slash arguments, including @file-like text. */
   rawSlashCommands?: boolean;
+  /** Commands are offered next to MonoCode's skills instead of replacing them. */
+  alongsideSkills?: boolean;
 };
 
 const RESERVED_COMMANDS = new Set(["plan", "compact", "add-to-folder"]);

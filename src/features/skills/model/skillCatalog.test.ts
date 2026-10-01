@@ -6,6 +6,9 @@ const mocks = vi.hoisted(() => ({
   subscribe: vi.fn(),
   listSkills: vi.fn(),
   readTextFile: vi.fn(),
+  discoverClaudeCommands: vi.fn(),
+  subscribeClaude: vi.fn(),
+  claudeListsCommands: false,
 }));
 
 vi.mock("../../../integrations/harness/core/registry", () => ({
@@ -24,7 +27,16 @@ vi.mock("../../../integrations/harness/core/registry", () => ({
               rawSlashCommands: true,
             },
           }
-        : undefined,
+        : id === "claude" && mocks.claudeListsCommands
+          ? {
+              commands: {
+                discover: mocks.discoverClaudeCommands,
+                subscribe: mocks.subscribeClaude,
+                rawSlashCommands: true,
+                alongsideSkills: true,
+              },
+            }
+          : undefined,
 }));
 
 vi.mock("../../../platform/tauri/fs", () => ({
@@ -41,6 +53,7 @@ import {
   SKILLS_CHANGE_EVENT,
   BUILTIN_CREATE_SKILL,
   invalidateSkills,
+  isNativeCommandPrompt,
   loadSkills,
   peekSkills,
   skillCatalogKey,
@@ -84,6 +97,10 @@ beforeEach(() => {
     },
   ]);
   mocks.subscribe.mockReset();
+  mocks.claudeListsCommands = false;
+  mocks.discoverClaudeCommands.mockReset();
+  mocks.subscribeClaude.mockReset();
+  mocks.readTextFile.mockReset();
   mocks.listSkills.mockReset();
   mocks.discoverPiSkills.mockResolvedValue([piSkill("architect")]);
   mocks.listSkills.mockResolvedValue([]);
@@ -273,6 +290,126 @@ describe("provider-aware skill catalog", () => {
     expect(peekSkills({ harness: "pi", cwd: "/repo" })).toMatchObject([
       { name: "current" },
     ]);
+  });
+});
+
+describe("harness commands listed next to MonoCode skills", () => {
+  const context = { harness: "claude" as const, cwd: "/repo" };
+  const animatePath = "/home/user/.claude/skills/animate/SKILL.md";
+  const animate: DiscoveredSkill = {
+    name: "animate",
+    description: "Build an animation",
+    path: animatePath,
+    source: "claude",
+    scope: "user",
+  };
+  const command = (name: string, extra: Record<string, unknown> = {}) => ({
+    name,
+    invocation: name,
+    description: "",
+    source: "claude" as const,
+    ...extra,
+  });
+
+  beforeEach(() => {
+    mocks.claudeListsCommands = true;
+    mocks.listSkills.mockResolvedValue([animate]);
+    mocks.discoverClaudeCommands.mockResolvedValue([
+      command("animate"),
+      command("advisor", { origin: "built-in", inputHint: "[opus|off]" }),
+      command("usage", { origin: "built-in", aliases: ["cost"] }),
+    ]);
+  });
+
+  it("adds the harness commands and lets a skill keep its name", async () => {
+    const catalog = await loadSkills(context);
+
+    expect(catalog).toContainEqual(BUILTIN_CREATE_SKILL);
+    expect(catalog.filter((skill) => skill.name === "animate")).toMatchObject([
+      { kind: "file", path: animatePath },
+    ]);
+    expect(catalog).toContainEqual({
+      kind: "native",
+      ...command("advisor", { origin: "built-in", inputHint: "[opus|off]" }),
+    });
+  });
+
+  it("sends a listed command as typed and keeps injecting a skill", async () => {
+    expect(isNativeCommandPrompt("/advisor opus", context)).toBe(false);
+    await loadSkills(context);
+
+    expect(isNativeCommandPrompt("/advisor opus", context)).toBe(true);
+    expect(isNativeCommandPrompt("/cost", context)).toBe(true);
+    expect(isNativeCommandPrompt("/animate the card", context)).toBe(false);
+    expect(isNativeCommandPrompt("/unknown thing", context)).toBe(false);
+    expect(isNativeCommandPrompt("run /advisor opus", context)).toBe(false);
+
+    mocks.readTextFile.mockResolvedValue("Animate carefully.");
+    const injected = await applySkillsToTurn(
+      "/animate the card, then /advisor",
+      context,
+    );
+    expect(injected).toContain("## /animate\n\nAnimate carefully.");
+    expect(injected).not.toContain("## /advisor");
+  });
+
+  it("still lists the skills when the harness cannot list commands", async () => {
+    mocks.discoverClaudeCommands.mockRejectedValue(new Error("no claude"));
+
+    const catalog = await loadSkills(context);
+    expect(catalog.map((skill) => skill.name)).toEqual([
+      "create-skill",
+      "animate",
+    ]);
+  });
+
+  it("shares one catalog per folder and reloads it on a command update", async () => {
+    expect(skillCatalogKey({ ...context, sessionId: "a" })).toBe(
+      skillCatalogKey({ ...context, sessionId: "b" }),
+    );
+    const unsubscribe = vi.fn();
+    mocks.subscribeClaude.mockReturnValue(unsubscribe);
+    const onSkills = vi.fn();
+    const stop = subscribeSkills(context, onSkills);
+    await loadSkills(context);
+
+    mocks.discoverClaudeCommands.mockResolvedValue([command("goal")]);
+    mocks.subscribeClaude.mock.calls[0]![1]([command("goal")]);
+    await vi.waitFor(() => expect(onSkills).toHaveBeenCalledOnce());
+
+    expect(
+      onSkills.mock.calls[0]![0].map((s: { name: string }) => s.name),
+    ).toEqual(["create-skill", "animate", "goal"]);
+    expect(peekSkills(context)).toBe(onSkills.mock.calls[0]![0]);
+    stop();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+
+  it("leaves out the harness copy of a skill switched off in Settings", async () => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string): string | null => storage.get(key) ?? null,
+      setItem: (key: string, value: string): void => {
+        storage.set(key, value);
+      },
+    });
+    vi.stubGlobal("window", new EventTarget());
+    try {
+      saveDisabledSkillPaths([animatePath]);
+      mocks.listSkills.mockImplementation(
+        async (_cwd: string, disabled: string[]) =>
+          disabled.length ? [] : [animate],
+      );
+
+      const catalog = await loadSkills(context);
+      expect(catalog.map((skill) => skill.name)).toEqual([
+        "create-skill",
+        "advisor",
+        "usage",
+      ]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

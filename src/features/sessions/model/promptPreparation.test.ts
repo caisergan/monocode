@@ -19,8 +19,8 @@ vi.mock("../../notes", () => ({
 vi.mock("../../skills/model/skills", () => ({
   applySkillsToTurn: mocks.applySkillsToTurn,
   warmNativeSkills: mocks.warmNativeSkills,
-  isNativeCommandPrompt: (text: string, harness: string) =>
-    harness === "omp" && text.startsWith("/"),
+  isNativeCommandPrompt: (text: string, context: { harness: string }) =>
+    context.harness === "omp" && text.startsWith("/"),
 }));
 
 import { preparePrompt } from "./promptPreparation";

@@ -101,6 +101,7 @@ import {
   rankSkills,
   hasNativeCommands,
   isNativeCommandPrompt,
+  listsNativeCommands,
   replaceSlashToken,
   skillTextParts,
   slashTokenAt,
@@ -681,7 +682,7 @@ export function Composer({
     ],
     [harness, skills],
   );
-  const skillLimit = hasNativeCommands(harness)
+  const skillLimit = listsNativeCommands(harness)
     ? Number.POSITIVE_INFINITY
     : undefined;
   const rankedSkills = rankSkills(slashItems, slash?.query ?? "", skillLimit);
@@ -1464,7 +1465,11 @@ export function Composer({
         ? folderCommand.text
         : value,
     );
-    const text = isNativeCommandPrompt(command.text, harness)
+    const text = isNativeCommandPrompt(command.text, {
+      harness,
+      cwd: executionCwd,
+      sessionId,
+    })
       ? command.text
       : composeInboxMessage(inboxCard, command.text);
     const submittedText =
