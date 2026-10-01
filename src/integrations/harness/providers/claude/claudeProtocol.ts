@@ -22,6 +22,10 @@ import {
   isAgentToolName,
   titleFromToolInput,
 } from "../../core/preview";
+import {
+  nativeCommandInvocation,
+  type NativeCommand,
+} from "../../core/nativeCommands";
 import { streamTextDelta } from "../../core/streamText";
 import type { ApprovalDecision, HarnessEvent } from "../../core/types";
 
@@ -363,6 +367,69 @@ export function listModelsFromControlResponse(
   if (!parsed || parsed.requestId !== requestId) return null;
   if (!parsed.ok) return [];
   return Array.isArray(parsed.payload?.models) ? parsed.payload.models : [];
+}
+
+/**
+ * Commands MonoCode leaves out of the picker: terminal-only chrome, debug
+ * plumbing, and what Claude refuses outside the terminal (`/fast`). A raw
+ * `/compact` would skip the compaction bookkeeping; MonoCode has its own.
+ */
+const HIDDEN_CLAUDE_COMMANDS = new Set([
+  "compact",
+  "fast",
+  "color",
+  "focus",
+  "heapdump",
+  "workflow-launch-exec",
+]);
+
+/**
+ * Slash commands from an `initialize` reply or a `commands_changed` notice,
+ * or null if this line carries no command list.
+ */
+export function claudeCommandsFromRecord(
+  rec: Record<string, unknown>,
+): NativeCommand[] | null {
+  const type = stringField(rec, "type");
+  const rows =
+    type === "control_response"
+      ? asRecord(asRecord(rec.response)?.response)?.commands
+      : type === "system" && stringField(rec, "subtype") === "commands_changed"
+        ? rec.commands
+        : undefined;
+  if (!Array.isArray(rows)) return null;
+  const seen = new Set<string>();
+  return rows.flatMap((value): NativeCommand[] => {
+    const row = asRecord(value);
+    const name = stringField(row, "name") ?? "";
+    if (
+      !name ||
+      /[\s/\\]/.test(name) ||
+      name.startsWith("__") ||
+      HIDDEN_CLAUDE_COMMANDS.has(name) ||
+      seen.has(name)
+    )
+      return [];
+    seen.add(name);
+    const aliases = Array.isArray(row?.aliases)
+      ? row.aliases.filter(
+          (alias): alias is string =>
+            typeof alias === "string" && !!alias && !/[\s/\\]/.test(alias),
+        )
+      : [];
+    const hint = (stringField(row, "argumentHint") ?? "").trim();
+    return [
+      {
+        name,
+        invocation: nativeCommandInvocation("claude", name),
+        source: "claude",
+        description: stringField(row, "description") ?? "",
+        ...(row?.builtin === true ? { origin: "built-in" } : {}),
+        ...(aliases.length ? { aliases } : {}),
+        ...(hint ? { inputHint: hint } : {}),
+      },
+    ];
+  });
 }
 
 export function isClaudeInitMessage(rec: Record<string, unknown>): boolean {
