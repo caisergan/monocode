@@ -411,7 +411,7 @@ fn candidates(sources: &[Source], cwd: Option<&str>) -> Vec<Candidate> {
             Harness::Pi | Harness::Omp => pi::candidates(source.harness, &source.root),
         })
         .collect();
-    found.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    found.sort_by_key(|candidate| std::cmp::Reverse(candidate.updated_at));
     found
 }
 
