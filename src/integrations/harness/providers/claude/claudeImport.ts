@@ -182,7 +182,8 @@ export function claudeTranscriptToSession({
  * terminal session keeps as its cursor into the transcript.
  */
 export function claudeLastRecordId(records: ClaudeRecord[]): string | undefined {
-  return stringField(activeClaudeChain(records).at(-1), "uuid");
+  const chain = activeClaudeChain(records);
+  return stringField(chain[chain.length - 1], "uuid");
 }
 
 /**
