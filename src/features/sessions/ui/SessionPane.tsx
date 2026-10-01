@@ -787,6 +787,7 @@ const LocalSessionPane = memo(function LocalSessionPane({
                 cwd={session.cwd}
                 onOpenInTerminal={
                   onOpenSessionInTerminal &&
+                  !remoteSession &&
                   supportsTerminalSurface(session.harness) &&
                   !session.worktreeRemoved
                     ? () => onOpenSessionInTerminal(session.id)

@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Terminal sessions keep running while their tab is hidden, and resume the same conversation after a restart when their tab is next shown. Closing a tab or window with an agent still running asks first.
 - What the agent writes in the terminal is read back into the session's history, so it appears in the sidebar and in search. Edits made in the terminal are not captured by MonoCode's per-session checkpoints; Source Control still shows them.
 - The session import sheet lists Codex conversations, and reads Claude conversations saved under a named provider account.
-- Claude Code sessions list Claude's own slash commands in the composer's `/` picker, next to MonoCode skills: `/advisor`, `/model`, `/context`, `/usage`, `/mcp`, `/config` and whatever else the installed Claude Code reports, with their argument hints. A command is sent as typed and Claude's reply appears as the answer. `/model` and `/effort` also move the model picker to what Claude applied, so the next launch keeps it.
+- Claude Code sessions list Claude's own slash commands in the composer's `/` picker, next to MonoCode skills: `/advisor`, `/model`, `/context`, `/usage`, `/config` and whatever else the installed Claude Code reports, with their argument hints. A command is sent as typed and Claude's reply appears as the answer. `/model` and `/effort` also move the model picker to what Claude applied, so the next launch keeps it.
 
 ## [0.6.0] - 2026-09-30
 

@@ -377,9 +377,11 @@ export function listModelsFromControlResponse(
  * Commands MonoCode leaves out of the picker: terminal-only chrome, debug
  * plumbing, and what Claude refuses outside the terminal (`/fast`). A raw
  * `/compact` would skip the compaction bookkeeping; MonoCode has its own.
+ * A bare `/mcp` opens MonoCode's server picker, so Claude's never runs.
  */
 const HIDDEN_CLAUDE_COMMANDS = new Set([
   "compact",
+  "mcp",
   "fast",
   "color",
   "focus",

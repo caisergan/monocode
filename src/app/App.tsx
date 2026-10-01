@@ -1740,7 +1740,9 @@ function Workspace({
         },
       ];
     }
-    return supportsTerminalSurface(session.harness) && !session.inboxAsk
+    return supportsTerminalSurface(session.harness) &&
+      !session.inboxAsk &&
+      !isRemoteProjectPath(session.cwd)
       ? [
           {
             id: "toggle-session-surface",

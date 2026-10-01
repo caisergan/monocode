@@ -607,8 +607,9 @@ function SidebarComponent({
   const [sessionListLimit, setSessionListLimit] = useState(LIST_PAGE_SIZE);
   const loadMoreRef = useRef<HTMLLIElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  // Remote sessions live on their host, not in this computer's agent stores.
   const importable = useImportableSessionCount(
-    tab === "sessions" ? cwd : undefined,
+    tab === "sessions" && !remoteProject ? cwd : undefined,
     sessions.length,
   );
   const pendingFolderSessionIds = useRef(new Set<string>());
