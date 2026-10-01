@@ -1,4 +1,5 @@
 import { supportsTerminalSurface } from "../../../integrations/harness/core/terminalLaunch";
+import { isRemoteProjectPath } from "../../projects/model/recents";
 import { isPreparingHandoff } from "./handoff";
 import {
   isTerminalSession,
@@ -14,6 +15,9 @@ export function terminalRefusal(session: Session): string | null {
   if (isTerminalSession(session)) return "This session is already in the terminal.";
   if (!supportsTerminalSurface(session.harness)) {
     return "Only Claude Code and Codex sessions can run in a terminal.";
+  }
+  if (isRemoteProjectPath(session.cwd)) {
+    return "Sessions on another machine cannot run in a terminal yet.";
   }
   if (session.inboxAsk || session.orchestrationLeadId) {
     return "This conversation cannot run in a terminal.";

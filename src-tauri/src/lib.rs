@@ -13,6 +13,7 @@ mod external_editor;
 mod fs;
 mod gitlab;
 mod harness;
+mod harness_updates;
 mod inbox_media;
 mod jira;
 mod linear;
@@ -21,6 +22,7 @@ mod link_preview;
 mod macos;
 #[cfg(target_os = "macos")]
 mod macos_background;
+mod mcp;
 mod menu;
 mod notes;
 mod notifications;
@@ -32,9 +34,12 @@ mod pty;
 mod quick_composer;
 mod rate_limits;
 mod reminders;
+mod remote;
+mod remote_ssh;
 mod search;
 mod session_store;
 mod skills;
+pub mod ssh_askpass;
 #[cfg(target_os = "windows")]
 mod tray;
 mod window;
@@ -222,6 +227,7 @@ pub fn run() {
         )
         .manage(harness::HarnessHost::new())
         .manage(pty::PtyHost::new())
+        .manage(remote::RemoteConnections::default())
         .manage(window_transfer::WindowTransferState::new())
         .setup(|app| {
             harness::reap_orphaned_harness_processes();
@@ -253,6 +259,15 @@ pub fn run() {
             menu::dispatch(app, event.id().as_ref());
         })
         .invoke_handler(tauri::generate_handler![
+            remote::remote_machines,
+            remote::remote_connect,
+            remote::remote_disconnect,
+            remote::remote_request,
+            remote::remote_ssh_begin,
+            remote::remote_ssh_reconnect,
+            remote::remote_ssh_poll,
+            remote::remote_ssh_answer,
+            remote::remote_ssh_cancel,
             control::control_enable,
             control::control_disable,
             control::control_reply,
@@ -412,6 +427,12 @@ pub fn run() {
             harness::harness_resolve_configured,
             harness::harness_runtime_binary_paths,
             harness::harness_resolve_claude,
+            harness::claude_mcp_list,
+            mcp::mcp_discover,
+            mcp::mcp_add,
+            harness::claude_mcp_add,
+            harness::claude_mcp_remove,
+            harness::mcp_provider_login,
             harness::harness_resolve_omp,
             harness::harness_resolve_pi,
             harness::harness_resolve_fx,
@@ -427,6 +448,9 @@ pub fn run() {
             harness::harness_sse_open,
             harness::harness_sse_close,
             harness::harness_exec,
+            harness_updates::harness_latest_version,
+            harness_updates::harness_update_check_claim,
+            harness_updates::harness_update,
             harness::provider_account_remove,
             account_identity::provider_account_identity,
             pi_usage::fetch_pi_usage,
@@ -475,6 +499,8 @@ pub fn run() {
             set_dock_badge,
             #[cfg(target_os = "macos")]
             menu::keybindings_set_overrides,
+            #[cfg(target_os = "macos")]
+            menu::autosave_set_enabled,
             open_new_window,
             window::hide_window,
             window::destroy_window,
@@ -567,6 +593,7 @@ pub fn run() {
             window::request_quit(handle);
         }
         tauri::RunEvent::Exit => {
+            handle.state::<remote::RemoteConnections>().shutdown();
             reap_harness_children(handle);
         }
         _ => {}

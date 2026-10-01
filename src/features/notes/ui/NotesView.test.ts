@@ -2,7 +2,7 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { NOTES_CHANGED_EVENT, type Note, type NoteUpsert } from "../notes";
+import { invalidateNotes, loadNotes, NOTES_CHANGED_EVENT, type Note, type NoteUpsert } from "../notes";
 import { NotesView } from "./NotesView";
 import { savePinnedProjects, saveProjectRailOrder } from "../../projects/model/recents";
 
@@ -31,6 +31,7 @@ const recents = [
 ];
 
 beforeEach(() => {
+  invalidateNotes();
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   const storage = new Map<string, string>();
   vi.stubGlobal("localStorage", {
@@ -84,6 +85,23 @@ async function render(projects = recents, cwd = "/work/Edefyn") {
     ),
   );
 }
+
+it("shows a preloaded note immediately while refreshing in the background", async () => {
+  await loadNotes();
+  let finish!: (notes: Note[]) => void;
+  const refresh = new Promise<Note[]>((resolve) => { finish = resolve; });
+  invoke.mockReturnValue(refresh);
+  await render();
+  expect(container.querySelector<HTMLInputElement>('[aria-label="Note title"]')?.value)
+    .toBe("Plan");
+  expect(container.textContent).toContain("Keep this text.");
+  expect(container.textContent).not.toContain("Select a note");
+  expect(container.querySelector(".animate-spin")).toBeNull();
+
+  await act(async () => finish([{ ...stored, title: "Updated plan" }]));
+  expect(container.querySelector<HTMLInputElement>('[aria-label="Note title"]')?.value)
+    .toBe("Updated plan");
+});
 
 it("refreshes an open note after an Operator write", async () => {
   await render();
