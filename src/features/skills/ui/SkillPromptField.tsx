@@ -12,6 +12,7 @@ import { resizeComposer } from "../../sessions/model/composerResize";
 import type { HarnessId } from "../../sessions/model/session";
 import {
   hasNativeCommands,
+  listsNativeCommands,
   rankSkills,
   replaceSlashToken,
   skillTextParts,
@@ -51,7 +52,7 @@ export function SkillPromptField({ value, harness, cwd, onChange }: Props) {
       rankSkills(
         skills,
         slash?.query ?? "",
-        hasNativeCommands(harness) ? Number.POSITIVE_INFINITY : undefined,
+        listsNativeCommands(harness) ? Number.POSITIVE_INFINITY : undefined,
       ),
     [harness, skills, slash?.query],
   );

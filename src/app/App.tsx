@@ -6119,7 +6119,11 @@ export default function App({
         : submittedText;
       const rawCommand =
         !operatorCommand.matched &&
-        isNativeCommandPrompt(submittedText, current.harness);
+        isNativeCommandPrompt(submittedText, {
+          harness: current.harness,
+          cwd: sessionWorkCwd(current),
+          sessionId,
+        });
       const ciContext = options?.ciRepair?.prompt ?? options?.ciContext;
       const harnessText =
         options?.ciRepair?.prompt ??

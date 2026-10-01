@@ -10,6 +10,7 @@ import {
   stopClaudeSession,
 } from "./claude";
 import { refreshClaudeCatalog } from "./claudeCatalog";
+import { claudeCommandProvider } from "./claudeCommands";
 import {
   generateClaudeBranchName,
   generateClaudeCommitMessage,
@@ -26,6 +27,7 @@ import { registerHarness, type HarnessAdapter } from "../../core/registry";
 export const claudeAdapter: HarnessAdapter = {
   id: "claude",
   live: true,
+  commands: claudeCommandProvider,
   sendTurn: sendClaudeTurn,
   compactContext: compactClaudeContext,
   steerTurn: steerClaudeTurn,

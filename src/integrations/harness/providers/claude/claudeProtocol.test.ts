@@ -8,6 +8,7 @@ import {
   askUserQuestionAllowInput,
   buildClaudeSpawnArgs,
   buildClaudeUserMessage,
+  claudeCommandsFromRecord,
   contextFromResult,
   contextUsedFromAssistant,
   extractExitPlanModePlan,
@@ -87,6 +88,108 @@ describe("applyClaudePromptEffortPrefix", () => {
       applyClaudePromptEffortPrefix("Investigate the edge cases", "ultrathink"),
     ).toBe("Ultrathink:\nInvestigate the edge cases");
     expect(applyClaudePromptEffortPrefix("hello", "high")).toBe("hello");
+  });
+
+  it("leaves a slash command as typed so Claude still runs it", () => {
+    expect(applyClaudePromptEffortPrefix("/advisor opus", "ultrathink")).toBe(
+      "/advisor opus",
+    );
+    expect(
+      applyClaudePromptEffortPrefix("/tmp/log.txt is empty", "ultrathink"),
+    ).toBe("Ultrathink:\n/tmp/log.txt is empty");
+  });
+});
+
+describe("claudeCommandsFromRecord", () => {
+  const rows = [
+    {
+      name: "advisor",
+      description: "Let Claude consult a stronger model at key moments",
+      argumentHint: "[fable|opus|sonnet|off]",
+      builtin: true,
+    },
+    {
+      name: "usage",
+      description: "Show session cost",
+      argumentHint: "",
+      aliases: ["cost", "stats"],
+      builtin: true,
+    },
+    { name: "animate", description: "Build an animation (user)" },
+    { name: "animate", description: "A second copy" },
+    { name: "compact", description: "MonoCode has its own", builtin: true },
+    {
+      name: "fast",
+      description: "Refused outside the terminal",
+      builtin: true,
+    },
+    { name: "__remote-workflow", description: "Internal", builtin: true },
+    { name: "has space", description: "Not a slash token" },
+    { description: "No name" },
+  ];
+
+  it("reads the commands from an initialize reply", () => {
+    expect(
+      claudeCommandsFromRecord({
+        type: "control_response",
+        response: {
+          subtype: "success",
+          request_id: "monocode_2",
+          response: { commands: rows, models: [] },
+        },
+      }),
+    ).toEqual([
+      {
+        name: "advisor",
+        invocation: "advisor",
+        source: "claude",
+        description: "Let Claude consult a stronger model at key moments",
+        origin: "built-in",
+        inputHint: "[fable|opus|sonnet|off]",
+      },
+      {
+        name: "usage",
+        invocation: "usage",
+        source: "claude",
+        description: "Show session cost",
+        origin: "built-in",
+        aliases: ["cost", "stats"],
+      },
+      {
+        name: "animate",
+        invocation: "animate",
+        source: "claude",
+        description: "Build an animation (user)",
+      },
+    ]);
+  });
+
+  it("reads a commands_changed notice and ignores every other line", () => {
+    expect(
+      claudeCommandsFromRecord({
+        type: "system",
+        subtype: "commands_changed",
+        commands: [{ name: "goal", description: "Set a goal" }],
+      }),
+    ).toMatchObject([{ name: "goal" }]);
+    for (const rec of [
+      { type: "system", subtype: "init", slash_commands: ["advisor"] },
+      {
+        type: "control_response",
+        response: { subtype: "success", request_id: "monocode_3" },
+      },
+      {
+        type: "control_response",
+        response: {
+          subtype: "success",
+          request_id: "x",
+          response: { models: [] },
+        },
+      },
+      { type: "assistant", commands: rows },
+    ]) {
+      expect(claudeCommandsFromRecord(rec)).toBeNull();
+    }
   });
 });
 

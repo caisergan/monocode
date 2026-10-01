@@ -2,6 +2,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { applyHarnessEvent } from "../../core/apply";
 import { newSession } from "../../../../features/sessions/model/session";
 import {
+  resetHarnessModelOverlays,
+  setHarnessModels,
+} from "../../../../features/sessions/model/models";
+import {
   foldableWork,
   foldedBlocks,
   groupTurnItems,
@@ -41,9 +45,15 @@ const {
   respondClaudeApproval,
   respondClaudeQuestion,
   sendClaudeTurn,
+  steerClaudeTurn,
   stopClaudeSession,
   __claudeTestReset,
 } = await import("./claude");
+const { claudeCommandProvider, __claudeCommandsTestReset } =
+  await import("./claudeCommands");
+const { CLAUDE_MODEL_CATALOG, modelsFromClaudeListModels } = await import(
+  "./claudeCatalog"
+);
 import type { HarnessEvent } from "../../core/types";
 import type { RuntimeMode, TurnIntent } from "../../../../features/sessions/model/session";
 
@@ -261,6 +271,7 @@ beforeEach(() => {
   onExit = undefined;
   writeChild.mockClear();
   __claudeTestReset();
+  __claudeCommandsTestReset();
 });
 
 afterEach(async () => {
@@ -1323,5 +1334,364 @@ describe("claude manual compaction", () => {
       text: "Compacted context",
     });
     expect(events.some((event) => event.type === "message.delta")).toBe(false);
+  });
+});
+
+describe("claude slash commands", () => {
+  /** Send one prompt as the first turn of a fresh session. */
+  async function sendCommand(
+    text: string,
+    modelSettings: Record<string, string> = {},
+  ) {
+    const events: HarnessEvent[] = [];
+    const turn = sendClaudeTurn({
+      sessionId: "s1",
+      cwd: "/repo",
+      model: "claude:claude-sonnet-5",
+      modelSettings,
+      runtimeMode: "supervised",
+      text,
+      attachments: [],
+      onEvent: (event) => events.push(event),
+    });
+    await waitFor(() => parse().length > 0, "initialize");
+    emit({ type: "system", subtype: "init", session_id: "sess_1" });
+    await waitFor(() => parse().some((m) => m.type === "user"), "command");
+    return { events, turn };
+  }
+
+  /** Claude answers a built-in command itself, without a model call. */
+  function emitCommandReply(text: string, init: Record<string, unknown> = {}) {
+    emit({ type: "system", subtype: "init", session_id: "sess_1", ...init });
+    emit({
+      type: "assistant",
+      session_id: "sess_1",
+      message: {
+        model: "<synthetic>",
+        content: [{ type: "text", text }],
+        usage: { input_tokens: 0, output_tokens: 0 },
+      },
+    });
+    emit({
+      type: "result",
+      subtype: "success",
+      num_turns: 0,
+      session_id: "sess_1",
+      result: text,
+      usage: { input_tokens: 0, output_tokens: 0 },
+    });
+  }
+
+  it("sends a command as typed and shows Claude's reply as the answer", async () => {
+    const { events, turn } = await sendCommand("/advisor opus", {
+      effort: "ultrathink",
+    });
+    expect(parse().find((m) => m.type === "user")).toMatchObject({
+      message: { content: [{ type: "text", text: "/advisor opus" }] },
+    });
+
+    emitCommandReply("Advisor set to Opus 5.5");
+    await turn;
+
+    expect(events).toContainEqual({
+      type: "message.delta",
+      text: "Advisor set to Opus 5.5",
+    });
+    expect(events.some((event) => event.type === "context")).toBe(false);
+    expect(events.some((event) => event.type === "session.configChanged")).toBe(
+      false,
+    );
+  });
+
+  it("offers the commands a running session reports, and its later changes", async () => {
+    const onCommands = vi.fn();
+    claudeCommandProvider.subscribe!({ cwd: "/repo" }, onCommands);
+    const { turn } = await startTurn("s1");
+    emit({
+      type: "control_response",
+      response: {
+        subtype: "success",
+        request_id: "monocode_2",
+        response: {
+          commands: [
+            { name: "advisor", description: "", argumentHint: "[opus|off]" },
+          ],
+        },
+      },
+    });
+
+    await expect(
+      claudeCommandProvider.discover({ cwd: "/repo", sessionId: "s1" }),
+    ).resolves.toMatchObject([{ name: "advisor", inputHint: "[opus|off]" }]);
+    expect(spawned).toHaveLength(1);
+
+    emit({
+      type: "system",
+      subtype: "commands_changed",
+      commands: [{ name: "advisor" }, { name: "new-skill" }],
+    });
+    expect(onCommands).toHaveBeenLastCalledWith([
+      expect.objectContaining({ name: "advisor" }),
+      expect.objectContaining({ name: "new-skill" }),
+    ]);
+
+    emit({ type: "result", subtype: "success", session_id: "sess_1" });
+    await turn;
+  });
+
+  const asRequest = (message: Record<string, unknown>) =>
+    message.request as Record<string, unknown> | undefined;
+
+  const askedForSettings = () =>
+    parse().find((m) => asRequest(m)?.subtype === "get_settings");
+
+  /** Claude's answer to the `get_settings` request a settings command ends with. */
+  async function emitApplied(applied: Record<string, unknown> | null) {
+    await waitFor(() => !!askedForSettings(), "get_settings");
+    const requestId = askedForSettings()!.request_id;
+    emit({
+      type: "control_response",
+      response: applied
+        ? {
+            subtype: "success",
+            request_id: requestId,
+            response: { effective: {}, sources: [], applied },
+          }
+        : {
+            subtype: "error",
+            request_id: requestId,
+            error: "Unsupported control request subtype: get_settings",
+          },
+    });
+  }
+
+  const configChanges = (events: HarnessEvent[]) =>
+    events.filter((event) => event.type === "session.configChanged");
+
+  it.each([
+    // The old model's wide window must not carry over to the next launch.
+    { reported: "claude-opus-5-5", model: "claude:opus-5-5", context: "200k" },
+    {
+      reported: "claude-opus-5-5[1m]",
+      model: "claude:opus-5-5",
+      context: "1m",
+    },
+    // Claude reports some models by their dated id.
+    {
+      reported: "claude-haiku-4-5-20251001",
+      model: "claude:haiku-4.5",
+      context: "200k",
+    },
+  ])(
+    "moves MonoCode's model to the one /model switched Claude to: $reported",
+    async ({ reported, model, context }) => {
+      const { events, turn } = await sendCommand("/model x", { context: "1m" });
+      let done = false;
+      void turn.then(() => (done = true));
+      emitCommandReply("Set model for this session only");
+      await waitFor(() => !!askedForSettings(), "get_settings");
+      // The turn stays open until the selector has been told.
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(done).toBe(false);
+
+      await emitApplied({ model: reported, effort: "high" });
+      await turn;
+      expect(configChanges(events)).toEqual([
+        { type: "session.configChanged", model, modelSettings: { context } },
+      ]);
+    },
+  );
+
+  it("keeps MonoCode's model when Claude is still on it or does not say", async () => {
+    const same = await sendCommand("/model sonnet");
+    emitCommandReply("Set model to `Sonnet 5`");
+    await emitApplied({ model: "claude-sonnet-5[1m]", effort: "max" });
+    await same.turn;
+    expect(configChanges(same.events)).toEqual([]);
+
+    sent.length = 0;
+    const events: HarnessEvent[] = [];
+    const old = sendClaudeTurn({
+      sessionId: "s1",
+      cwd: "/repo",
+      model: "claude:claude-sonnet-5",
+      modelSettings: {},
+      runtimeMode: "supervised",
+      text: "/model opus",
+      attachments: [],
+      onEvent: (event) => events.push(event),
+    });
+    await waitFor(() => parse().some((m) => m.type === "user"), "command");
+    emitCommandReply("Set model to `Opus 5.5`");
+    await emitApplied(null);
+    await old;
+    expect(configChanges(events)).toEqual([]);
+  });
+
+  it.each([
+    { text: "/effort max", applied: { effort: "max" }, effort: "max" },
+    { text: "/effort auto", applied: { effort: "medium" }, effort: "medium" },
+    {
+      text: "/effort ultracode on",
+      applied: { effort: "xhigh", ultracode: true },
+      effort: "ultracode",
+    },
+    // Nothing to move: already selected, refused, or not offered for the model.
+    { text: "/effort high", applied: { effort: "high" }, effort: null },
+    { text: "/effort bogus", applied: { effort: "medium" }, effort: null },
+    { text: "/effort turbo", applied: { effort: "turbo" }, effort: null },
+  ])(
+    "moves MonoCode's effort to what $text applied",
+    async ({ text, applied, effort }) => {
+      // The live catalog is what tells MonoCode which levels a model offers.
+      setHarnessModels("claude", CLAUDE_MODEL_CATALOG);
+      try {
+        const { events, turn } = await sendCommand(text, { effort: "high" });
+        emitCommandReply("Set effort level (this session only)");
+        await emitApplied({ model: "claude-opus-5-5", ...applied });
+        await turn;
+
+        expect(configChanges(events)).toEqual(
+          effort
+            ? [{ type: "session.configChanged", modelSettings: { effort } }]
+            : [],
+        );
+      } finally {
+        resetHarnessModelOverlays();
+      }
+    },
+  );
+
+  it.each([
+    { from: "claude:sonnet", reported: "claude-opus-5-5", to: "claude:opus" },
+    { from: "claude:opus", reported: "claude-haiku-4-5-20251001", to: "claude:haiku" },
+    { from: "claude:sonnet", reported: "claude-sonnet-5-5", to: null },
+    { from: "claude:sonnet-5", reported: "claude-sonnet-5", to: null },
+  ])(
+    "matches the aliases Claude lists to the model it runs: $from -> $reported",
+    async ({ from, reported, to }) => {
+      // The shape `list_models` returns: current models only as aliases.
+      setHarnessModels(
+        "claude",
+        modelsFromClaudeListModels([
+          { value: "default", resolvedModel: "claude-opus-5-5" },
+          { value: "opus", resolvedModel: "claude-opus-5-5", displayName: "Opus" },
+          { value: "sonnet", resolvedModel: "claude-sonnet-5-5", displayName: "Sonnet" },
+          { value: "haiku", resolvedModel: "claude-haiku-4-5-20251001", displayName: "Haiku" },
+          { value: "claude-sonnet-5", resolvedModel: "claude-sonnet-5" },
+        ]),
+      );
+      try {
+        const events: HarnessEvent[] = [];
+        const turn = sendClaudeTurn({
+          sessionId: "s1",
+          cwd: "/repo",
+          model: from,
+          modelSettings: {},
+          runtimeMode: "supervised",
+          text: "/model x",
+          attachments: [],
+          onEvent: (event) => events.push(event),
+        });
+        await waitFor(() => parse().length > 0, "initialize");
+        emit({ type: "system", subtype: "init", session_id: "sess_1" });
+        await waitFor(() => parse().some((m) => m.type === "user"), "command");
+        emitCommandReply("Set model for this session only");
+        await emitApplied({ model: reported, effort: "high" });
+        await turn;
+
+        expect(configChanges(events).map((event) => event.model)).toEqual(
+          to ? [to] : [],
+        );
+      } finally {
+        resetHarnessModelOverlays();
+      }
+    },
+  );
+
+  it("follows a /model sent mid-turn once Claude has run it", async () => {
+    const { events, turn } = await startTurn("s1");
+    await steerClaudeTurn({
+      sessionId: "s1",
+      cwd: "/repo",
+      model: "claude:claude-sonnet-5",
+      text: "/model opus",
+    });
+
+    // The turn that was running ends first; the command has not run yet.
+    emit({ type: "result", subtype: "success", session_id: "sess_1" });
+    await turn;
+    expect(askedForSettings()).toBeUndefined();
+
+    emitCommandReply("Set model to `Opus 5.5` for this session only");
+    await emitApplied({ model: "claude-opus-5-5", effort: "high" });
+    expect(configChanges(events)).toMatchObject([{ model: "claude:opus-5-5" }]);
+  });
+
+  it("does not ask what was applied for a bare /model", async () => {
+    const { events, turn } = await sendCommand("/model");
+    emitCommandReply("Current model: Sonnet 5");
+    await turn;
+
+    expect(askedForSettings()).toBeUndefined();
+    expect(configChanges(events)).toEqual([]);
+  });
+
+  it("ends a settings turn even if Claude never says what it applied", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      const events: HarnessEvent[] = [];
+      const turn = sendClaudeTurn({
+        sessionId: "s1",
+        cwd: "/repo",
+        model: "claude:claude-sonnet-5",
+        modelSettings: {},
+        runtimeMode: "supervised",
+        text: "/effort max",
+        attachments: [],
+        onEvent: (event) => events.push(event),
+      });
+      await vi.waitFor(() => expect(parse().length).toBeGreaterThan(0));
+      emit({ type: "system", subtype: "init", session_id: "sess_1" });
+      await vi.waitFor(() =>
+        expect(parse().some((m) => m.type === "user")).toBe(true),
+      );
+      emitCommandReply("Set effort level to max (this session only)");
+      await vi.waitFor(() => expect(askedForSettings()).toBeDefined());
+
+      await vi.advanceTimersByTimeAsync(3_001);
+      await turn;
+      expect(configChanges(events)).toEqual([]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("says so when /clear starts a new conversation", async () => {
+    const { events, turn } = await sendCommand("/clear");
+    emit({
+      type: "conversation_reset",
+      new_conversation_id: "conv_2",
+      trigger: "clear",
+      session_id: "sess_1",
+    });
+    emit({ type: "system", subtype: "init", session_id: "sess_2" });
+    emit({
+      type: "result",
+      subtype: "success",
+      num_turns: 0,
+      session_id: "sess_2",
+      result: "",
+    });
+    await turn;
+
+    expect(events).toContainEqual({
+      type: "status",
+      text: "Started a new conversation",
+    });
+    expect(events).toContainEqual({
+      type: "session.providerBound",
+      providerSessionId: "sess_2",
+    });
   });
 });

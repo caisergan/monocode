@@ -140,21 +140,41 @@ type CatalogEntry = {
 const catalogEntries = new Map<string, CatalogEntry>();
 
 export function skillCatalogKey(context: SkillCatalogContext): string {
-  const sessionScoped = !!getHarness(context.harness)?.commands?.subscribe;
+  const provider = getHarness(context.harness)?.commands;
+  const sessionScoped = !!provider?.subscribe && !provider.alongsideSkills;
   return `${context.harness}\0${normalizeProjectPath(context.cwd)}${sessionScoped && context.sessionId ? `\0${context.sessionId}` : ""}`;
 }
 
+/** True when the harness's own commands replace MonoCode's skills. */
 export function hasNativeCommands(harness: HarnessId): boolean {
+  const provider = getHarness(harness)?.commands;
+  return !!provider && !provider.alongsideSkills;
+}
+
+/** True when the harness lists commands of its own, with or without skills. */
+export function listsNativeCommands(harness: HarnessId): boolean {
   return !!getHarness(harness)?.commands;
 }
 
+/**
+ * A prompt the harness runs as its own slash command, so it is sent as typed.
+ * Next to MonoCode's skills only a command the harness listed counts; a skill
+ * of the same name keeps being injected.
+ */
 export function isNativeCommandPrompt(
   text: string,
-  harness: HarnessId,
+  context: SkillCatalogContext,
 ): boolean {
-  return (
-    getHarness(harness)?.commands?.rawSlashCommands === true &&
-    /^\s*\/[^\s/\\]+(?=\s|$)/.test(text)
+  const provider = getHarness(context.harness)?.commands;
+  if (provider?.rawSlashCommands !== true) return false;
+  const name = /^\s*\/([^\s/\\]+)(?=\s|$)/.exec(text)?.[1];
+  if (!name) return false;
+  if (!provider.alongsideSkills) return true;
+  const catalog = peekSkills(context) ?? [];
+  const named = catalog.find((skill) => skill.invocation === name);
+  if (named) return named.kind === "native";
+  return catalog.some(
+    (skill) => skill.kind === "native" && skill.aliases?.includes(name),
   );
 }
 
@@ -163,8 +183,17 @@ export function subscribeSkills(
   context: SkillCatalogContext,
   onSkills: (skills: Skill[]) => void,
 ): () => void {
+  const provider = getHarness(context.harness)?.commands;
+  if (provider?.alongsideSkills) {
+    // The commands are one part of the catalog; reload it as a whole.
+    return (
+      provider.subscribe?.(context, () => {
+        void loadSkills(context, { refresh: true }).then(onSkills);
+      }) ?? (() => undefined)
+    );
+  }
   return (
-    getHarness(context.harness)?.commands?.subscribe?.(context, (commands) => {
+    provider?.subscribe?.(context, (commands) => {
       const key = skillCatalogKey(context);
       const previous = catalogEntries.get(key);
       const skills: Skill[] = commands.map((command) => ({
@@ -305,7 +334,7 @@ function startCatalogLoad(
 
 async function loadCatalog(context: SkillCatalogContext): Promise<Skill[]> {
   const provider = getHarness(context.harness)?.commands;
-  if (provider) {
+  if (provider && !provider.alongsideSkills) {
     const commands = await provider.discover(context);
     return commands.map((command): NativeSkill => ({
       kind: "native",
@@ -313,9 +342,31 @@ async function loadCatalog(context: SkillCatalogContext): Promise<Skill[]> {
     }));
   }
   const disabledPaths = loadDisabledSkillPaths();
-  const discovered = await listSkills(context.cwd, disabledPaths);
+  // The harness's commands are an extra: skills still load if it cannot list them.
+  const [discovered, commands, unfiltered] = await Promise.all([
+    listSkills(context.cwd, disabledPaths),
+    provider?.discover(context).catch(() => []) ?? [],
+    provider && disabledPaths.length ? listSkills(context.cwd, []) : [],
+  ]);
   const disabled = disabledSkillPathSet();
-  return mergeCatalog(discovered.filter((skill) => !disabled.has(skill.path)));
+  const catalog = mergeCatalog(
+    discovered.filter((skill) => !disabled.has(skill.path)),
+  );
+  // A skill keeps its name; the harness command of the same name is left out.
+  const taken = new Set(catalog.map((skill) => skill.name));
+  // The harness lists its own copy of a skill switched off in Settings.
+  const switchedOff = new Set(
+    unfiltered
+      .filter((skill) => disabled.has(skill.path))
+      .map((skill) => skill.name),
+  );
+  for (const command of commands) {
+    if (taken.has(command.name)) continue;
+    if (!command.origin && switchedOff.has(command.name)) continue;
+    taken.add(command.name);
+    catalog.push({ kind: "native", ...command });
+  }
+  return catalog;
 }
 
 export function mergeCatalog(discovered: DiscoveredSkill[]): Skill[] {
@@ -553,7 +604,7 @@ export function warmNativeSkills(
   context: SkillCatalogContext,
   load: SkillLoader = loadSkills,
 ): void {
-  if (!hasNativeCommands(context.harness)) return;
+  if (!listsNativeCommands(context.harness)) return;
   void load(context).catch(() => undefined);
 }
 
