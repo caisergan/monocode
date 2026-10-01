@@ -346,9 +346,6 @@ chat child and the CLI never write to one conversation together.
 - `cargo clippy -- -D warnings` fails on `control.rs:368` (`nonminimal_bool`), which this work did not touch.
 
 **Known gaps**
-- Quitting the app kills running agents without asking, unlike closing a tab. The quit dialog counts busy chats
-  only, and its wording ("chats… will resume") does not fit an agent in a terminal, so it needs a wording
-  decision before it is extended.
 - When a cursor is no longer in the transcript (the user rewound in the CLI, or the file was deleted) the whole
   history is replaced by the transcript, frozen prefix included. Checkpoint and plan blocks in the prefix are
   lost in that case.
@@ -358,4 +355,19 @@ chat child and the CLI never write to one conversation together.
 **Tests beyond the units above.** `useSessionSurface`, `useTerminalSync` and `TerminalView` each have
 component-level tests (mutation-checked: removing the chat stop, the terminal-surface guard, or the
 no-kill-on-unmount guard makes one fail). Nothing drives a real PTY or a real agent.
+
+**Decided 2026-10-01: a terminal agent costs what it costs.** There is no idle timer for terminal agents, unlike
+chat mode's 5-minute park. A session that runs in the terminal keeps its CLI alive in a background tab until its
+tab is closed or the app quits. The three lifetimes stay as built: closing a tab kills the PTY (after asking if
+the agent is running, and after a final transcript sync), quitting or closing a window kills every session PTY
+(after asking, see below), and switching tabs leaves it running.
+
+**Quit and window close ask about terminal agents (decided 2026-10-01).** Each window counts the agents it has
+running in session terminals (a live PTY; an idle agent cannot be told from a working one) and adds them to its
+quit-poll reply, with a separate `agents` count so the dialog can word it: "N terminal agents are still
+running. Quit anyway? They will stop, and their conversations resume when you reopen their tabs", or a
+combined chats-and-agents message. Closing one window asks the same way. On Linux and Windows the last
+window's close handler counts agents itself, because by the time the quit poll runs that window is gone and
+nothing could be asked. Hiding to the tray or the macOS dock leaves agents running and does not ask. Plain
+shell terminals are still not counted.
 

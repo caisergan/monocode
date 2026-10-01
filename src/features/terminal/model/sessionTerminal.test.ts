@@ -18,6 +18,7 @@ vi.mock("../../../platform/tauri/pty", () => ({
 
 import {
   confirmCloseSessionTerminals,
+  countLiveSessionTerminals,
   killSessionTerminal,
   sessionPtyId,
   sessionTerminalLaunch,
@@ -160,6 +161,29 @@ describe("closing sessions with a live agent", () => {
     expect(mocks.ask.mock.calls[0][0]).toContain("Fix login");
     mocks.ask.mockResolvedValue(true);
     expect(await confirmCloseSessionTerminals([terminal])).toBe(true);
+  });
+});
+
+describe("countLiveSessionTerminals", () => {
+  it("counts only terminal sessions whose agent is running", async () => {
+    mocks.status.mockImplementation(async (id: string) => {
+      if (id === "session:t2") throw new Error("Terminal is not running");
+      return { foreground: null };
+    });
+    const count = await countLiveSessionTerminals([
+      { id: "c1" },
+      { id: "t1", surface: "terminal" },
+      { id: "t2", surface: "terminal" },
+      { id: "t3", surface: "terminal" },
+    ]);
+    expect(count).toBe(2);
+    // A chat session is never asked about.
+    expect(mocks.status.mock.calls.map(([id]) => id)).not.toContain("session:c1");
+  });
+
+  it("is zero without any terminal sessions", async () => {
+    expect(await countLiveSessionTerminals([{ id: "c1" }])).toBe(0);
+    expect(mocks.status).not.toHaveBeenCalled();
   });
 });
 

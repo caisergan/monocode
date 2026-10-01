@@ -101,6 +101,18 @@ export async function isSessionTerminalAlive(
   );
 }
 
+/** How many of these sessions have an agent running in their terminal right now. */
+export async function countLiveSessionTerminals(
+  sessions: Array<Pick<Session, "id" | "surface">>,
+): Promise<number> {
+  const alive = await Promise.all(
+    sessions
+      .filter((session) => session.surface === "terminal")
+      .map((session) => isSessionTerminalAlive(session.id)),
+  );
+  return alive.filter(Boolean).length;
+}
+
 export function killSessionTerminal(sessionId: string): Promise<void> {
   return killPty(sessionPtyId(sessionId));
 }

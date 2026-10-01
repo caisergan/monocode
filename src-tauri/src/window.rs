@@ -53,6 +53,9 @@ struct QuitRun {
     /// Windows that answered the poll, so their listeners are known to be live.
     replied: HashSet<String>,
     in_flight: u32,
+    /// How many of `in_flight` are agents running in a terminal rather than
+    /// chat turns, so the dialog can say which it is asking about.
+    agents: u32,
     /// The window showing the dialog, so its close can abort the quit.
     prompt: Option<String>,
 }
@@ -65,6 +68,7 @@ static QUIT_COUNTER: AtomicU32 = AtomicU32::new(1);
 struct QuitConfirm {
     id: u32,
     in_flight: u32,
+    agents: u32,
 }
 
 pub fn open_new_window(app: &AppHandle) -> Result<(), String> {
@@ -244,9 +248,21 @@ fn begin_run(slot: &mut Option<QuitRun>, id: u32, labels: Vec<String>) -> bool {
         pending: labels.into_iter().collect(),
         replied: HashSet::new(),
         in_flight: 0,
+        agents: 0,
         prompt: None,
     });
     true
+}
+
+/// Terminal agents among one window's reply. They are also in its `in_flight`
+/// count; this only says how many of them are not chat turns.
+fn record_agents(slot: &mut Option<QuitRun>, id: u32, agents: u32) {
+    if let Some(run) = slot
+        .as_mut()
+        .filter(|run| run.id == id && run.stage == Stage::Polling)
+    {
+        run.agents += agents;
+    }
 }
 
 fn record_reply(slot: &mut Option<QuitRun>, id: u32, label: &str, in_flight: u32) -> Next {
@@ -348,8 +364,19 @@ pub fn request_quit(app: &AppHandle) {
 
 /// One window's live turn count, counted before anything is killed.
 #[tauri::command]
-pub fn quit_poll_reply(app: AppHandle, window: WebviewWindow, id: u32, in_flight: u32) {
-    let next = record_reply(&mut QUIT_RUN.lock().unwrap(), id, window.label(), in_flight);
+pub fn quit_poll_reply(
+    app: AppHandle,
+    window: WebviewWindow,
+    id: u32,
+    in_flight: u32,
+    agents: Option<u32>,
+) {
+    let mut slot = QUIT_RUN.lock().unwrap();
+    // Capped at the total: an older webview that sends no count says nothing,
+    // and a count above the total could only be a bug.
+    record_agents(&mut slot, id, agents.unwrap_or(0).min(in_flight));
+    let next = record_reply(&mut slot, id, window.label(), in_flight);
+    drop(slot);
     if next == Next::Confirm {
         start_confirm(&app, id);
     }
@@ -434,6 +461,12 @@ fn start_confirm(app: &AppHandle, id: u32) {
     let Some(in_flight) = close_poll(&mut QUIT_RUN.lock().unwrap(), id) else {
         return;
     };
+    let agents = QUIT_RUN
+        .lock()
+        .unwrap()
+        .as_ref()
+        .filter(|run| run.id == id)
+        .map_or(0, |run| run.agents.min(in_flight));
     if in_flight == 0 {
         start_commit(app, id);
         return;
@@ -464,7 +497,11 @@ fn start_confirm(app: &AppHandle, id: u32) {
             run.prompt = Some(label.clone());
         }
     }
-    let payload = QuitConfirm { id, in_flight };
+    let payload = QuitConfirm {
+        id,
+        in_flight,
+        agents,
+    };
     if app
         .emit_to(EventTarget::webview_window(&label), QUIT_CONFIRM, payload)
         .is_err()
@@ -711,5 +748,27 @@ mod tests {
             run.prompt = Some("main".to_string());
         }
         assert_eq!(drop_window(&mut slot, "window-2"), Next::Wait);
+    }
+
+    #[test]
+    fn terminal_agents_are_counted_across_windows_and_stay_part_of_the_total() {
+        let mut slot = polling(&["main", "window-2"]);
+        record_agents(&mut slot, 1, 1);
+        record_reply(&mut slot, 1, "main", 3);
+        record_agents(&mut slot, 1, 2);
+        assert_eq!(record_reply(&mut slot, 1, "window-2", 2), Next::Confirm);
+        assert_eq!(close_poll(&mut slot, 1), Some(5));
+        assert_eq!(slot.as_ref().map(|run| run.agents), Some(3));
+    }
+
+    #[test]
+    fn agents_reported_for_a_stale_run_or_after_the_poll_are_ignored() {
+        let mut slot = polling(&["main"]);
+        record_agents(&mut slot, 99, 4);
+        assert_eq!(slot.as_ref().map(|run| run.agents), Some(0));
+        record_reply(&mut slot, 1, "main", 1);
+        close_poll(&mut slot, 1);
+        record_agents(&mut slot, 1, 4);
+        assert_eq!(slot.as_ref().map(|run| run.agents), Some(0));
     }
 }

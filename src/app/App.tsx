@@ -225,6 +225,7 @@ import {
 } from "../features/terminal/model/terminalClose";
 import {
   confirmCloseSessionTerminals,
+  countLiveSessionTerminals,
   killSessionTerminal,
 } from "../features/terminal/model/sessionTerminal";
 import { supportsTerminalSurface } from "../integrations/harness/core/terminalLaunch";
@@ -1736,30 +1737,40 @@ export default function App({
         // Listening here makes close our job. Letting the default path run
         // calls JS `window.destroy`, which Tauri denies without a permission.
         event.preventDefault();
-        const toTray = loadCloseToTray();
-        if (hasInFlightSessions(sessionsRef.current)) {
-          flushHarnessEvents();
-          if (!toTray && !IS_MAC) {
-            void closeBusyWindow();
+        void (async () => {
+          const toTray = loadCloseToTray();
+          // Closing for real ends the agents in this window's terminals. On
+          // Linux and Windows the last window closing is the quit itself, and
+          // the quit poll finds no window left to ask, so this is the only
+          // place it can be asked. Hiding to the tray leaves them running.
+          const closesForReal = !toTray && !IS_MAC;
+          const agents = closesForReal
+            ? await countLiveSessionTerminals(sessionsRef.current).catch(() => 0)
+            : 0;
+          if (hasInFlightSessions(sessionsRef.current) || agents > 0) {
+            flushHarnessEvents();
+            if (closesForReal) {
+              void closeBusyWindow();
+              return;
+            }
+            // Not `persistQuitState`: that marks the live turns interrupted.
+            void persistLiveTranscripts(sessionsRef.current);
+            void hideCurrentWindow();
             return;
           }
-          // Not `persistQuitState`: that marks the live turns interrupted.
-          void persistLiveTranscripts(sessionsRef.current);
-          void hideCurrentWindow();
-          return;
-        }
-        void persistQuitState(
-          sessionsRef.current,
-          tabsRef.current,
-          activeTabIdRef.current,
-          projectCwdRef.current,
-          readProjectReturnMemory(),
-          "unload",
-          projectTerminalsRef.current,
-          lastDockSideRef.current ?? undefined,
-        ).finally(() => {
-          void (toTray ? hideCurrentWindow() : closeCurrentWindow());
-        });
+          void persistQuitState(
+            sessionsRef.current,
+            tabsRef.current,
+            activeTabIdRef.current,
+            projectCwdRef.current,
+            readProjectReturnMemory(),
+            "unload",
+            projectTerminalsRef.current,
+            lastDockSideRef.current ?? undefined,
+          ).finally(() => {
+            void (toTray ? hideCurrentWindow() : closeCurrentWindow());
+          });
+        })();
       })
       .then((fn) => {
         unlistenClose = fn;
