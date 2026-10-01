@@ -190,6 +190,21 @@ export function providerAccountExists(
   return providerAccounts(provider).some((account) => account.id === accountId);
 }
 
+export const REMOVED_PROVIDER_ACCOUNT_MESSAGE =
+  "This conversation uses a removed provider account. Switch accounts from the usage control to start a new conversation.";
+
+/** True when a conversation is pinned to an account that no longer exists. */
+export function providerAccountRemoved(
+  harness: HarnessId,
+  accountId: string | undefined,
+): boolean {
+  return (
+    supportsProviderAccounts(harness) &&
+    accountId != null &&
+    !providerAccountExists(harness, accountId)
+  );
+}
+
 export function selectedProviderAccountId(
   provider: ProviderAccountProvider,
   project: string | undefined,
@@ -199,6 +214,40 @@ export function selectedProviderAccountId(
   return providerAccounts(provider).some((account) => account.id === id)
     ? id!
     : DEFAULT_PROVIDER_ACCOUNT_ID;
+}
+
+type AccountSession = {
+  harness: HarnessId;
+  cwd: string;
+  providerAccountId?: string;
+  providerSessionId?: string;
+};
+
+/**
+ * The account a conversation already belongs to. One that has a provider
+ * conversation but predates account pinning (an older or imported session)
+ * lives in the default profile, so it stays there rather than following the
+ * project's current selection into an account that cannot resume it.
+ */
+export function pinnedProviderAccountId(
+  session: AccountSession,
+): string | undefined {
+  if (!supportsProviderAccounts(session.harness)) return undefined;
+  return (
+    session.providerAccountId ??
+    (session.providerSessionId ? DEFAULT_PROVIDER_ACCOUNT_ID : undefined)
+  );
+}
+
+/** The account the session's next turn runs on. */
+export function sessionProviderAccountId(
+  session: AccountSession,
+): string | undefined {
+  if (!supportsProviderAccounts(session.harness)) return undefined;
+  return (
+    pinnedProviderAccountId(session) ??
+    selectedProviderAccountId(session.harness, session.cwd)
+  );
 }
 
 export function selectProviderAccount(
