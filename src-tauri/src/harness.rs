@@ -487,6 +487,17 @@ pub fn harness_spawn(
         .stderr(Stdio::piped());
     prepare_child(&mut cmd, &command);
     apply_provider_account(&app, &mut cmd, account.as_ref())?;
+    if let Some(account) = account
+        .as_ref()
+        .filter(|account| account.provider == "claude")
+    {
+        cmd.args(claude_account_mcp_args(
+            &app,
+            Some(&account.id),
+            &workdir,
+            &args,
+        ));
+    }
 
     crate::control::configure_child(&app, &session_id, &mut cmd);
 
@@ -699,7 +710,199 @@ pub(crate) fn provider_account_env(
     provider: &str,
     account_id: Option<&str>,
 ) -> Result<Option<AccountEnv>, String> {
-    Ok(provider_account_dir(app, provider, account_id)?.map(|dir| account_env_for(provider, &dir)))
+    let Some(dir) = provider_account_dir(app, provider, account_id)? else {
+        return Ok(None);
+    };
+    if provider == "claude" {
+        if let Some(source) = default_claude_config_dir() {
+            link_shared_config(&source, &dir, CLAUDE_SHARED_CONFIG);
+        }
+    }
+    Ok(Some(account_env_for(provider, &dir)))
+}
+
+/// What a named Claude profile shares with the default config directory: the
+/// user's settings, instructions, and extensions. Credentials, `.claude.json`
+/// (which holds the signed-in account) and transcripts stay per account.
+const CLAUDE_SHARED_CONFIG: &[&str] = &[
+    "settings.json",
+    "CLAUDE.md",
+    "agents",
+    "commands",
+    "skills",
+    "output-styles",
+    "plugins",
+    "rules",
+    "keybindings.json",
+];
+
+/// Written once a profile has adopted the shared config, so an entry the user
+/// later gives the profile on purpose is respected rather than moved aside.
+const SHARED_CONFIG_MARKER: &str = ".monocode-shared-config";
+
+/// Where a profile's own copy of a shared entry is kept when it adopts the
+/// shared one. Claude Code ignores the name.
+const BEFORE_SHARING_SUFFIX: &str = ".before-sharing";
+
+fn default_claude_config_dir() -> Option<PathBuf> {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs_home().map(|home| Path::new(&home).join(".claude")))
+}
+
+/// Symlink each shared entry of `source` into `profile`. A profile made before
+/// sharing has its own copies (Claude Code creates `plugins/` itself), so the
+/// first pass moves those aside once. After that, an entry the profile has,
+/// even a broken link, is the profile's own and is left alone. Failures only
+/// cost the profile that entry, so they never block a launch.
+fn link_shared_config(source: &Path, profile: &Path, entries: &[&str]) {
+    #[cfg(unix)]
+    {
+        let marker = profile.join(SHARED_CONFIG_MARKER);
+        let adopting = std::fs::symlink_metadata(&marker).is_err();
+        let mut adopted = true;
+        for entry in entries {
+            let target = source.join(entry);
+            if !target.exists() {
+                continue;
+            }
+            let link = profile.join(entry);
+            match std::fs::symlink_metadata(&link) {
+                Err(_) => {
+                    let _ = std::os::unix::fs::symlink(&target, &link);
+                }
+                Ok(metadata) if adopting && !metadata.file_type().is_symlink() => {
+                    let kept = profile.join(format!("{entry}{BEFORE_SHARING_SUFFIX}"));
+                    let moved = std::fs::symlink_metadata(&kept).is_err()
+                        && std::fs::rename(&link, &kept).is_ok();
+                    if moved {
+                        let _ = std::os::unix::fs::symlink(&target, &link);
+                    } else {
+                        adopted = false;
+                    }
+                }
+                Ok(_) => {}
+            }
+        }
+        if adopting && adopted {
+            let _ = std::fs::write(&marker, "");
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = (source, profile, entries);
+}
+
+/// The `.claude.json` of the default config: `$CLAUDE_CONFIG_DIR/.claude.json`
+/// when that is set, otherwise `~/.claude.json`, as Claude Code resolves it.
+fn default_claude_json() -> Option<PathBuf> {
+    match std::env::var_os("CLAUDE_CONFIG_DIR").filter(|value| !value.is_empty()) {
+        Some(dir) => Some(PathBuf::from(dir).join(".claude.json")),
+        None => dirs_home().map(|home| Path::new(&home).join(".claude.json")),
+    }
+}
+
+/// Claude keeps user and local MCP servers in `.claude.json`, which a named
+/// profile cannot share because the same file holds its signed-in account.
+/// For a session launch in a profile, this returns `--mcp-config` with the
+/// default config's servers for `cwd`, written to a private file so their
+/// `env` secrets stay off the command line. Sign-in and other subcommands,
+/// and helper runs that pin their own MCP config, get nothing.
+pub(crate) fn claude_account_mcp_args(
+    app: &AppHandle,
+    account_id: Option<&str>,
+    cwd: &Path,
+    args: &[String],
+) -> Vec<String> {
+    if !launches_claude_session(args) {
+        return Vec::new();
+    }
+    let Ok(Some(profile)) = provider_account_dir(app, "claude", account_id) else {
+        return Vec::new();
+    };
+    let Some(default_json) = default_claude_json() else {
+        return Vec::new();
+    };
+    shared_mcp_config_file(&default_json, &profile, cwd)
+        .map(|path| vec!["--mcp-config".into(), path.to_string_lossy().into_owned()])
+        .unwrap_or_default()
+}
+
+/// A session runs `claude` itself (no subcommand such as `auth login`) and has
+/// not chosen its own MCP servers.
+fn launches_claude_session(args: &[String]) -> bool {
+    args.first().is_none_or(|first| first.starts_with('-'))
+        && !args
+            .iter()
+            .any(|arg| arg == "--mcp-config" || arg == "--strict-mcp-config")
+}
+
+fn shared_mcp_config_file(default_json: &Path, profile: &Path, cwd: &Path) -> Option<PathBuf> {
+    let read = |path: &Path| -> Option<serde_json::Value> {
+        serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+    };
+    let default_config = read(default_json)?;
+    let profile_config = read(&profile.join(".claude.json"));
+    let mut cwd_keys = vec![cwd.to_string_lossy().into_owned()];
+    if let Ok(real) = cwd.canonicalize() {
+        cwd_keys.push(real.to_string_lossy().into_owned());
+    }
+    let servers = shared_mcp_servers(&default_config, profile_config.as_ref(), &cwd_keys);
+    if servers.is_empty() {
+        return None;
+    }
+
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(cwd_keys[0].as_bytes());
+    let name: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    let dir = profile.join("monocode-shared-mcp");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!("{name}.json"));
+    let staged = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+    let body = serde_json::to_vec(&serde_json::json!({ "mcpServers": servers })).ok()?;
+    write_private(&staged, &body).ok()?;
+    if std::fs::rename(&staged, &path).is_err() {
+        let _ = std::fs::remove_file(&staged);
+        return None;
+    }
+    Some(path)
+}
+
+fn write_private(path: &Path, body: &[u8]) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)?.write_all(body)
+}
+
+/// The default config's user servers, overlaid by its local servers for the
+/// first of `cwd_keys` it has, minus every name the profile defines itself.
+fn shared_mcp_servers(
+    default_config: &serde_json::Value,
+    profile_config: Option<&serde_json::Value>,
+    cwd_keys: &[String],
+) -> serde_json::Map<String, serde_json::Value> {
+    let servers_of = |config: &serde_json::Value| {
+        let user = config.get("mcpServers").and_then(|value| value.as_object());
+        let local = cwd_keys.iter().find_map(|key| {
+            config
+                .get("projects")?
+                .get(key)?
+                .get("mcpServers")?
+                .as_object()
+        });
+        let mut merged = user.cloned().unwrap_or_default();
+        merged.extend(local.cloned().unwrap_or_default());
+        merged
+    };
+    let mut servers = servers_of(default_config);
+    if let Some(profile) = profile_config {
+        for name in servers_of(profile).keys() {
+            servers.remove(name);
+        }
+    }
+    servers
 }
 
 fn apply_provider_account(
@@ -3568,5 +3771,164 @@ mod terminal_binary_tests {
         let env = account_env_for("codex", Path::new("/accounts/work"));
         assert_eq!(env.set, [("CODEX_HOME", PathBuf::from("/accounts/work"))]);
         assert!(env.remove.contains(&"OPENAI_API_KEY"));
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("monocode-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn claude_profiles_adopt_shared_config_once_then_keep_their_own_entries() {
+        let root = scratch("shared-config");
+        let source = root.join("default");
+        let profile = root.join("profile");
+        std::fs::create_dir_all(source.join("skills")).unwrap();
+        std::fs::create_dir_all(source.join("plugins")).unwrap();
+        std::fs::create_dir_all(profile.join("plugins")).unwrap();
+        std::fs::write(source.join("settings.json"), "{}").unwrap();
+        std::fs::write(source.join("CLAUDE.md"), "global").unwrap();
+        std::fs::write(source.join(".credentials.json"), "secret").unwrap();
+        std::fs::write(profile.join("CLAUDE.md"), "own").unwrap();
+        std::fs::write(profile.join("plugins/installed_plugins.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(root.join("gone"), profile.join("agents")).unwrap();
+
+        // A profile made before sharing moves its own copies aside once.
+        link_shared_config(&source, &profile, CLAUDE_SHARED_CONFIG);
+
+        for entry in ["settings.json", "skills", "plugins", "CLAUDE.md"] {
+            assert_eq!(
+                std::fs::read_link(profile.join(entry)).unwrap(),
+                source.join(entry),
+                "{entry}"
+            );
+        }
+        assert_eq!(
+            std::fs::read_to_string(profile.join("CLAUDE.md.before-sharing")).unwrap(),
+            "own"
+        );
+        assert!(profile
+            .join("plugins.before-sharing/installed_plugins.json")
+            .is_file());
+        assert_eq!(
+            std::fs::read_link(profile.join("agents")).unwrap(),
+            root.join("gone")
+        );
+        assert!(!profile.join(".credentials.json").exists());
+        assert!(std::fs::symlink_metadata(profile.join("commands")).is_err());
+
+        // After adopting, an entry the user gives the profile is its own.
+        std::fs::remove_file(profile.join("settings.json")).unwrap();
+        std::fs::write(profile.join("settings.json"), "{\"model\":\"opus\"}").unwrap();
+        std::fs::create_dir_all(source.join("commands")).unwrap();
+        link_shared_config(&source, &profile, CLAUDE_SHARED_CONFIG);
+        assert!(!std::fs::symlink_metadata(profile.join("settings.json"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_link(profile.join("commands")).unwrap(),
+            source.join("commands")
+        );
+
+        // Removing a profile must not follow the links into the shared config.
+        std::fs::remove_dir_all(&profile).unwrap();
+        assert!(source.join("settings.json").is_file());
+        assert!(source.join("skills").is_dir());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn shared_mcp_servers_merge_user_and_local_and_yield_to_the_profile() {
+        let default_config = serde_json::json!({
+            "mcpServers": {
+                "docs": { "command": "docs" },
+                "db": { "command": "db-user" },
+                "mine": { "command": "default-mine" },
+            },
+            "projects": {
+                "/repo": { "mcpServers": { "db": { "command": "db-local" } } },
+                "/other": { "mcpServers": { "elsewhere": { "command": "x" } } },
+            },
+        });
+        let profile_config = serde_json::json!({
+            "oauthAccount": { "emailAddress": "work@example.com" },
+            "mcpServers": { "mine": { "command": "profile-mine" } },
+        });
+
+        let servers = shared_mcp_servers(&default_config, Some(&profile_config), &["/repo".into()]);
+
+        assert_eq!(
+            serde_json::Value::Object(servers),
+            serde_json::json!({
+                "docs": { "command": "docs" },
+                "db": { "command": "db-local" },
+            })
+        );
+        assert!(shared_mcp_servers(&serde_json::json!({}), None, &["/repo".into()]).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shared_mcp_config_is_a_private_file_per_directory() {
+        let root = scratch("shared-mcp");
+        let profile = root.join("profile");
+        let cwd = root.join("repo");
+        std::fs::create_dir_all(&profile).unwrap();
+        std::fs::create_dir_all(&cwd).unwrap();
+        let default_json = root.join(".claude.json");
+        let cwd_key = cwd.to_string_lossy().into_owned();
+        std::fs::write(
+            &default_json,
+            serde_json::json!({
+                "mcpServers": { "docs": { "command": "docs", "env": { "TOKEN": "t" } } },
+                "projects": { cwd_key: { "mcpServers": { "db": { "command": "db" } } } },
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let path = shared_mcp_config_file(&default_json, &profile, &cwd).unwrap();
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            written["mcpServers"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            ["db", "docs"]
+        );
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            shared_mcp_config_file(&default_json, &profile, &cwd).unwrap(),
+            path
+        );
+        assert!(shared_mcp_config_file(&root.join("missing.json"), &profile, &cwd).is_none());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn shared_mcp_servers_only_join_session_launches() {
+        let args = |list: &[&str]| list.iter().map(|arg| arg.to_string()).collect::<Vec<_>>();
+        assert!(launches_claude_session(&[]));
+        assert!(launches_claude_session(&args(&["--resume", "abc"])));
+        assert!(launches_claude_session(&args(&[
+            "--output-format",
+            "stream-json"
+        ])));
+        assert!(!launches_claude_session(&args(&["auth", "login"])));
+        assert!(!launches_claude_session(&args(&[
+            "--strict-mcp-config",
+            "--mcp-config",
+            "{}"
+        ])));
     }
 }

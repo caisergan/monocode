@@ -380,6 +380,8 @@ pub(crate) fn extract_opencode_go_api_key(raw: &str) -> Option<String> {
 struct ClaudeCredentials {
     access_token: String,
     expires_at_ms: Option<i64>,
+    /// Claude Code renews an expired access token itself on its next request.
+    refreshable: bool,
 }
 
 fn usage_result(
@@ -424,7 +426,7 @@ fn fetch_claude_usage_sync(config_dir: Option<PathBuf>) -> Result<ClaudeUsageFet
     // race a live CLI (or another MonoCode window) and leave one process with
     // a spent refresh token, which forces the user through sign-in again.
     if token_expired(creds.expires_at_ms, now_ms()) {
-        return Ok(usage_error(401));
+        return Ok(expired_token_usage(creds.refreshable));
     }
 
     Ok(fetch_usage_with_token(&creds.access_token))
@@ -459,6 +461,22 @@ fn fetch_usage_with_token(token: &str) -> ClaudeUsageFetch {
             None,
             Some(format!("Claude usage request failed: {error}")),
         ),
+    }
+}
+
+/// An access token only lapses while its account sits idle. With a refresh
+/// token the account is still signed in, so the footer must not offer a fresh
+/// browser login; the next Claude turn renews the token and the usage with it.
+fn expired_token_usage(refreshable: bool) -> ClaudeUsageFetch {
+    if refreshable {
+        usage_result(
+            "error",
+            None,
+            None,
+            Some("Usage updates after this account's next Claude turn".into()),
+        )
+    } else {
+        usage_error(401)
     }
 }
 
@@ -503,9 +521,16 @@ fn claude_credentials_path(config_dir: Option<&std::path::Path>) -> Option<PathB
 fn credentials_from_blob(raw: &str) -> Option<ClaudeCredentials> {
     let blob: Value = serde_json::from_str(raw.trim()).ok()?;
     let access_token = extract_access_token(raw)?;
+    let refreshable = blob
+        .get("claudeAiOauth")
+        .and_then(|oauth| oauth.get("refreshToken"))
+        .or_else(|| blob.get("refreshToken"))
+        .and_then(Value::as_str)
+        .is_some_and(|token| !token.trim().is_empty());
     Some(ClaudeCredentials {
         access_token,
         expires_at_ms: oauth_expires_at_ms(&blob),
+        refreshable,
     })
 }
 
@@ -872,6 +897,27 @@ mod tests {
         assert!(token_expired(Some(now), now));
         assert!(token_expired(Some(now - 1), now));
         assert!(!token_expired(None, now));
+    }
+
+    #[test]
+    fn expired_token_with_refresh_token_is_idle_not_signed_out() {
+        let creds = credentials_from_blob(
+            r#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r","expiresAt":1}}"#,
+        )
+        .unwrap();
+        assert!(creds.refreshable);
+        let idle = expired_token_usage(creds.refreshable);
+        assert_eq!(idle.status, "error");
+        assert_eq!(idle.http_status, None);
+        let message = idle.error.unwrap().to_lowercase();
+        assert!(!message.contains("expired") && !message.contains("sign-in"));
+
+        let creds = credentials_from_blob(r#"{"claudeAiOauth":{"accessToken":"a","expiresAt":1}}"#)
+            .unwrap();
+        assert!(!creds.refreshable);
+        let expired = expired_token_usage(creds.refreshable);
+        assert_eq!(expired.http_status, Some(401));
+        assert_eq!(expired.error.as_deref(), Some("Claude sign-in expired"));
     }
 
     #[cfg(target_os = "macos")]

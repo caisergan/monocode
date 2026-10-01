@@ -3,14 +3,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   DEFAULT_PROVIDER_ACCOUNT_ID,
   newProviderAccount,
+  pinnedProviderAccountId,
   providerAccountLabel,
   providerAccountExists,
+  providerAccountRemoved,
   providerAccounts,
   removeProviderAccount,
   renameProviderAccount,
   saveProviderAccount,
   selectedProviderAccountId,
   selectProviderAccount,
+  sessionProviderAccountId,
 } from "./providerAccounts";
 
 beforeEach(() => {
@@ -199,5 +202,46 @@ describe("provider accounts", () => {
     removeProviderAccount("claude", "account-work");
 
     expect(providerAccounts("claude")[0]?.label).toBe("Primary");
+  });
+
+  it("keeps a started conversation on the account it began on", () => {
+    saveProviderAccount({
+      id: "account-work",
+      provider: "claude",
+      label: "Work",
+    });
+    selectProviderAccount("claude", "/repo", "account-work");
+
+    const fresh = { harness: "claude" as const, cwd: "/repo" };
+    expect(pinnedProviderAccountId(fresh)).toBeUndefined();
+    expect(sessionProviderAccountId(fresh)).toBe("account-work");
+
+    const legacy = { ...fresh, providerSessionId: "claude-session" };
+    expect(pinnedProviderAccountId(legacy)).toBe(DEFAULT_PROVIDER_ACCOUNT_ID);
+    expect(sessionProviderAccountId(legacy)).toBe(DEFAULT_PROVIDER_ACCOUNT_ID);
+
+    const pinned = { ...legacy, providerAccountId: "account-work" };
+    expect(sessionProviderAccountId(pinned)).toBe("account-work");
+
+    const other = {
+      harness: "opencode" as const,
+      cwd: "/repo",
+      providerSessionId: "x",
+    };
+    expect(sessionProviderAccountId(other)).toBeUndefined();
+  });
+
+  it("reports a conversation pinned to a removed account", () => {
+    saveProviderAccount({
+      id: "account-work",
+      provider: "claude",
+      label: "Work",
+    });
+
+    expect(providerAccountRemoved("claude", "account-work")).toBe(false);
+    expect(providerAccountRemoved("claude", undefined)).toBe(false);
+    removeProviderAccount("claude", "account-work");
+    expect(providerAccountRemoved("claude", "account-work")).toBe(true);
+    expect(providerAccountRemoved("opencode", "account-work")).toBe(false);
   });
 });

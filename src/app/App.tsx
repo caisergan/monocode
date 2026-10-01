@@ -392,9 +392,10 @@ import { createSessionRemover } from "../features/sessions/model/sessionRemoval"
 import { shouldGenerateSessionTitle } from "../features/sessions/model/sessionTitle";
 import {
   DEFAULT_PROVIDER_ACCOUNT_ID,
-  providerAccountExists,
-  selectedProviderAccountId,
-  supportsProviderAccounts,
+  REMOVED_PROVIDER_ACCOUNT_MESSAGE,
+  pinnedProviderAccountId,
+  providerAccountRemoved,
+  sessionProviderAccountId,
   type ProviderAccountProvider,
 } from "../features/providers/model/providerAccounts";
 import {
@@ -1530,13 +1531,9 @@ export default function App({
       harness: active.harness,
       model: active.model,
       authRequired: latestTurnNeedsHarnessLogin(active.blocks),
-      providerAccountId:
-        active.providerAccountId ??
-        (active.blocks.some((block) => block.role === "user")
-          ? DEFAULT_PROVIDER_ACCOUNT_ID
-          : undefined),
+      providerAccountId: pinnedProviderAccountId(active),
     };
-  }, [active?.id, active?.harness, active?.model, active?.blocks, active?.providerAccountId]);
+  }, [active?.id, active?.harness, active?.cwd, active?.model, active?.blocks, active?.providerAccountId, active?.providerSessionId]);
   const activeProviderSignInRequest = useMemo(() => {
     if (
       !active ||
@@ -6075,22 +6072,11 @@ export default function App({
       const initialWorkCwd = sessionWorkCwd(current);
       const createDraftWorktree =
         !current.worktreeCwd && current.workspaceMode === "worktree";
-      const accountProvider = supportsProviderAccounts(current.harness)
-        ? current.harness
-        : undefined;
-      const providerAccountId = accountProvider
-        ? (current.providerAccountId ??
-          selectedProviderAccountId(accountProvider, current.cwd))
-        : undefined;
-      if (
-        accountProvider &&
-        providerAccountId &&
-        !providerAccountExists(accountProvider, providerAccountId)
-      ) {
+      const providerAccountId = sessionProviderAccountId(current);
+      if (providerAccountRemoved(current.harness, providerAccountId)) {
         enqueueHarnessEvent(sessionId, {
           type: "session.error",
-          message:
-            "This conversation uses a removed provider account. Switch accounts from the usage control to start a new conversation.",
+          message: REMOVED_PROVIDER_ACCOUNT_MESSAGE,
         });
         flushHarnessEvents();
         return false;
@@ -7992,7 +7978,7 @@ export default function App({
       void runHarnessTextPrompt({
         harness,
         cwd,
-        providerAccountId: input.source.providerAccountId,
+        providerAccountId: sessionProviderAccountId(input.source),
         model: model || undefined,
         modelSettings: input.thread.modelSettings ?? input.source.modelSettings,
         threadId: input.thread.providerThreadId,
@@ -8482,6 +8468,21 @@ export default function App({
         (session) => session.id === sessionId,
       );
       if (!current || current.busy || current.worktreeRemoved) return false;
+      const providerAccountId = sessionProviderAccountId(current);
+      if (providerAccountRemoved(current.harness, providerAccountId)) {
+        const removed = sessionsRef.current.map((session) =>
+          session.id === sessionId
+            ? applyHarnessEvent(session, {
+                type: "session.error",
+                message: REMOVED_PROVIDER_ACCOUNT_MESSAGE,
+              })
+            : session,
+        );
+        sessionsRef.current = removed;
+        syncDockBadge(removed);
+        setSessions(removed);
+        return true;
+      }
       if (!canCompactHarnessContext(current.harness)) {
         const unsupported = sessionsRef.current.map((session) =>
           session.id === sessionId
@@ -8520,10 +8521,7 @@ export default function App({
             cwd: workCwd,
             model: current.model,
             modelSettings: current.modelSettings,
-            providerAccountId: supportsProviderAccounts(current.harness)
-              ? (current.providerAccountId ??
-                selectedProviderAccountId(current.harness, current.cwd))
-              : undefined,
+            providerAccountId,
             runtimeMode: current.runtimeMode,
             onEvent: (event) => {
               if (turnGen.current.get(sessionId) !== gen) return;

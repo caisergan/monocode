@@ -160,7 +160,7 @@ pub fn pty_spawn(
     let _reservation = crate::worktree_lifecycle::reserve_spawn(&workdir)?;
     // Resolve before touching the running PTY, so a missing CLI leaves the
     // previous one alone.
-    let command = resolve_command(&app, &harness, launch.as_ref())?;
+    let command = resolve_command(&app, &harness, &workdir, launch.as_ref())?;
     if let Some(prev) = host.remove(&id) {
         terminate(prev.pid);
         #[cfg(unix)]
@@ -514,6 +514,7 @@ fn spawn_windows(
 fn resolve_command(
     app: &AppHandle,
     harness: &HarnessHost,
+    workdir: &std::path::Path,
     launch: Option<&PtyLaunch>,
 ) -> Result<PtyCommand, String> {
     let Some(launch) = launch else {
@@ -531,11 +532,16 @@ fn resolve_command(
         &launch.harness,
         launch.provider_account_id.as_deref(),
     )?;
-    Ok(build_launch_command(
-        program.to_string_lossy().into_owned(),
-        launch,
-        account,
-    ))
+    let mut command = build_launch_command(program.to_string_lossy().into_owned(), launch, account);
+    if launch.harness == "claude" {
+        command.args.extend(crate::harness::claude_account_mcp_args(
+            app,
+            launch.provider_account_id.as_deref(),
+            workdir,
+            &launch.args,
+        ));
+    }
+    Ok(command)
 }
 
 fn build_launch_command(
