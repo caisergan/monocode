@@ -1,4 +1,11 @@
-import { nativeModelId } from "../../../../features/sessions/model/models";
+import {
+  findModel,
+  mergeModelSettings,
+  modelsFor,
+  nativeModelId,
+  resolveModel,
+  type AgentModel,
+} from "../../../../features/sessions/model/models";
 import { sameProviderAccountId } from "../../../../features/providers/model/providerAccounts";
 import type { RuntimeMode } from "../../../../features/sessions/model/session";
 import { loadClaudeHooks } from "../../../../features/settings/model/settings";
@@ -39,6 +46,7 @@ import {
   parseBackgroundTasks,
   parseControlCancelId,
   parseControlRequest,
+  parseControlResponse,
   parseJsonLine,
   parseTaskNotification,
   parseTaskProgress,
@@ -169,6 +177,20 @@ type Live = {
   pendingAssistantBoundary: boolean;
   manualCompaction: boolean;
   compactionConfirmed: boolean;
+  /**
+   * The running turn is `/model` or `/effort`, which change the process only.
+   * Holds what MonoCode had selected, to compare with what Claude applied.
+   */
+  settingsSwitch:
+    | (Pick<SendTurnInput, "model" | "modelSettings"> & {
+        command: "model" | "effort";
+        argument: string;
+        /** Results that end an earlier turn, before the command has run. */
+        skipResults: number;
+      })
+    | null;
+  /** The turn stays open until Claude has said what it applied. */
+  settingsCheck: { requestId: string; settle: () => void } | null;
 };
 
 type Resume = {
@@ -183,6 +205,8 @@ const INIT_TIMEOUT_MS = 8_000;
  * is let go anyway. The follow-up turn normally starts within a second or two.
  */
 const RESUME_GRACE_MS = 15_000;
+/** How long a `/model` or `/effort` turn waits to hear what Claude applied. */
+const SETTINGS_REPLY_MS = 3_000;
 
 const liveByThread = new Map<string, Live>();
 const resumeByThread = new Map<string, Resume>();
@@ -276,6 +300,9 @@ export async function steerClaudeTurn(input: SteerTurnInput): Promise<void> {
   const content = (message.message as { content: unknown[] }).content;
   if (content.length === 0) return;
 
+  // Claude runs a command sent mid-turn once the turn it interrupted ends.
+  const switching = settingsSwitchFor(input, live.turnResultSeen ? 0 : 1);
+  if (switching) live.settingsSwitch = switching;
   await writeJson(input.sessionId, message);
 }
 
@@ -455,6 +482,8 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     pendingAssistantBoundary: false,
     manualCompaction: false,
     compactionConfirmed: false,
+    settingsSwitch: null,
+    settingsCheck: null,
   };
   liveRef.current = live;
 
@@ -537,6 +566,8 @@ async function runTurn(live: Live, input: SendTurnInput): Promise<void> {
   live.backgroundKey = "";
   live.taskNotes = [];
   live.turnResultSeen = false;
+  live.settingsCheck?.settle();
+  live.settingsSwitch = settingsSwitchFor(input, 0);
 
   const turnPromise = new Promise<void>((resolve, reject) => {
     live.turnDone = resolve;
@@ -634,6 +665,7 @@ function handleLine(sessionId: string, live: Live, line: string): void {
 
   if (type === "control_response") {
     markInitialized(live);
+    noteAppliedSettings(live, rec);
     return;
   }
 
@@ -661,7 +693,7 @@ function handleLine(sessionId: string, live: Live, line: string): void {
     return;
   }
   if (type === "result") {
-    handleResult(live, rec);
+    handleResult(sessionId, live, rec);
     return;
   }
   if (type === "rate_limit_event") {
@@ -838,6 +870,127 @@ function handleAssistant(live: Live, rec: Record<string, unknown>): void {
   live.emittedReasoning = "";
 }
 
+function settingsSwitchFor(
+  input: Pick<SendTurnInput, "text" | "model" | "modelSettings">,
+  skipResults: number,
+): Live["settingsSwitch"] {
+  // Without an argument these only print the current value.
+  const switched = /^\s*\/(model|effort)\s+(\S+)/.exec(input.text);
+  if (!switched) return null;
+  return {
+    command: switched[1] as "model" | "effort",
+    argument: switched[2]!.toLowerCase(),
+    model: input.model,
+    modelSettings: input.modelSettings,
+    skipResults,
+  };
+}
+
+/**
+ * `/model` and `/effort` change the running process only. Ask Claude what it
+ * applied, so MonoCode's selector follows and the next launch keeps it.
+ */
+function askAppliedSettings(sessionId: string, live: Live): void {
+  const requestId = nextControlId(live);
+  const settle = () => {
+    if (live.settingsCheck?.requestId !== requestId) return;
+    clearTimeout(timer);
+    live.settingsCheck = null;
+    live.settingsSwitch = null;
+    maybeFinishTurn(live);
+  };
+  // An older Claude Code may not answer; the turn must still end.
+  const timer = setTimeout(settle, SETTINGS_REPLY_MS);
+  live.settingsCheck = { requestId, settle };
+  void writeJson(
+    sessionId,
+    buildControlRequest(requestId, { subtype: "get_settings" }),
+  ).catch(settle);
+}
+
+function noteAppliedSettings(live: Live, rec: Record<string, unknown>): void {
+  const check = live.settingsCheck;
+  const reply = parseControlResponse(rec);
+  if (!check || reply?.requestId !== check.requestId) return;
+  const selected = live.settingsSwitch;
+  const applied = asRecord(reply.payload?.applied);
+  if (selected && applied) {
+    const change =
+      selected.command === "model"
+        ? modelChange(selected, applied)
+        : effortChange(selected, applied);
+    if (change) live.onEvent({ type: "session.configChanged", ...change });
+  }
+  check.settle();
+}
+
+/**
+ * Claude reports the concrete model: an alias the picker lists (`opus`) is
+ * matched by what it resolves to, and some ids carry a date
+ * (`claude-haiku-4-5-20251001`).
+ */
+function runsClaudeModel(model: AgentModel, reported: string): boolean {
+  const nativeId = nativeModelId(model);
+  return [model.resolvedId, nativeId].some(
+    (id) =>
+      !!id &&
+      (reported === id ||
+        (reported.startsWith(`${id}-`) &&
+          /^\d{8}$/.test(reported.slice(id.length + 1)))),
+  );
+}
+
+function modelChange(
+  selected: Pick<SendTurnInput, "model" | "modelSettings">,
+  applied: Record<string, unknown>,
+): { model: string; modelSettings: Record<string, string> } | null {
+  const reported = stringField(applied, "model");
+  if (!reported) return null;
+  const wide = reported.endsWith("[1m]");
+  const id = wide ? reported.slice(0, -"[1m]".length) : reported;
+  const current = findModel(selected.model) ?? {
+    id: selected.model,
+    harness: "claude",
+    name: selected.model,
+  };
+  if (runsClaudeModel(current, id)) return null;
+  const model = modelsFor("claude").find((item) => runsClaudeModel(item, id));
+  if (!model) return null;
+  const modelSettings = mergeModelSettings(model, selected.modelSettings);
+  if (wide) {
+    modelSettings.context = "1m";
+  } else if (selected.modelSettings?.context && !modelSettings.context) {
+    // Settings are merged, never dropped: a wide window left over from the
+    // old model has to be overwritten or the next launch would ask for it.
+    modelSettings.context = "200k";
+  }
+  return { model: model.id, modelSettings };
+}
+
+function effortChange(
+  selected: Pick<SendTurnInput, "model" | "modelSettings"> & {
+    argument: string;
+  },
+  applied: Record<string, unknown>,
+): { modelSettings: Record<string, string> } | null {
+  const level = stringField(applied, "effort");
+  // A refused level leaves Claude where it was, which need not be where
+  // MonoCode's selector is (Ultrathink launches at Claude's default).
+  const took =
+    selected.argument === level ||
+    selected.argument === "auto" ||
+    selected.argument === "ultracode";
+  if (!took) return null;
+  const effort = applied.ultracode === true ? "ultracode" : level;
+  if (!effort || effort === selected.modelSettings?.effort) return null;
+  // Only a level the picker offers for this model can be shown as selected.
+  const offered = resolveModel("claude", selected.model).settings?.find(
+    (setting) => setting.id === "effort",
+  );
+  if (!offered?.options.some((option) => option.value === effort)) return null;
+  return { modelSettings: { effort } };
+}
+
 function closePendingAssistantMessage(live: Live): void {
   if (!live.pendingAssistantBoundary) return;
   live.pendingAssistantBoundary = false;
@@ -898,7 +1051,11 @@ function settleInlineAgentTask(live: Live, toolUseId: string): void {
   syncBackgroundWait(live);
 }
 
-function handleResult(live: Live, rec: Record<string, unknown>): void {
+function handleResult(
+  sessionId: string,
+  live: Live,
+  rec: Record<string, unknown>,
+): void {
   if (isSubagentMessage(rec)) return;
   // A /compact result reports the summarizer call's usage, not the rebuilt
   // conversation level. The next real turn will provide the fresh reading.
@@ -923,6 +1080,14 @@ function handleResult(live: Live, rec: Record<string, unknown>): void {
     live.onEvent({ type: "usage.limited", ...usageLimit });
   }
   live.turnResultSeen = true;
+  const switching = live.settingsSwitch;
+  if (switching && switching.skipResults > 0) {
+    switching.skipResults -= 1;
+  } else if (switching && !turnErrored && !live.cancelled) {
+    askAppliedSettings(sessionId, live);
+  } else {
+    live.settingsSwitch = null;
+  }
   maybeFinishTurn(live);
   showBackgroundRows(live);
   syncBackgroundWait(live);
@@ -1613,6 +1778,7 @@ function maybeFinishTurn(live: Live): void {
   if (!live.turnResultSeen) return;
   if (live.agentTasks.size > 0 || live.backgroundTasks.size > 0) return;
   if (live.awaitingResume) return;
+  if (live.settingsCheck) return;
   if (!live.activeTurn && !live.turnDone) return;
   finishActiveTurn(live, [
     { type: "message.completed" },

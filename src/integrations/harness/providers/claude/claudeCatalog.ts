@@ -377,6 +377,9 @@ function modelFromListRow(raw: unknown): AgentModel | null {
     name,
     nativeId,
     ...(settings.length > 0 ? { settings } : {}),
+    ...(fromResolved.id && fromResolved.id !== nativeId
+      ? { resolvedId: fromResolved.id }
+      : {}),
   };
 }
 

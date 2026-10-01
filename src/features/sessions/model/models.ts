@@ -33,6 +33,8 @@ export type AgentModel = {
   settings?: ModelSetting[];
   /** Context window, when the harness catalog reports one. */
   contextWindow?: number;
+  /** The concrete model an alias (`opus`) currently runs, as the CLI says. */
+  resolvedId?: string;
 };
 
 export const MODELS: AgentModel[] = [
