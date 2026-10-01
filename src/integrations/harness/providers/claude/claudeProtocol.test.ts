@@ -88,6 +88,15 @@ describe("applyClaudePromptEffortPrefix", () => {
     ).toBe("Ultrathink:\nInvestigate the edge cases");
     expect(applyClaudePromptEffortPrefix("hello", "high")).toBe("hello");
   });
+
+  it("leaves a slash command as typed so Claude still runs it", () => {
+    expect(applyClaudePromptEffortPrefix("/advisor opus", "ultrathink")).toBe(
+      "/advisor opus",
+    );
+    expect(
+      applyClaudePromptEffortPrefix("/tmp/log.txt is empty", "ultrathink"),
+    ).toBe("Ultrathink:\n/tmp/log.txt is empty");
+  });
 });
 
 describe("resolveClaudeApiModelId", () => {

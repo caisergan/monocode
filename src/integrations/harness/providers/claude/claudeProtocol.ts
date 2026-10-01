@@ -164,7 +164,14 @@ export function applyClaudePromptEffortPrefix(
 ): string {
   if (effort !== "ultrathink") return text;
   if (!text) return "Ultrathink:";
+  // A prefix would turn a slash command into an ordinary prompt.
+  if (claudeSlashCommandName(text)) return text;
   return `Ultrathink:\n${text}`;
+}
+
+/** Name of the slash command a prompt opens with, if it opens with one. */
+export function claudeSlashCommandName(text: string): string | undefined {
+  return /^\s*\/([^\s/\\]+)(?=\s|$)/.exec(text)?.[1];
 }
 
 export function resolveClaudeApiModelId(
