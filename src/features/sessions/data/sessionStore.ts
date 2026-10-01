@@ -3,7 +3,7 @@ import { titleFromToolInput } from "../../../integrations/harness/core/preview";
 import { recoverCursorSubagents } from "../../../integrations/harness/providers/cursor/cursorSubagents";
 import { persistableAttachment } from "../model/attachments";
 import type { ContextUsage } from "../model/contextUsage";
-import { normalizeProjectPath } from "../../projects/model/recents";
+import { isRemoteProjectPath, normalizeProjectPath } from "../../projects/model/recents";
 import {
   claudeShellCommands,
   ompActiveAssistantTexts,
@@ -122,6 +122,8 @@ type SessionUpsertPayload = {
  */
 export function shouldPersistSession(session: Session): boolean {
   if (session.inboxAsk) return false;
+  // A remote session lives on its host, which keeps its history.
+  if (isRemoteProjectPath(session.cwd)) return false;
   if (session.blocks.some((block) => block.role === "user")) return true;
   // A terminal session's prompts live in the CLI until they are read back, so
   // the binding to that conversation is saved before there is a block to show.
@@ -1029,6 +1031,7 @@ function sanitizeAgentRun(value: unknown): AgentRunMeta | null {
         text,
         ...(typeof row.toolKind === "string" ? { toolKind: row.toolKind } : {}),
         ...(typeof row.status === "string" ? { status: row.status } : {}),
+        ...(typeof row.detail === "string" ? { detail: row.detail } : {}),
         ...(row.preview && typeof row.preview === "object"
           ? { preview: row.preview as AgentStep["preview"] }
           : {}),
@@ -1079,10 +1082,15 @@ function sanitizeTaskList(value: unknown): TaskListMeta | null {
   });
   if (items.length === 0) return null;
   const key = typeof record.key === "string" ? record.key.trim() : "";
+  const providerSessionId =
+    typeof record.providerSessionId === "string"
+      ? record.providerSessionId.trim()
+      : "";
   const explanation =
     typeof record.explanation === "string" ? record.explanation.trim() : "";
   return {
     ...(key ? { key } : {}),
+    ...(providerSessionId ? { providerSessionId } : {}),
     ...(explanation ? { explanation } : {}),
     items,
   };

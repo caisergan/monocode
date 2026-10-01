@@ -4,8 +4,8 @@ import {
   bindHarnessSession,
   forgetHarnessSession,
   isLiveHarness,
-  killAllChildren,
-} from "../../integrations/harness";
+} from "../../integrations/harness/core/registry";
+import { killAllChildren } from "../../integrations/harness/core/child";
 import {
   hasInFlightSessions,
   inFlightRefs,
@@ -332,7 +332,11 @@ async function loadResumedWorkspaceOnce(): Promise<ResumedWorkspace | null> {
   if (workspace) {
     await Promise.all(
       workspace.sessions
-        .filter(shouldPersistSession)
+        // Idle transcripts already came from disk. Rewriting every open chat
+        // here serialized/indexed the entire workspace before first paint.
+        .filter(
+          (session) => interrupted.has(session.id) && shouldPersistSession(session),
+        )
         .map((session) => upsertSession(session).catch(() => null)),
     );
   }
@@ -353,6 +357,7 @@ export function bindResumedSessions(sessions: Session[]): void {
       session.providerSessionId,
       sessionWorkCwd(session),
       session.providerAccountId,
+      session.blocks,
     );
   }
 }

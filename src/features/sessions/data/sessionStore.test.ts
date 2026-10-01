@@ -11,7 +11,14 @@ import {
   isPersistableId,
   persistFingerprint,
   sanitizeSessionForPersist,
+  shouldPersistSession,
 } from "./sessionStore";
+
+it("keeps host-owned transcripts out of local session storage", () => {
+  const session = newSession("codex", "remote://env/home/me/repo");
+  session.blocks = [{ id: "turn", role: "user", text: "Continue" }];
+  expect(shouldPersistSession(session)).toBe(false);
+});
 
 describe("Claude Shell row recovery", () => {
   it("restores only matching placeholder rows and preserves tool output", () => {
@@ -88,7 +95,8 @@ describe("persisting a subagent's trail", () => {
             kind: "tool",
             text: "Read src/App.tsx",
             toolKind: "read",
-            status: "completed",
+            status: "failed",
+            detail: "File not found",
           },
           { id: "s2", kind: "message", text: "Nothing to flag." },
         ],
@@ -102,7 +110,8 @@ describe("persisting a subagent's trail", () => {
           kind: "tool",
           text: "Read src/App.tsx",
           toolKind: "read",
-          status: "completed",
+          status: "failed",
+          detail: "File not found",
         },
         { id: "s2", kind: "message", text: "Nothing to flag." },
       ],
