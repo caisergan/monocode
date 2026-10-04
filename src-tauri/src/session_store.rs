@@ -1094,10 +1094,20 @@ fn index_orchestration(conn: &Connection, lead: &str, run: &Value) -> rusqlite::
             continue;
         };
         remember_worker(conn, id, lead)?;
-        summaries.push(serde_json::json!({
+        let mut summary = serde_json::json!({
             "sessionId": id, "title": task["title"], "harness": task["harness"],
             "model": task["model"], "status": task["status"],
-        }));
+        });
+        let workspace = &task["workspace"];
+        if let Some(branch) = workspace["branch"].as_str() {
+            summary["branch"] = json!(branch);
+        }
+        if workspace["kind"] == "worktree" {
+            if let Some(cwd) = workspace["checkoutCwd"].as_str() {
+                summary["worktreeCwd"] = json!(cwd);
+            }
+        }
+        summaries.push(summary);
     }
     let summary = serde_json::json!({ "status": run["status"], "tasks": summaries });
     conn.execute("INSERT INTO orchestration_sidebar(lead_id, summary) VALUES (?1, ?2) ON CONFLICT(lead_id) DO UPDATE SET summary = excluded.summary", params![lead, summary.to_string()])?;
@@ -2255,7 +2265,8 @@ mod tests {
             upsert_session(&conn, &sample(id, "/tmp/a", id)).unwrap();
         }
         let run = json!({"status": "active", "tasks": [
-            {"sessionId": "worker-a", "title": "UI", "harness": "codex", "model": "one", "status": "running", "prompt": "private instructions", "result": "large result"},
+            {"sessionId": "worker-a", "title": "UI", "harness": "codex", "model": "one", "status": "running", "prompt": "private instructions", "result": "large result",
+             "workspace": {"id": "checkout:/tmp/a-worktrees/mc-orch-1", "projectCwd": "/tmp/a", "checkoutCwd": "/tmp/a-worktrees/mc-orch-1", "kind": "worktree", "branch": "mc/orch-1"}},
             {"sessionId": "worker-b", "title": "Tests", "harness": "claude", "model": "two", "status": "queued"}
         ]});
         save_orchestration(&conn, "lead", &run).unwrap();
@@ -2269,6 +2280,11 @@ mod tests {
         assert_eq!(summary["status"], "active");
         assert!(summary["tasks"][0].get("prompt").is_none());
         assert!(summary["tasks"][0].get("result").is_none());
+        // The card names where each agent works, once it has a checkout.
+        assert_eq!(summary["tasks"][0]["branch"], "mc/orch-1");
+        assert_eq!(summary["tasks"][0]["worktreeCwd"], "/tmp/a-worktrees/mc-orch-1");
+        assert!(summary["tasks"][1].get("branch").is_none());
+        assert!(summary["tasks"][1].get("worktreeCwd").is_none());
         let worker = get_session(&conn, "worker-a").unwrap().unwrap();
         assert_eq!(worker.orchestration_lead_id.as_deref(), Some("lead"));
         assert!(has_user_block(&worker.blocks));

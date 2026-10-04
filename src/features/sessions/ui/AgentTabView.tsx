@@ -15,6 +15,8 @@ import {
   type Session,
 } from "../model/session";
 import { createNote, noteTitle } from "../../notes";
+import { projectName } from "../../../shared/lib/paths";
+import { GitBranch } from "../../../shared/ui/icons";
 import { loadNotesEnabled, subscribeNotesEnabled } from "../../settings/model/settings";
 
 /**
@@ -140,6 +142,17 @@ export function AgentTabView({
         <span className="min-w-0 truncate" title={title}>
           {model} · {HARNESS_TITLE[session.harness]}
         </span>
+        {session.worktreeCwd && !session.worktreeRemoved ? (
+          <span
+            className="flex min-w-0 items-center gap-1"
+            title={`Worktree ${session.worktreeCwd}`}
+          >
+            <GitBranch className="size-3 shrink-0" strokeWidth={1.75} />
+            <span className="min-w-0 truncate">
+              {session.branch ?? projectName(session.worktreeCwd)}
+            </span>
+          </span>
+        ) : null}
         <span className="ml-auto shrink-0">
           Run by the orchestrator · read-only
         </span>

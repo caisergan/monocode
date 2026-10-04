@@ -1026,6 +1026,49 @@ describe("sidebar orchestration card", () => {
     ).not.toBeNull();
   });
 
+  it("names the branch and worktree each agent works in", () => {
+    props.sessions[0].orchestration = {
+      status: "active",
+      live: true,
+      tasks: [
+        {
+          sessionId: "worker-a",
+          title: "Build settings",
+          harness: "codex",
+          model: "codex:test",
+          status: "running",
+          branch: "mc/orch-a1",
+          worktreeCwd: "/workspace/project-worktrees/mc-orch-a1",
+        },
+        {
+          sessionId: "worker-b",
+          title: "Check types",
+          harness: "codex",
+          model: "codex:test",
+          status: "queued",
+        },
+      ],
+    };
+    act(() => render());
+    const row = (id: string) =>
+      card().querySelector<HTMLElement>(`[data-orchestration-agent="${id}"]`)!;
+    act(() => row("worker-a").querySelector("button")!.click());
+    expect(
+      row("worker-a").querySelector('[title="Branch mc/orch-a1"]')
+        ?.textContent,
+    ).toBe("mc/orch-a1");
+    expect(
+      row("worker-a").querySelector(
+        '[title="Worktree /workspace/project-worktrees/mc-orch-a1"]',
+      )?.textContent,
+    ).toBe("mc-orch-a1");
+    // Queued work has no checkout yet, so it names none.
+    act(() => row("worker-b").querySelector("button")!.click());
+    expect(
+      row("worker-b").querySelector('[title^="Branch "], [title^="Worktree "]'),
+    ).toBeNull();
+  });
+
   it("keeps Resume clickable inside the draggable card", () => {
     props.onPrefetchSession = vi.fn();
     props.sessions[0].orchestration = {

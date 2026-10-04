@@ -11,7 +11,15 @@ import {
   OrchestrationActions,
   OrchestrationWorkers,
 } from "./OrchestrationActions";
-import { Check, ChevronDown, ChevronRight, CircleAlert } from "../../../shared/ui/icons";
+import {
+  Check,
+  ChevronDown,
+  ChevronRight,
+  CircleAlert,
+  Folder,
+  GitBranch,
+} from "../../../shared/ui/icons";
+import { projectName } from "../../../shared/lib/paths";
 import { TerminalSpinner } from "../../sessions/ui/TerminalSpinner";
 
 export function OrchestrationSidebarAgents({
@@ -196,6 +204,31 @@ export function OrchestrationSidebarAgents({
                     />
                     <span className="min-w-0 truncate">{model}</span>
                   </p>
+                  {/* Icons sit in the harness mark's slot so the lines align. */}
+                  {task.branch && (
+                    <p
+                      className="flex min-w-0 items-center gap-1.5 text-[11px] text-content/45"
+                      title={`Branch ${task.branch}`}
+                    >
+                      <span className="grid size-3.5 shrink-0 place-items-center">
+                        <GitBranch className="size-3" strokeWidth={1.75} />
+                      </span>
+                      <span className="min-w-0 truncate">{task.branch}</span>
+                    </p>
+                  )}
+                  {task.worktreeCwd && (
+                    <p
+                      className="flex min-w-0 items-center gap-1.5 text-[11px] text-content/45"
+                      title={`Worktree ${task.worktreeCwd}`}
+                    >
+                      <span className="grid size-3.5 shrink-0 place-items-center">
+                        <Folder className="size-3" strokeWidth={1.75} />
+                      </span>
+                      <span className="min-w-0 truncate">
+                        {projectName(task.worktreeCwd)}
+                      </span>
+                    </p>
+                  )}
                   {live?.error && (
                     <p className="text-[11px] text-red-400">{live.error}</p>
                   )}
