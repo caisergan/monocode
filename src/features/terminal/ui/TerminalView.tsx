@@ -135,6 +135,13 @@ function monoFont(): string {
   return fromCss || "ui-monospace, SFMono-Regular, Menlo, Monaco, monospace";
 }
 
+/**
+ * Teardown still in flight per PTY id. A view that mounts with an id another
+ * view (or a StrictMode replay of itself) is still stopping must wait, or the
+ * late kill lands on the replacement shell and drops its data handler.
+ */
+const stoppingPtys = new Map<string, Promise<void>>();
+
 function oscColors() {
   const light = isLightScheme();
   return {
@@ -245,37 +252,41 @@ export function TerminalView({
 
     let oscBuffer = "";
 
-    const unsubscribe = subscribePty(
-      id,
-      (data) => {
-        const onMeta = onMetaChangeRef.current;
-        if (onMeta) {
-          const text = new TextDecoder().decode(data);
-          const scanned = scanOscCwd(text, oscBuffer);
-          oscBuffer = scanned.rest;
-          if (scanned.cwd) {
-            const patch: TerminalMetaPatch = { cwd: scanned.cwd };
-            if (!runningProcessRef.current) {
-              patch.title = defaultTerminalTitle(scanned.cwd);
-            }
-            onMeta(patch);
-          }
-        }
-        term.write(data);
-      },
-      (code) => {
-        if (closed) return;
-        const status = code == null ? "" : ` (${code})`;
-        term.writeln(`\r\n[process exited${status}]`);
-        onExitRef.current?.(code);
-      },
-    );
-
+    let unsubscribe = () => {};
+    let didStart = false;
     // A persistent PTY is attached to if it is still running, and only
     // started when it is not. `attached` tells the resize below to make the
     // program redraw, since this terminal has none of its screen.
     let attached = false;
     const start = async () => {
+      if (closed) return;
+      unsubscribe = subscribePty(
+        id,
+        (data) => {
+          if (closed) return;
+          const onMeta = onMetaChangeRef.current;
+          if (onMeta) {
+            const text = new TextDecoder().decode(data);
+            const scanned = scanOscCwd(text, oscBuffer);
+            oscBuffer = scanned.rest;
+            if (scanned.cwd) {
+              const patch: TerminalMetaPatch = { cwd: scanned.cwd };
+              if (!runningProcessRef.current) {
+                patch.title = defaultTerminalTitle(scanned.cwd);
+              }
+              onMeta(patch);
+            }
+          }
+          term.write(data);
+        },
+        (code) => {
+          if (closed) return;
+          const status = code == null ? "" : ` (${code})`;
+          term.writeln(`\r\n[process exited${status}]`);
+          onExitRef.current?.(code);
+        },
+      );
+      didStart = true;
       if (!persistent) {
         await spawnPty(id, cwd, term.cols, term.rows);
         return;
@@ -302,7 +313,8 @@ export function TerminalView({
       }
     };
 
-    const starting = start()
+    const starting = (stoppingPtys.get(id) ?? Promise.resolve())
+      .then(start)
       .then(() => {
         if (!closed) spawned.current = true;
       })
@@ -437,9 +449,20 @@ export function TerminalView({
       oscCursor.dispose();
       renderSub.dispose();
       bufferSub.dispose();
-      unsubscribe();
-      if (!persistent) {
-        void starting.catch(() => undefined).then(() => killPty(id));
+      if (persistent) {
+        // Left running for the next view to attach to.
+        unsubscribe();
+      } else {
+        const stopping = starting
+          .catch(() => undefined)
+          .then(() => {
+            unsubscribe();
+            return didStart ? killPty(id) : undefined;
+          })
+          .finally(() => {
+            if (stoppingPtys.get(id) === stopping) stoppingPtys.delete(id);
+          });
+        stoppingPtys.set(id, stopping);
       }
       term.dispose();
       termRef.current = null;
