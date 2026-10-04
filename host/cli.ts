@@ -8,7 +8,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
+import { homedir, hostname } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
@@ -30,6 +30,17 @@ import {
 import { connectionInfo, installService, uninstallService } from "./service";
 import { version } from "../package.json";
 import { protectWindowsDirectory } from "./windows";
+import { createInterface } from "node:readline/promises";
+import QRCode from "qrcode";
+import { formatCode } from "@monocode/channel/pairing";
+import type { PairingOffer, PairingStatus } from "@monocode/core/wire";
+import { loadOrCreateKeys } from "./keys";
+import { loadConfig } from "./config";
+import { PairingManager } from "./pairing";
+import { createHostRpc } from "./rpc";
+import { ChannelServer } from "./channel/server";
+import { discoverEndpoints } from "./channel/endpoints";
+import { HostError, toHostError } from "./errors";
 
 process.umask(0o077);
 // npm-based providers can launch Node subprocesses without a separate Node
@@ -56,18 +67,109 @@ const readRunning = (): Running | undefined => {
   if (!existsSync(statePath)) return;
   return JSON.parse(readFileSync(statePath, "utf8")) as Running;
 };
-const lifecycle = async (state: Running, action: "status" | "stop") => {
+/** Talks to the running host through its local administrative endpoint. */
+const lifecycle = async (
+  state: Running,
+  action: string,
+  params?: Record<string, unknown>,
+): Promise<unknown> => {
   const response = await fetch(`http://127.0.0.1:${state.port}/lifecycle`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${state.secret}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify({ action }),
+    body: JSON.stringify(params ? { action, params } : { action }),
     signal: AbortSignal.timeout(5_000),
   });
-  if (!response.ok) throw new Error("Could not verify the running host");
+  if (!response.ok) {
+    const detail = await response.json().catch(() => undefined) as { error?: string } | undefined;
+    throw new Error(detail?.error ?? "Could not verify the running host");
+  }
+  return response.json().catch(() => ({}));
 };
+const has = (flag: string) => args.includes(`--${flag}`);
+
+/** `pair --mobile`: shows a QR code, then confirms the phone that claims it. */
+async function pairMobile(): Promise<void> {
+  const state = readRunning();
+  if (!state) throw new Error("The host is not running. Start it with: monocode-host start");
+  const json = has("json");
+  const yes = has("yes");
+  if (!yes && !process.stdin.isTTY)
+    throw new Error("Nobody could confirm the phone here. Run in a terminal, or pass --yes.");
+  const ttl = Number(option("ttl", "10"));
+  if (!Number.isFinite(ttl) || ttl < 1 || ttl > 30) throw new Error("--ttl must be 1 to 30 minutes");
+  const offer = (await lifecycle(state, "pairing.create", {
+    ttlSeconds: Math.round(ttl * 60),
+    ...(args.includes("--name") ? { label: option("name", "") } : {}),
+  })) as PairingOffer;
+  let finished = false;
+  const cancel = async () => {
+    if (finished) return;
+    finished = true;
+    await lifecycle(state, "pairing.cancel", { offerId: offer.offerId }).catch(() => undefined);
+  };
+  process.once("SIGINT", () => {
+    void cancel().then(() => {
+      if (!json) console.log("\nCancelled. The code no longer works.");
+      process.exit(130);
+    });
+  });
+  if (json) console.log(JSON.stringify({ offerId: offer.offerId, url: offer.url, expiresAt: offer.expiresAt, fingerprint: offer.fingerprint }));
+  else {
+    const reach = [
+      offer.reachable.lan && "local network",
+      offer.reachable.tailscale && "Tailscale",
+      offer.reachable.manual && "configured address",
+      offer.reachable.relay && "relay",
+    ].filter(Boolean);
+    console.log("Pair a phone with this computer");
+    console.log("Scan this code with MonoCode Dev, or open the link on your phone.\n");
+    console.log(
+      await QRCode.toString(offer.url, {
+        type: has("ascii") ? "utf8" : "terminal",
+        small: !has("ascii"),
+        errorCorrectionLevel: "M",
+      }),
+    );
+    console.log(`  ${offer.url}`);
+    console.log(`  Host fingerprint: ${offer.fingerprint}`);
+    console.log(`  Reachable through: ${reach.join(", ") || "nothing yet"}`);
+    console.log(`  Expires in ${ttl} min. Press Ctrl+C to cancel.\n`);
+  }
+  let announced = false;
+  const prompt = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    for (;;) {
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      const status = (await lifecycle(state, "pairing.status", { offerId: offer.offerId })) as PairingStatus;
+      if (status.status === "claimed" && !announced) {
+        announced = true;
+        const device = status.device!;
+        const code = formatCode(status.code ?? "");
+        if (json) console.log(JSON.stringify({ status: "claimed", device, code: status.code }));
+        else console.log(`"${device.name}" (${device.model ?? device.platform}) wants to pair. Code on the phone: ${code}`);
+        const allow = yes || /^y(es)?$/i.test((await prompt.question("Allow? [y/N] ")).trim());
+        const decided = (await lifecycle(state, "pairing.decide", { offerId: offer.offerId, allow })) as PairingStatus;
+        if (json) console.log(JSON.stringify({ status: decided.status }));
+        else if (decided.status === "approved")
+          console.log(`Paired "${device.name}" (device ${device.id.slice(0, 6)}…). Manage devices with: monocode-host devices`);
+        else console.log("Denied. The phone was not paired.");
+        finished = true;
+        return;
+      }
+      if (["approved", "denied", "expired", "cancelled"].includes(status.status)) {
+        finished = true;
+        if (json) console.log(JSON.stringify({ status: status.status }));
+        else console.log(status.status === "expired" ? "The code expired. Run this again for a new one." : `Pairing ${status.status}.`);
+        return;
+      }
+    }
+  } finally {
+    prompt.close();
+  }
+}
 
 async function main() {
   if (command === "--version") {
@@ -84,8 +186,14 @@ async function main() {
   status                Check the running host
   stop                  Stop the host and interrupt its running turns
   pair --name <device>  Issue a device credential (shown once)
-  devices               List paired devices
-  revoke <device-id>    Revoke a device credential
+  pair --mobile [--name <label>] [--ttl <minutes>] [--yes] [--json] [--ascii]
+                        Pair a phone (shows a QR code; needs the running host)
+  devices [--json]      List paired devices
+  rename-device <id> <name>
+                        Rename a device
+  revoke <device-id>    Revoke a device (closes its live connections)
+  endpoints             Show the addresses phones will be offered
+  keys fingerprint      Print the host fingerprint
 Options: --data-dir <directory> --port <port> (default 3774)
 Connect another computer using an SSH forward to the loopback port.`);
     return;
@@ -181,7 +289,30 @@ Connect another computer using an SSH forward to the loopback port.`);
     }
     throw new Error(`Host did not start. See ${join(directory, "host.log")}`);
   }
+  if (command === "pair" && has("mobile")) {
+    await pairMobile();
+    return;
+  }
+  if (command === "keys") {
+    if (args[1] !== "fingerprint") throw new Error("Use: keys fingerprint");
+    console.log(loadOrCreateKeys(directory).fingerprint);
+    return;
+  }
+  if (command === "endpoints") {
+    const config = loadConfig(directory, port);
+    const { endpoints } = await discoverEndpoints(config.direct.port, config.direct.advertise);
+    if (config.direct.mode === "off") console.log("Direct connections are off.");
+    else if (!endpoints.length) console.log("No private network address found.");
+    for (const endpoint of endpoints)
+      console.log(`${endpoint.kind.padEnd(10)} ${endpoint.addr}:${endpoint.port}${"dns" in endpoint && endpoint.dns ? `  (${endpoint.dns})` : ""}`);
+    return;
+  }
   const store = new HostStore(join(directory, "host.db"));
+  /** Tells a running host to re-read devices (closes revoked phones' channels). */
+  const devicesChanged = async () => {
+    const state = readRunning();
+    if (state) await lifecycle(state, "devices.changed").catch(() => undefined);
+  };
   if (command === "pair") {
     const device = store.issueDevice(option("name", "Desktop"));
     console.log(
@@ -195,14 +326,35 @@ Connect another computer using an SSH forward to the loopback port.`);
     return;
   }
   if (command === "devices") {
-    console.log(
-      JSON.stringify(
-        store.db.prepare("SELECT id, name FROM devices").all(),
-        null,
-        2,
-      ),
-    );
+    const devices = store.devices.list();
     store.close();
+    if (has("json")) {
+      console.log(JSON.stringify(devices, null, 2));
+      return;
+    }
+    if (!devices.length) console.log("No devices are paired.");
+    for (const device of devices) {
+      const seen = device.lastSeenAt
+        ? `last seen ${new Date(device.lastSeenAt).toLocaleString()}${device.lastSeenVia ? ` (${device.lastSeenVia})` : ""}`
+        : "never connected";
+      console.log(
+        [
+          device.id,
+          device.name,
+          `${device.kind}/${device.role}${device.status === "pending" ? " (pending)" : ""}`,
+          device.model ?? device.platform ?? "",
+          `paired ${new Date(device.createdAt).toLocaleDateString()}`,
+          seen,
+        ].filter(Boolean).join("  "),
+      );
+    }
+    return;
+  }
+  if (command === "rename-device") {
+    if (!args[1] || !args[2]) throw new Error("Use: rename-device <device-id> <name>");
+    store.devices.rename(args[1], args[2]);
+    store.close();
+    console.log("Device renamed");
     return;
   }
   if (command === "revoke") {
@@ -211,6 +363,7 @@ Connect another computer using an SSH forward to the loopback port.`);
     const revoked = store.revokeDevice(args[1]);
     store.close();
     if (!revoked) throw new Error("Device not found");
+    await devicesChanged();
     console.log("Device revoked");
     return;
   }
@@ -239,8 +392,85 @@ Connect another computer using an SSH forward to the loopback port.`);
     }
     const engine = new HostEngine(store, hostProviders);
     const secret = randomBytes(32).toString("base64url");
+    const keys = loadOrCreateKeys(directory);
+    const config = loadConfig(directory, port);
+    const rpc = createHostRpc(engine, available);
+    let channels: ChannelServer | undefined;
+    const pairing = new PairingManager(store.devices, {
+      environmentId: store.environmentId,
+      name: () => hostname(),
+      hostKey: keys.host.publicKey,
+      fingerprint: keys.fingerprint,
+      endpoints: () => channels?.currentEndpoints ?? [],
+      linkBase: () => config.pairing.linkBase,
+      defaultTtlSeconds: () => config.pairing.defaultTtlSeconds,
+      requireConfirmation: () => config.pairing.requireConfirmation,
+    });
+    const admin = ["admin" as const];
+    rpc.register("pairing.create", {
+      kind: "mutating",
+      roles: admin,
+      handler: (params, ctx) => {
+        const { offer: _offer, ...created } = pairing.create({
+          createdBy: ctx.principal.deviceId,
+          ttlSeconds: typeof params.ttlSeconds === "number" ? params.ttlSeconds : undefined,
+          label: typeof params.label === "string" ? params.label : undefined,
+          ui: params.ui && typeof params.ui === "object" ? (params.ui as never) : undefined,
+        });
+        return created;
+      },
+    });
+    rpc.register("pairing.status", { kind: "read", roles: admin, handler: (params) => pairing.status(String(params.offerId ?? "")) });
+    rpc.register("pairing.decide", {
+      kind: "mutating",
+      roles: admin,
+      handler: (params, ctx) => pairing.decide(String(params.offerId ?? ""), params.allow === true, ctx.principal.deviceId),
+    });
+    rpc.register("pairing.cancel", { kind: "mutating", roles: admin, handler: (params) => pairing.cancel(String(params.offerId ?? "")) });
+    const revoke = rpc.methods["devices.revoke"];
+    rpc.register("devices.revoke", {
+      ...revoke,
+      handler: async (params, ctx) => {
+        const result = await revoke.handler(params, ctx);
+        channels?.deviceRevoked(String(params.deviceId ?? ""));
+        return result;
+      },
+    });
+    const revokeSelf = rpc.methods["devices.revokeSelf"];
+    rpc.register("devices.revokeSelf", {
+      ...revokeSelf,
+      handler: async (params, ctx) => {
+        const result = await revokeSelf.handler(params, ctx);
+        if (ctx.transport !== "http") setTimeout(() => channels?.deviceRevoked(ctx.principal.deviceId), 100);
+        return result;
+      },
+    });
+    const openProject = rpc.methods["projects.open"];
+    rpc.register("projects.open", {
+      ...openProject,
+      handler: async (params, ctx) => {
+        const result = await openProject.handler(params, ctx);
+        channels?.projectsChanged();
+        return result;
+      },
+    });
     let stopping = false;
     let stop: () => Promise<void>;
+    // The CLI's pairing and device commands act through this endpoint as the
+    // host owner. Its secret never leaves running.json.
+    const local = { deviceId: "local", role: "admin" as const, kind: "desktop" as const, name: "This computer" };
+    const lifecycleActions: Record<string, (params: Record<string, unknown>) => unknown> = {
+      status: () => ({}),
+      stop: () => ({}),
+      "pairing.create": (params) => rpc.dispatch("pairing.create", params, { principal: local, transport: "http" }),
+      "pairing.status": (params) => rpc.dispatch("pairing.status", params, { principal: local, transport: "http" }),
+      "pairing.decide": (params) => rpc.dispatch("pairing.decide", params, { principal: local, transport: "http" }),
+      "pairing.cancel": (params) => rpc.dispatch("pairing.cancel", params, { principal: local, transport: "http" }),
+      "devices.changed": () => {
+        channels?.devicesChanged();
+        return {};
+      },
+    };
     // A separate local administrative credential cannot be used as a paired
     // client credential, and is never sent to the desktop.
     const server = createHostServer(engine, available, (request, response) => {
@@ -255,25 +485,38 @@ Connect another computer using an SSH forward to the loopback port.`);
       let body = "";
       request.on("data", (chunk) => {
         body += String(chunk);
-        if (body.length > 128) request.destroy();
+        if (body.length > 4096) request.destroy();
       });
-      request.on("end", () => {
+      request.on("end", async () => {
+        let parsed: { action?: unknown; params?: unknown };
         try {
-          const action = JSON.parse(body).action;
-          if (action !== "status" && action !== "stop") {
-            response.writeHead(400).end();
-            return;
-          }
-          response.end("{}");
-          if (action === "stop") void stop();
+          parsed = JSON.parse(body);
         } catch {
           response.writeHead(400).end();
+          return;
+        }
+        const action = typeof parsed.action === "string" && Object.hasOwn(lifecycleActions, parsed.action)
+          ? lifecycleActions[parsed.action] : undefined;
+        if (!action) {
+          response.writeHead(400).end();
+          return;
+        }
+        try {
+          const params = parsed.params && typeof parsed.params === "object" && !Array.isArray(parsed.params)
+            ? parsed.params as Record<string, unknown> : {};
+          response.end(JSON.stringify((await action(params)) ?? {}));
+          if (parsed.action === "stop") void stop();
+        } catch (error) {
+          const host = error instanceof HostError ? error : toHostError(error);
+          response.writeHead(400).end(JSON.stringify({ error: host.message, code: host.code }));
         }
       });
-    });
+    }, rpc);
     stop = async () => {
       if (stopping) return;
       stopping = true;
+      pairing.close();
+      await channels?.close();
       server.close();
       server.closeAllConnections();
       await engine.close();
@@ -302,6 +545,17 @@ Connect another computer using an SSH forward to the loopback port.`);
     console.log(
       `Providers: ${available.join(", ") || "none found; install and authenticate a supported provider on this host"}`,
     );
+    channels = new ChannelServer({
+      store,
+      rpc,
+      keys,
+      pairing,
+      providers: available,
+      config: () => config,
+      log: (message) => console.log(message),
+    });
+    await channels.start();
+    console.log(`Host fingerprint: ${keys.fingerprint}`);
     cleanup = () => {
       rmSync(statePath, { force: true });
       store.close();
