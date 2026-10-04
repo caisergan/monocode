@@ -591,9 +591,14 @@ export function usageLimitFromRateLimitEvent(
   return resetsAt != null ? { resetsAt } : {};
 }
 
-const USAGE_LIMIT_TEXT = /hit your (?:usage )?limit|usage limit reached/i;
+// "hit your limit", "hit your session limit", "hit your weekly limit", ...
+const USAGE_LIMIT_TEXT = /hit your (?:[\w-]+ )?limit|usage limit reached/i;
 
-/** Claude also ends a limited turn with the limit as its error text. */
+/**
+ * Claude also ends a limited turn with the limit as its error text. This is
+ * the only signal on a turn that hits a limit already reported: Claude sends
+ * `rate_limit_event` when the window's status changes, not on every refusal.
+ */
 export function isUsageLimitResult(rec: Record<string, unknown>): boolean {
   if (rec.is_error !== true) return false;
   const errors = Array.isArray(rec.errors)

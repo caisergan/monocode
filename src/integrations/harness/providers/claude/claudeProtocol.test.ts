@@ -416,6 +416,20 @@ describe("usage limits", () => {
         result: "You've hit your limit · resets 3am (Europe/Sofia)",
       }),
     ).toBe(true);
+    for (const result of [
+      "You've hit your session limit · resets 8am (Europe/Istanbul)",
+      "You've hit your weekly limit · resets Oct 9, 8am (Europe/Istanbul)",
+      "You've hit your Opus limit · resets 8am (Europe/Istanbul)",
+    ]) {
+      expect(
+        isUsageLimitResult({
+          type: "result",
+          subtype: "success",
+          is_error: true,
+          result,
+        }),
+      ).toBe(true);
+    }
     expect(
       isUsageLimitResult({
         type: "result",

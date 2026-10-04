@@ -60,6 +60,7 @@ export function isProviderFailureText(text: string): boolean {
     /(?:^|\n)\s*upgrade your plan to continue[.!]?\s*(?:$|\n)/i,
     /(?:^|\n)\s*(?:you(?:'ve| have) )?reached (?:your )?(?:usage|request|spend) limit/i,
     /(?:^|\n)\s*(?:usage|rate|request) limit (?:reached|exceeded)/i,
+    /(?:^|\n)\s*you(?:'ve| have) hit your (?:[\w-]+ )?limit/i,
     /(?:^|\n)\s*(?:authentication required|please (?:sign|log) in to continue)/i,
   ].some((pattern) => pattern.test(value));
 }

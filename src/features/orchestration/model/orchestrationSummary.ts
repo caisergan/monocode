@@ -12,6 +12,8 @@ export type OrchestrationSummary = {
     model: string;
     status: TaskStatus;
     needsInput?: boolean;
+    /** Stopped by a usage limit; continues at the reset. */
+    usageLimited?: boolean;
   }[];
 };
 
@@ -23,15 +25,18 @@ export function summarizeOrchestration(
   return {
     status: run.status,
     live: true,
-    tasks: run.tasks.map(({ sessionId, title, harness, model, status }) => ({
-      sessionId,
-      title,
-      harness,
-      model,
-      status,
-      needsInput:
-        !!byId.get(sessionId) && sessionNeedsInput(byId.get(sessionId)!),
-    })),
+    tasks: run.tasks.map(
+      ({ sessionId, title, harness, model, status, usageLimit }) => ({
+        sessionId,
+        title,
+        harness,
+        model,
+        status,
+        needsInput:
+          !!byId.get(sessionId) && sessionNeedsInput(byId.get(sessionId)!),
+        ...(status === "running" && usageLimit ? { usageLimited: true } : {}),
+      }),
+    ),
   };
 }
 
@@ -45,6 +50,7 @@ export function orchestrationTaskLabel(
     ["running", "cancelling", "queued"].includes(task.status)
   )
     return "Saved";
+  if (task.usageLimited && task.status === "running") return "Usage limit";
   if (summary.status === "paused" && task.status === "queued") return "Paused";
   return {
     queued: "Queued",
