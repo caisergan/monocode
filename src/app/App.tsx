@@ -456,6 +456,7 @@ import {
 import {
   USAGE_LIMIT_RESUME_GRACE_MS,
   usageLimitResumeDue,
+  withUsageLimitReset,
 } from "../features/sessions/model/usageLimit";
 import {
   fetchClaudeRateLimits,
@@ -8112,7 +8113,10 @@ function Workspace({
         setSessions((prev) =>
           prev.map((entry) =>
             entry.id === session.id && entry.usageLimit === limit
-              ? { ...entry, usageLimit: { ...limit, resetsAt } }
+              ? {
+                  ...entry,
+                  usageLimit: withUsageLimitReset(limit, resetsAt, Date.now()),
+                }
               : entry,
           ),
         );

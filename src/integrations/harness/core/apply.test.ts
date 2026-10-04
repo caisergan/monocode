@@ -412,6 +412,23 @@ describe("usage limits", () => {
         .usageLimit,
     ).toEqual({});
   });
+
+  it("arms the limit when Settings resumes after usage limits", () => {
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) =>
+        key === "monocode.resumeAfterUsageLimit" ? "1" : null,
+    });
+    try {
+      expect(
+        applyHarnessEvent(newSession("claude", "/tmp"), {
+          type: "usage.limited",
+          resetsAt: 5_000,
+        }).usageLimit,
+      ).toEqual({ resetsAt: 5_000, resumeAtReset: true });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 describe("status blocks", () => {
