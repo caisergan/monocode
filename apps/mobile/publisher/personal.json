@@ -1,0 +1,10 @@
+{
+  "track": "personal",
+  "appName": "MonoCode Dev",
+  "slug": "monocode-dev",
+  "bundleId": "com.monocode.mobile.dev",
+  "androidPackage": "com.monocode.mobile.dev",
+  "scheme": "monocode-dev",
+  "appleTeamId": "8854B8S8X2",
+  "linkDomains": []
+}
