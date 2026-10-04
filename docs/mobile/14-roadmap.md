@@ -71,6 +71,23 @@ section.
 | S13 | JS thread budget per streamed delta on low-end Android: quick-crypto decrypt, inflate, JSON, `applySessionSync`, row build, Shiki in idle slices or a worklet runtime | ≤ 5 ms p95 on a Galaxy A15 class device | Move the row builder and highlighting to a background worklet runtime; reduce coalescing granularity |
 | S10 | Glass and effects cost: `expo-blur` bars and sheets, MaskedView shimmer and Skia particles while a transcript streams on a low-end Android | ≤ 5 % dropped frames with glass on | Opaque fallbacks on low-end Android (still the desktop's light-mode treatment), shimmer as an opacity pulse |
 
+### As built (2026-10-04, branch `feat/mobile-app`)
+
+The owner dropped the "small upstream PRs" constraint, so foundations and the first
+slice landed together. What exists, and what is still unverified:
+
+| Item | Status |
+|---|---|
+| S6 monorepo | Root `workspaces: ["packages/*"]`. **Deviation:** `apps/mobile` is its own npm project (React Native 0.86 pins React 19.2.3; the desktop has 19.2.8). Metro watches `packages/` and `src/` and resolves their deps from the app. `@tauri-apps/*` is stubbed in Metro, because the desktop model reaches `platform/tauri/fs.ts` through `terminalTab.ts`. Both apps type-check; desktop `npm test` is green |
+| `@monocode/channel` | Noise IK passes the cacophony and snow vectors. Records, priorities, bounded deflate, offers, proof, confirmation code, channel client. Push crypto not written yet |
+| `@monocode/core` | **Deviation:** re-exports the desktop model in place (moving files is deferred while other branches edit them), so its type-check still needs DOM types. Adds wire types, windowing, truncation, inbox summaries |
+| `@monocode/design` | Palette, tokens, type scale; parity test against `index.css`, `appearance.ts`, `tabGroups.ts` passes |
+| Host | `rpc.ts` dispatcher with error codes (HTTP contract unchanged, 93 old tests green), migration 1, keys, config, pairing manager, direct listener on LAN and Tailscale (:3775), watch with coalesced deltas, `inbox.list`, `sessions.page`, windowed sync, `pair --mobile` with terminal QR. In-memory and real-process end-to-end tests pass. Not done: relay, push, presence, mutation receipts, queue commands, `doctor` |
+| S11 native transcript | `MonoTranscriptView` (Swift): CoreText measuring on a layout queue, tail-first cold layout then parallel, exact prefix sums, recycled layers rasterised off the main thread, anchoring, follow-tail, taps, fold, approval buttons, in-app fling benchmark writing `Documents/benchmarks/latest.json`. **Compiles and signs for device; the benchmark has not been run on the iPhone 13 yet**, so the go/no-go is open |
+| App | Agents, Settings, pairing (QR, paste, links, 6-digit confirm), session screen (native transcript, send, stop, approve), minimal New session, transcript lab, demo machine over a real Noise channel in memory. **Not yet run on a device or simulator by hand** |
+| S4 | `NSAllowsLocalNetworking` plus a `ts.net` exception are configured; not yet verified on the phone |
+| Markdown | **Deviation:** a small block/inline parser instead of remark (S1 not run). Code highlighting not done |
+
 ## 14.3 Risks
 
 | Risk | Likelihood | Impact | Mitigation |
