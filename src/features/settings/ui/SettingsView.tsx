@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ConnectionsSettings } from "../../connections/ui/ConnectionsSettings";
+import { MobileSettings } from "../../mobile/ui/MobileSettings";
 import { ask } from "@tauri-apps/plugin-dialog";
 import {
   ArrowDownCircle,
@@ -548,6 +549,7 @@ export function SettingsView({
                 <GeneralPage onOpenWhatsNew={onOpenWhatsNew} />
               ) : null}
               {section === "connections" ? <ConnectionsSettings /> : null}
+              {section === "mobile" ? <MobileSettings /> : null}
               {section === "appearance" ? (
                 <AppearancePage appearance={appearance} />
               ) : null}

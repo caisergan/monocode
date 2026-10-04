@@ -32,6 +32,10 @@ type Row = {
 const REPLAY_WINDOW = 256;
 const TOMBSTONE_DAYS = 30;
 const MAX_EVENTS = 500;
+const PUSH_DAYS = 30;
+
+/** The `user_version` this host writes; `doctor` compares against it. */
+export const DB_VERSION = 1;
 
 /** Migration 1 (spec 09 §9.4): typed devices, tombstones, device events,
  * mutation receipts. Runs once, before anything reads the devices table. */
@@ -39,7 +43,7 @@ export function migrateDevices(db: DatabaseSync): void {
   const version = Number(
     (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version,
   );
-  if (version >= 1) return;
+  if (version >= DB_VERSION) return;
   db.exec("BEGIN IMMEDIATE");
   try {
     db.exec(`
@@ -269,6 +273,7 @@ export class DeviceStore {
     }));
   }
 
+  /** Hourly cleanup (spec 09 §9.4). */
   housekeeping(now = Date.now()): void {
     this.db
       .prepare("DELETE FROM device_tombstones WHERE revoked_at < ?")
@@ -279,6 +284,10 @@ export class DeviceStore {
       )
       .run(MAX_EVENTS);
     this.db.prepare("DELETE FROM mutation_receipts WHERE created_at < ?").run(now - 86_400_000);
+    // A phone that hasn't refreshed its push registration in 30 days is gone.
+    this.db
+      .prepare("UPDATE devices SET push_json=NULL WHERE push_registered_at < ?")
+      .run(now - PUSH_DAYS * 86_400_000);
   }
 }
 

@@ -122,6 +122,8 @@ let currentBranch: string;
 let createdBranch: string | undefined;
 let createdWorktree: string | undefined;
 let deletedSessions: string[];
+let capabilities: string[];
+let presence: unknown[];
 
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -137,6 +139,8 @@ beforeEach(() => {
   createdBranch = undefined;
   createdWorktree = undefined;
   deletedSessions = [];
+  capabilities = ["attachments.upload", "sessions.plan", "sessions.draft"];
+  presence = [];
   catalog = { models: { codex: [gpt] }, errors: {} };
   providers = ["codex"];
   projectKey = rememberRemoteProject("env", {
@@ -163,8 +167,12 @@ beforeEach(() => {
         environmentId: "env",
         name: "home",
         providers,
-        capabilities: ["attachments.upload", "sessions.plan", "sessions.draft"],
+        capabilities,
       };
+    if (method === "presence.update") {
+      presence.push(params);
+      return {};
+    }
     if (method === "models.list") {
       if (catalog instanceof Error) throw catalog.message;
       return catalog;
@@ -1073,4 +1081,20 @@ it("ignores a late create response after its tab has switched conversations", as
   expect(remoteSessionFor("shell")).toBe("different-session");
   expect(commands.map((command) => command.type)).toEqual(["create"]);
   expect(container.textContent).not.toContain("Pending first message");
+});
+
+it("tells a host with presence which of its sessions is on screen", async () => {
+  capabilities = [...capabilities, "presence"];
+  await render();
+  await send("Watch this one");
+  expect(presence.at(-1)).toEqual({
+    visible: expect.any(Boolean),
+    focusedSessionId: "host-session",
+  });
+});
+
+it("sends no presence to hosts without it", async () => {
+  await render();
+  await send("Watch this one");
+  expect(presence).toEqual([]);
 });

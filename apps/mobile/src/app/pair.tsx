@@ -24,7 +24,6 @@ function reachable(offer: Offer): string {
 /** Pairing (11 §11.11, 04 §4.7): scan or paste, review, confirm the code. */
 export default function Pair() {
   const t = useTokens();
-  const incoming = Linking.useURL();
   const [stage, setStage] = useState<Stage>({ kind: "intro" });
   const [error, setError] = useState<string>();
   const [name, setName] = useState(Device.deviceName ?? "iPhone");
@@ -44,10 +43,16 @@ export default function Pair() {
     }
   };
 
-  // A pairing link opened from the camera app or Safari.
+  // A pairing link opened from the camera app or Safari. The same sources as
+  // `Linking.useURL()`, read in their callbacks.
   useEffect(() => {
-    if (incoming?.includes("#o=")) accept(incoming);
-  }, [incoming]);
+    const open = (url: string | null) => {
+      if (url?.includes("#o=")) accept(url);
+    };
+    void Linking.getInitialURL().then(open);
+    const subscription = Linking.addEventListener("url", ({ url }) => open(url));
+    return () => subscription.remove();
+  }, []);
 
   useEffect(() => () => cancel.current?.(), []);
 

@@ -8,6 +8,13 @@ EXISTED=0
 [ -x "$ENTRY" ] && EXISTED=1
 FORCE_UPGRADE=${MONOCODE_HOST_FORCE_UPGRADE:-0}
 HOST_PORT=${MONOCODE_HOST_PORT:-3774}
+# Development builds of the desktop install a package from `npm run
+# host:package` (the archive, or its folder) instead of downloading one.
+LOCAL_ARCHIVE=${MONOCODE_HOST_LOCAL_ARCHIVE:-}
+# The desktop's local setup shows each step as it starts.
+step() {
+  if [ "${MONOCODE_HOST_PROGRESS:-0}" = 1 ]; then echo "monocode-step:$1"; fi
+}
 
 if [ ! -x "$ENTRY" ] || [ "$FORCE_UPGRADE" = 1 ]; then
   case "$(uname -s)" in Darwin) OS=darwin ;; Linux) OS=linux ;; *) echo 'MonoCode Host supports Linux and macOS.' >&2; exit 1 ;; esac
@@ -26,9 +33,16 @@ if [ ! -x "$ENTRY" ] || [ "$FORCE_UPGRADE" = 1 ]; then
       echo 'Install curl or wget on this host and reconnect.' >&2; exit 1
     fi
   }
-  if ! download "$RELEASE/$FILE" "$TMP/$FILE" || ! download "$RELEASE/$FILE.sha256" "$TMP/checksum"; then
+  step download
+  if [ -n "$LOCAL_ARCHIVE" ]; then
+    [ -d "$LOCAL_ARCHIVE" ] && LOCAL_ARCHIVE="$LOCAL_ARCHIVE/$FILE"
+    if ! cp "$LOCAL_ARCHIVE" "$TMP/$FILE" || ! cp "$LOCAL_ARCHIVE.sha256" "$TMP/checksum"; then
+      echo "The local host package $LOCAL_ARCHIVE is unavailable. Run npm run host:package first." >&2; exit 1
+    fi
+  elif ! download "$RELEASE/$FILE" "$TMP/$FILE" || ! download "$RELEASE/$FILE.sha256" "$TMP/checksum"; then
     echo "The MonoCode Host package for version $VERSION is unavailable. Install a MonoCode release that includes host packages." >&2; exit 1
   fi
+  step verify
   EXPECTED=$(awk 'NR == 1 {print $1}' "$TMP/checksum")
   case "$EXPECTED" in *[!0-9a-f]*|'') echo 'Invalid host package checksum.' >&2; exit 1 ;; esac
   [ "${#EXPECTED}" -eq 64 ] || exit 1
@@ -62,8 +76,10 @@ SH
   mv "$TMP/launcher" "$ENTRY"
 fi
 
+step install
 if [ "$EXISTED" = 1 ] && [ "$FORCE_UPGRADE" = 1 ]; then
   "$ENTRY" service uninstall >/dev/null
 fi
 "$ENTRY" service install --port "$HOST_PORT" >/dev/null
+step start
 "$ENTRY" connection-info

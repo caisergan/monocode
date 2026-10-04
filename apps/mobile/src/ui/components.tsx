@@ -1,6 +1,6 @@
 import { RADII, TYPE } from "@monocode/design";
 import type { ReactNode } from "react";
-import { ActivityIndicator, Pressable, Text, View, type StyleProp, type TextStyle, type ViewStyle } from "react-native";
+import { ActivityIndicator, Pressable, Text, TextInput, View, type StyleProp, type TextStyle, type ViewStyle } from "react-native";
 import { useTokens } from "./theme";
 
 export function Title({ children, right }: { children: ReactNode; right?: ReactNode }) {
@@ -113,6 +113,71 @@ export function Row({ label, value, mono }: { label: string; value: string; mono
       >
         {value}
       </Text>
+    </View>
+  );
+}
+
+/** The rail's search row (11 §11.13, §11.14). */
+export function SearchField({ value, onChangeText, placeholder }: { value: string; onChangeText: (text: string) => void; placeholder: string }) {
+  const t = useTokens();
+  return (
+    <TextInput
+      value={value}
+      onChangeText={onChangeText}
+      placeholder={placeholder}
+      placeholderTextColor={t.text.faint}
+      autoCapitalize="none"
+      autoCorrect={false}
+      clearButtonMode="while-editing"
+      returnKeyType="search"
+      style={{
+        flex: 1,
+        height: 36,
+        paddingHorizontal: 12,
+        borderRadius: RADII.md,
+        backgroundColor: t.fill.chip,
+        color: t.content,
+        fontSize: TYPE.row.size,
+      }}
+    />
+  );
+}
+
+/** A filter toggle: 28 pt visual, 44 pt hit (11 §11.9). */
+export function ToggleChip({ label, selected, onPress }: { label: string; selected: boolean; onPress: () => void }) {
+  const t = useTokens();
+  return (
+    <Pressable
+      accessibilityRole="switch"
+      accessibilityState={{ checked: selected }}
+      onPress={onPress}
+      hitSlop={8}
+      style={{
+        height: 28,
+        paddingHorizontal: 10,
+        justifyContent: "center",
+        borderRadius: RADII.md,
+        backgroundColor: selected ? t.selection.hover : t.fill.chip,
+        borderWidth: 1,
+        borderColor: selected ? t.border.focus : "transparent",
+      }}
+    >
+      <Text style={{ color: selected ? t.content : t.contentAlpha(0.7), fontSize: TYPE.meta.size + 1 }}>{label}</Text>
+    </Pressable>
+  );
+}
+
+/** The desktop's remote notice bar (11 §11.15): one line, one action. */
+export function NoticeBar({ text, action }: { text: string; action?: { label: string; onPress: () => void } }) {
+  const t = useTokens();
+  return (
+    <View style={{ borderBottomWidth: 1, borderColor: t.stroke, paddingHorizontal: 16, paddingVertical: 8, flexDirection: "row", gap: 8 }}>
+      <Text style={{ flex: 1, color: t.contentAlpha(0.65), fontSize: 12 }}>{text}</Text>
+      {action ? (
+        <Pressable onPress={action.onPress} hitSlop={12}>
+          <Text style={{ color: t.contentAlpha(0.65), fontSize: 12, fontWeight: "500" }}>{action.label}</Text>
+        </Pressable>
+      ) : null}
     </View>
   );
 }

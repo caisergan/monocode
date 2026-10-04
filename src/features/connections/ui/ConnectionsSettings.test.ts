@@ -275,3 +275,36 @@ it("does not spellcheck or autocorrect the machine name", async () => {
   expect(name.getAttribute("autocapitalize")).toBe("off");
   expect(container.textContent).toContain("loginctl enable-linger");
 });
+
+it("shows this computer's own host as This computer, first", async () => {
+  const local = {
+    id: "local",
+    name: "This computer",
+    environmentId: "local-env",
+    endpoint: "http://127.0.0.1:3774",
+    ssh: null,
+    local: true,
+  } as RemoteMachine;
+  machines = [machine, local];
+  await render();
+  const rows = [
+    ...container.querySelectorAll('[data-setting-id="remote-machines"] .divide-y > div'),
+  ];
+  expect(rows[0].textContent).toContain("This computer");
+  expect(rows[0].textContent).toContain("Host on this computer · port 3774");
+  // SSH controls belong to SSH machines only.
+  expect(
+    [...container.querySelectorAll("button")].filter(
+      (element) => element.textContent === "Reconnect",
+    ),
+  ).toHaveLength(1);
+  await act(async () =>
+    container
+      .querySelector<HTMLButtonElement>('[aria-label="Remove This computer"]')!
+      .click(),
+  );
+  expect(container.textContent).toContain("use Remove host… under Mobile");
+  expect(container.textContent).not.toContain(
+    "~/.monocode-host/bin/monocode-host service uninstall",
+  );
+});

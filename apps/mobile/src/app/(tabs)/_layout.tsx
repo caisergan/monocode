@@ -12,6 +12,10 @@ export default function TabsLayout() {
         <NativeTabs.Trigger.Icon sf={{ default: "bubble.left.and.text.bubble.right", selected: "bubble.left.and.text.bubble.right.fill" }} md="forum" />
         {needsInput > 0 ? <NativeTabs.Trigger.Badge>{String(needsInput)}</NativeTabs.Trigger.Badge> : null}
       </NativeTabs.Trigger>
+      <NativeTabs.Trigger name="projects">
+        <NativeTabs.Trigger.Label>Projects</NativeTabs.Trigger.Label>
+        <NativeTabs.Trigger.Icon sf={{ default: "folder", selected: "folder.fill" }} md="folder" />
+      </NativeTabs.Trigger>
       <NativeTabs.Trigger name="settings">
         <NativeTabs.Trigger.Label>Settings</NativeTabs.Trigger.Label>
         <NativeTabs.Trigger.Icon sf={{ default: "gearshape", selected: "gearshape.fill" }} md="settings" />

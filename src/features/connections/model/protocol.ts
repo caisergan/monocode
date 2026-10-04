@@ -24,6 +24,8 @@ export type HostDescriptor = {
   providers: RemoteProvider[];
   capabilities: string[];
   platform?: "win32" | "darwin" | "linux";
+  /** The host package version; lets a client offer host updates. */
+  hostVersion?: string;
 };
 export type HostProject = { id: string; cwd: string; name: string };
 export type HostDirectory = {
@@ -57,7 +59,11 @@ export type HostSession = {
   autoWorktreeBranch?: string;
   /** Host-only: the revision at which each block last changed. */
   blockRevisions?: Record<string, number>;
+  /** When the last turn settled. Missing before the first turn ends. */
+  finishedAt?: number;
+  lastTurnOutcome?: TurnOutcome;
 };
+export type TurnOutcome = "finished" | "failed" | "interrupted" | "cancelled";
 export type HostSessionSummary = Omit<
   HostSession,
   "session" | "blockRevisions"
@@ -140,6 +146,18 @@ export function applySessionSync(
     },
   };
 }
+/** Where a created session works. `new` makes a worktree on a temporary
+ * `mc/…` branch derived from the command id, so a retry finds it again. */
+export type CreateWorktree =
+  | { mode: "current" }
+  | { mode: "existing"; cwd: string }
+  | { mode: "new"; base?: string };
+/** The first message of a created session, started in the same command. */
+export type CreateInitial = {
+  text: string;
+  attachments?: RemoteAttachment[];
+  intent?: "default" | "plan";
+};
 export type HostCommand =
   | {
       type: "create";
@@ -151,6 +169,8 @@ export type HostCommand =
       model: string;
       modelSettings?: Record<string, string>;
       runtimeMode: RuntimeMode;
+      worktree?: CreateWorktree;
+      initial?: CreateInitial;
     }
   | {
       type: "configure";
@@ -200,6 +220,32 @@ export type HostCommand =
       runId: string;
       requestId: number;
       reply: UserQuestionReply;
+    }
+  // Queue commands (`sessions.queue`). A queued item's id is its command id,
+  // and it becomes the user block id when the item is sent.
+  | {
+      type: "queue";
+      commandId: string;
+      sessionId: string;
+      text: string;
+      attachments?: RemoteAttachment[];
+      intent?: "default" | "plan";
+    }
+  | { type: "unqueue"; commandId: string; sessionId: string; queuedId: string }
+  | { type: "resumeQueue"; commandId: string; sessionId: string }
+  | {
+      type: "editQueued";
+      commandId: string;
+      sessionId: string;
+      queuedId: string;
+      text: string;
+    }
+  | {
+      type: "steer";
+      commandId: string;
+      sessionId: string;
+      queuedId: string;
+      runId: string;
     };
 export type CommandReceipt = {
   commandId: string;

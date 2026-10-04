@@ -134,3 +134,37 @@ it("ignores a project that finishes opening after cancellation", async () => {
   await act(async () => finish({ id: "late", cwd: "/home/me", name: "me" }));
   expect(opened).toEqual([]);
 });
+
+it("lists This computer first and opens folders there by default", async () => {
+  machines = [
+    ...machines,
+    {
+      id: "local",
+      name: "This computer",
+      endpoint: "http://127.0.0.1:3774",
+      environmentId: "local-env",
+      local: true,
+    },
+  ];
+  await render();
+  expect(
+    document.body.querySelector('button[aria-label="Machine: This computer"]'),
+  ).not.toBeNull();
+  const browsed = vi
+    .mocked(invoke)
+    .mock.calls.filter(
+      ([command, input]) =>
+        command === "remote_request" &&
+        (input as { method: string }).method === "projects.browse",
+    );
+  expect((browsed.at(-1)![1] as { machineId: string }).machineId).toBe("local");
+  await act(async () =>
+    document.body
+      .querySelector<HTMLButtonElement>('button[aria-label="Machine: This computer"]')!
+      .click(),
+  );
+  const options = [...document.body.querySelectorAll('[role="option"]')].map(
+    (option) => option.textContent?.trim(),
+  );
+  expect(options).toEqual(["This computer", "Home server"]);
+});

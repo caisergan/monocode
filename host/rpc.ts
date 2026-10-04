@@ -56,6 +56,9 @@ import {
 import { HostError, toHostError } from "./errors";
 import type { Principal, Role, Via } from "./devices";
 import { DEFAULT_TAIL_TURNS } from "@monocode/core/window";
+import { PresenceMap, parsePresence } from "./presence";
+import { hostConfigMethods, type HostConfigStore } from "./config";
+import { version } from "../package.json";
 
 const exec = promisify(execFile);
 // Providers also add models server-side, without a CLI update.
@@ -122,6 +125,16 @@ export const CHANNEL_CAPABILITIES = [
   "sessions.page",
   "inbox",
   "devices",
+  "mutations.idempotent",
+];
+
+/** Command features both transports accept. */
+export const COMMAND_CAPABILITIES = ["sessions.queue", "sessions.createWithPrompt"];
+
+/** Listed only when this host registered the method behind them. */
+const OPTIONAL_CAPABILITIES: [capability: string, method: string][] = [
+  ["presence", "presence.update"],
+  ["host.config", "host.config.get"],
 ];
 
 export type CallContext = {
@@ -129,6 +142,8 @@ export type CallContext = {
   transport: Via;
   /** The connection itself, for channel-only methods. */
   channel?: unknown;
+  /** The envelope's idempotency key, for mutating methods (spec 06 §6.8). */
+  key?: string;
 };
 
 export type MethodSpec = {
@@ -173,7 +188,15 @@ async function providerBinaries(providers: RemoteProvider[]): Promise<string> {
 const optionalCount = (value: unknown, fallback: number) =>
   Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : fallback;
 
-export function createHostRpc(engine: HostEngine, providers: RemoteProvider[]) {
+export function createHostRpc(
+  engine: HostEngine,
+  providers: RemoteProvider[],
+  options: {
+    /** Registers `host.config.*`; `listening` reports the direct listener. */
+    config?: { store: HostConfigStore; listening: () => string[] };
+  } = {},
+) {
+  const presence = new PresenceMap();
   const catalogs = new Map<
     string,
     { binaries: string; probed: number; catalog: Promise<HostModelCatalog> }
@@ -236,7 +259,8 @@ export function createHostRpc(engine: HostEngine, providers: RemoteProvider[]) {
         name: hostname(),
         platform: process.platform,
         providers: clientProviders(providers, params.supportedProviders),
-        capabilities: BASE_CAPABILITIES,
+        capabilities: capabilities("http"),
+        hostVersion: version,
       }),
     },
     "projects.list": { kind: "read", roles: ANY, handler: () => store.projects() },
@@ -435,7 +459,16 @@ export function createHostRpc(engine: HostEngine, providers: RemoteProvider[]) {
     "commands.dispatch": {
       kind: "command",
       roles: ANY,
-      handler: (params) => engine.command(params),
+      // Creates that make a new worktree are asynchronous; the rest run as before.
+      handler: (params) => engine.commandAsync(params),
+    },
+    "presence.update": {
+      kind: "mutating",
+      roles: ANY,
+      handler: (params, ctx) => {
+        presence.update(ctx.principal.deviceId, parsePresence(params), ctx.transport);
+        return {};
+      },
     },
     "attachments.upload": {
       kind: "mutating",
@@ -617,12 +650,30 @@ export function createHostRpc(engine: HostEngine, providers: RemoteProvider[]) {
     },
   };
 
+  if (options.config)
+    Object.assign(methods, hostConfigMethods(options.config.store, options.config.listening));
+
+  /** What a client may use: the welcome lists `channel`, describe lists `http`. */
+  function capabilities(transport: "http" | "channel"): string[] {
+    return [
+      ...BASE_CAPABILITIES,
+      ...(transport === "channel" ? CHANNEL_CAPABILITIES : []),
+      ...COMMAND_CAPABILITIES,
+      ...OPTIONAL_CAPABILITIES.filter(([, method]) => Object.hasOwn(methods, method)).map(
+        ([capability]) => capability,
+      ),
+    ];
+  }
+
   return {
     methods,
+    presence,
+    capabilities,
     register(name: string, spec: MethodSpec): void {
       methods[name] = spec;
     },
-    /** Looks up, checks the caller's role, runs, and maps errors to codes. */
+    /** Looks up, checks the caller's role, runs (once per idempotency key for
+     * mutating methods), and maps errors to codes. */
     async dispatch(method: string, params: Record<string, unknown>, ctx: CallContext): Promise<unknown> {
       const spec = Object.hasOwn(methods, method) ? methods[method] : undefined;
       try {
@@ -630,6 +681,10 @@ export function createHostRpc(engine: HostEngine, providers: RemoteProvider[]) {
           throw new HostError("method_not_found", "Unsupported host method");
         if (!spec.roles.includes(ctx.principal.role))
           throw new HostError("forbidden", "This device can't do that on this host");
+        if (spec.kind === "mutating" && ctx.key !== undefined)
+          return await store.withMutationReceipt(ctx.key, ctx.principal.deviceId, method, params, () =>
+            spec.handler(params, ctx),
+          );
         return await spec.handler(params, ctx);
       } catch (error) {
         throw toHostError(error);

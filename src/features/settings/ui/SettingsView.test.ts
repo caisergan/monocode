@@ -841,6 +841,16 @@ describe("settings search", () => {
     expect(onSelectSection).toHaveBeenCalledWith("chat");
   });
 
+  it("finds pairing on the Mobile page", async () => {
+    await render("general");
+    await type("pair a phone");
+    expect(options().map((item) => item.textContent)).toEqual([
+      "Pair a phoneMobile",
+    ]);
+    await act(async () => options()[0]!.click());
+    expect(onSelectSection).toHaveBeenCalledWith("mobile");
+  });
+
   it("finds and reveals project notifications separately from global notifications", async () => {
     await render("general");
     await type("project notifications");
@@ -1106,5 +1116,38 @@ describe("providers scope inheritance", () => {
     expect(cursorToggle.closest(".settings-row")?.textContent).toContain(
       "Hidden globally",
     );
+  });
+});
+
+describe("mobile", () => {
+  it("is its own page, after Connections", async () => {
+    vi.mocked(invoke).mockImplementation(async (command) => {
+      if (command === "remote_machines") return [];
+      if (command === "local_host_status")
+        return {
+          installed: false,
+          running: false,
+          appVersion: "0.9.0",
+          dataDir: "/Users/me/.monocode-host",
+        };
+      return undefined;
+    });
+    expect(
+      SETTINGS_SECTIONS.findIndex((section) => section.id === "mobile"),
+    ).toBe(
+      SETTINGS_SECTIONS.findIndex((section) => section.id === "connections") +
+        1,
+    );
+    await render("mobile");
+    const headings = [...container.querySelectorAll("h1, h2")].map(
+      (heading) => heading.textContent,
+    );
+    expect(headings.slice(0, 2)).toEqual(["Mobile", "This computer"]);
+    expect(container.textContent).toContain(
+      "Use this computer from your phone.",
+    );
+    await render("connections");
+    expect(container.textContent).toContain("Your machines");
+    expect(container.textContent).not.toContain("This computer");
   });
 });

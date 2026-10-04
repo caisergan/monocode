@@ -4,10 +4,12 @@ import { Internet, Loader, Plus, Trash2 } from "../../../shared/ui/icons";
 import {
   connectMachine,
   disconnectMachine,
+  isLocalMachine,
   refreshRemoteMachines,
   remoteRequest,
   useRemoteMachines,
 } from "../model/connections";
+import { Phone } from "../../mobile/ui/icons";
 import {
   REMOTE_PROVIDERS,
   type HostDescriptor,
@@ -19,6 +21,17 @@ const input =
   "w-full rounded-lg border border-content/15 bg-content/3 px-3 py-2 text-[13px] outline-none focus:border-content/35";
 const button =
   "rounded-lg bg-selection px-3 py-2 text-[13px] font-medium hover:bg-selection-hover disabled:opacity-40";
+
+/** Where a machine's host is: its SSH target, its URL, or this computer. */
+function machineAddress(machine: RemoteMachine): string {
+  if (isLocalMachine(machine)) {
+    const port = /:(\d+)$/.exec(machine.endpoint)?.[1];
+    return `Host on this computer${port ? ` · port ${port}` : ""}`;
+  }
+  return machine.ssh
+    ? `SSH · ${machine.ssh.target}${machine.ssh.port ? ` · port ${machine.ssh.port}` : ""}`
+    : machine.endpoint;
+}
 
 export function ConnectionsSettings() {
   const { machines, loaded } = useRemoteMachines();
@@ -267,15 +280,17 @@ export function ConnectionsSettings() {
           {machines.map((machine) => (
             <div key={machine.id}>
               <div className="flex items-center gap-3 px-4 py-4">
-                <Internet className="size-5 shrink-0 text-content/45" />
+                {isLocalMachine(machine) ? (
+                  <Phone className="size-5 shrink-0 text-content/45" />
+                ) : (
+                  <Internet className="size-5 shrink-0 text-content/45" />
+                )}
                 <div className="min-w-0 flex-1">
                   <div className="truncate text-[13px] font-medium">
                     {machine.name}
                   </div>
                   <div className="mt-1 truncate text-[12px] text-content/45">
-                    {machine.ssh
-                      ? `SSH · ${machine.ssh.target}${machine.ssh.port ? ` · port ${machine.ssh.port}` : ""}`
-                      : machine.endpoint}
+                    {machineAddress(machine)}
                   </div>
                   <div className="mt-1 text-[12px] text-content/50">
                     {status[machine.id] ?? "Checking connection…"}
@@ -340,18 +355,26 @@ export function ConnectionsSettings() {
                     host. Revoke access to invalidate it first; the machine must
                     be reachable.
                   </p>
-                  <p>
-                    To stop the host and turn off its background service, run{" "}
-                    <code className="rounded bg-content/10 px-1">
-                      ~/.monocode-host/bin/monocode-host service uninstall
-                    </code>{" "}
-                    on that machine (
-                    <code className="rounded bg-content/10 px-1">
-                      %USERPROFILE%\.monocode-host\bin\monocode-host.cmd service
-                      uninstall
-                    </code>{" "}
-                    on Windows). Its sessions and history are kept.
-                  </p>
+                  {isLocalMachine(machine) ? (
+                    <p>
+                      To stop the host and turn off its background service,
+                      use Remove host… under Mobile. Its sessions and history
+                      are kept.
+                    </p>
+                  ) : (
+                    <p>
+                      To stop the host and turn off its background service, run{" "}
+                      <code className="rounded bg-content/10 px-1">
+                        ~/.monocode-host/bin/monocode-host service uninstall
+                      </code>{" "}
+                      on that machine (
+                      <code className="rounded bg-content/10 px-1">
+                        %USERPROFILE%\.monocode-host\bin\monocode-host.cmd service
+                        uninstall
+                      </code>{" "}
+                      on Windows). Its sessions and history are kept.
+                    </p>
+                  )}
                   <div className="flex flex-wrap gap-2">
                     <button
                       className={button}

@@ -46,6 +46,10 @@ struct StoredMachine {
     token: String,
     #[serde(default)]
     ssh: Option<SshTarget>,
+    /// "This computer": the host this desktop installed on its own account.
+    /// Stores written before it existed load as remote machines.
+    #[serde(default)]
+    local: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -56,6 +60,7 @@ pub struct Machine {
     endpoint: String,
     environment_id: String,
     ssh: Option<SshTarget>,
+    local: bool,
 }
 
 impl StoredMachine {
@@ -66,6 +71,7 @@ impl StoredMachine {
             endpoint: self.endpoint.clone(),
             environment_id: self.environment_id.clone(),
             ssh: self.ssh.clone(),
+            local: self.local,
         }
     }
 }
@@ -138,10 +144,28 @@ fn rpc(
     method: &str,
     params: Value,
 ) -> Result<Value, String> {
+    rpc_within(
+        endpoint,
+        token,
+        environment_id,
+        method,
+        params,
+        std::time::Duration::from_secs(30),
+    )
+}
+
+pub(crate) fn rpc_within(
+    endpoint: &str,
+    token: &str,
+    environment_id: Option<&str>,
+    method: &str,
+    params: Value,
+    timeout: std::time::Duration,
+) -> Result<Value, String> {
     let agent = ureq::AgentBuilder::new()
         .redirects(0)
-        .timeout_connect(std::time::Duration::from_secs(5))
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout_connect(std::time::Duration::from_secs(5).min(timeout))
+        .timeout(timeout)
         .build();
     let payload = json!({ "version": 1, "environmentId": environment_id, "method": method, "params": params });
     let response = agent
@@ -276,6 +300,7 @@ pub fn remote_connect(
         environment_id,
         token,
         ssh: existing.and_then(|m| m.ssh.clone()),
+        local: existing.is_some_and(|m| m.local),
     };
     machines.retain(|m| m.id != id);
     machines.push(machine.clone());
@@ -374,6 +399,17 @@ fn supported_remote_method(method: &str) -> bool {
             | "attachments.upload"
             | "attachments.read"
             | "devices.revokeSelf"
+            | "devices.list"
+            | "devices.rename"
+            | "devices.revoke"
+            | "devices.events"
+            | "pairing.create"
+            | "pairing.status"
+            | "pairing.decide"
+            | "pairing.cancel"
+            | "host.config.get"
+            | "host.config.set"
+            | "presence.update"
             | "git.diff"
             | "git.branches"
             | "git.switch"
@@ -496,6 +532,7 @@ fn start_ssh_job(
                     environment_id,
                     token,
                     ssh: Some(target.clone()),
+                    local: false,
                 }
             };
             job.message("Opening the secure connection…");
@@ -567,6 +604,93 @@ fn start_ssh_job(
         });
     });
     Ok(id)
+}
+
+/// The saved credential for this computer's own host.
+pub(crate) struct LocalRecord {
+    pub id: String,
+    pub endpoint: String,
+    pub environment_id: String,
+    pub token: String,
+}
+
+pub(crate) fn local_record(app: &AppHandle) -> Result<Option<LocalRecord>, String> {
+    let state = app.state::<RemoteConnections>();
+    let _guard = state
+        .store
+        .lock()
+        .map_err(|_| "Connection store is locked")?;
+    Ok(read(&store_path(app)?)?
+        .into_iter()
+        .find(|m| m.local)
+        .map(|m| LocalRecord {
+            id: m.id,
+            endpoint: m.endpoint,
+            environment_id: m.environment_id,
+            token: m.token,
+        }))
+}
+
+/// Saves this computer's host as "This computer". It keeps the id of the
+/// machine already saved for its environment, or of the previous local host,
+/// so views that follow the machine by id stay attached.
+pub(crate) fn save_local_machine(
+    app: &AppHandle,
+    endpoint: String,
+    environment_id: String,
+    token: String,
+) -> Result<Machine, String> {
+    let endpoint = self::endpoint(&endpoint)?;
+    let state = app.state::<RemoteConnections>();
+    let _guard = state
+        .store
+        .lock()
+        .map_err(|_| "Connection store is locked")?;
+    let path = store_path(app)?;
+    let mut machines = read(&path)?;
+    let machine = local_machine(&machines, endpoint, environment_id, token);
+    machines
+        .retain(|m| !m.local && m.id != machine.id && m.environment_id != machine.environment_id);
+    machines.push(machine.clone());
+    write(&path, &machines)?;
+    state.tunnels.remove(&machine.id);
+    Ok(machine.public())
+}
+
+fn local_machine(
+    machines: &[StoredMachine],
+    endpoint: String,
+    environment_id: String,
+    token: String,
+) -> StoredMachine {
+    let id = machines
+        .iter()
+        .find(|m| m.environment_id == environment_id)
+        .or_else(|| machines.iter().find(|m| m.local))
+        .map(|m| m.id.clone())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    StoredMachine {
+        id,
+        name: "This computer".into(),
+        endpoint,
+        environment_id,
+        token,
+        ssh: None,
+        local: true,
+    }
+}
+
+/// Forgets this computer's host after it was removed. Its data stays on disk.
+pub(crate) fn forget_local_machine(app: &AppHandle) -> Result<(), String> {
+    let state = app.state::<RemoteConnections>();
+    let _guard = state
+        .store
+        .lock()
+        .map_err(|_| "Connection store is locked")?;
+    let path = store_path(app)?;
+    let mut machines = read(&path)?;
+    machines.retain(|m| !m.local);
+    write(&path, &machines)
 }
 
 #[tauri::command(async)]
@@ -693,6 +817,89 @@ mod tests {
         assert!(!supported_remote_method("git.arbitrary"));
     }
     #[test]
+    fn desktop_manages_phones_on_its_machines() {
+        for method in [
+            "pairing.create",
+            "pairing.status",
+            "pairing.decide",
+            "pairing.cancel",
+            "devices.list",
+            "devices.rename",
+            "devices.revoke",
+            "devices.events",
+            "host.config.get",
+            "host.config.set",
+            "presence.update",
+        ] {
+            assert!(supported_remote_method(method), "{method}");
+        }
+        // Phone-only and channel-only methods stay off the desktop's list.
+        for method in [
+            "pair.claim",
+            "watch.set",
+            "push.register",
+            "pairing.arbitrary",
+        ] {
+            assert!(!supported_remote_method(method), "{method}");
+        }
+    }
+    #[test]
+    fn stores_saved_before_this_computer_still_load() {
+        let old = br#"[{"id":"m","name":"server","endpoint":"https://host.example","environmentId":"env","token":"t","ssh":null}]"#;
+        let machines: Vec<StoredMachine> = serde_json::from_slice(old).unwrap();
+        assert!(!machines[0].local);
+        assert_eq!(
+            serde_json::to_value(machines[0].public()).unwrap()["local"],
+            false
+        );
+        let local = br#"[{"id":"m","name":"This computer","endpoint":"http://127.0.0.1:3774","environmentId":"env","token":"t","ssh":null,"local":true}]"#;
+        let machines: Vec<StoredMachine> = serde_json::from_slice(local).unwrap();
+        assert!(machines[0].local);
+        let path =
+            std::env::temp_dir().join(format!("remote-machines-{}.json", uuid::Uuid::new_v4()));
+        std::fs::write(&path, old).unwrap();
+        assert_eq!(read(&path).unwrap().len(), 1);
+        std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn this_computer_keeps_its_machine_id() {
+        let stored = |id: &str, environment: &str, local: bool| StoredMachine {
+            id: id.into(),
+            name: "x".into(),
+            endpoint: "https://host.example".into(),
+            environment_id: environment.into(),
+            token: "t".into(),
+            ssh: None,
+            local,
+        };
+        let endpoint = || "http://127.0.0.1:3774".to_string();
+        // The same environment, saved earlier by URL, becomes This computer.
+        let machine = local_machine(
+            &[stored("a", "env", false)],
+            endpoint(),
+            "env".into(),
+            "new".into(),
+        );
+        assert_eq!(machine.id, "a");
+        assert!(machine.local && machine.ssh.is_none());
+        assert_eq!(machine.name, "This computer");
+        // A reinstalled host (new environment) replaces the previous local record.
+        let machine = local_machine(
+            &[stored("b", "old", true)],
+            endpoint(),
+            "env".into(),
+            "new".into(),
+        );
+        assert_eq!(machine.id, "b");
+        let machine = local_machine(
+            &[stored("c", "other", false)],
+            endpoint(),
+            "env".into(),
+            "new".into(),
+        );
+        assert_ne!(machine.id, "c");
+    }
+    #[test]
     fn endpoints_require_an_encrypted_route_and_no_embedded_secrets() {
         assert_eq!(
             endpoint("http://127.0.0.1:3774/").unwrap(),
@@ -720,6 +927,7 @@ mod tests {
             environment_id: "env".into(),
             token: "secret".into(),
             ssh: None,
+            local: false,
         };
         let value = serde_json::to_string(&stored.public()).unwrap();
         assert!(!value.contains("secret"));

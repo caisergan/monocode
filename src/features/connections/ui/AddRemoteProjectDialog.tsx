@@ -4,6 +4,7 @@ import { LAYER } from "../../../shared/lib/layers";
 import { SearchableSelect } from "../../../shared/ui/SearchableSelect";
 import { ChevronRight, Folder } from "../../../shared/ui/icons";
 import {
+  isLocalMachine,
   OPEN_CONNECTIONS_EVENT,
   remoteRequest,
   useRemoteMachines,
@@ -12,7 +13,8 @@ import { rememberRemoteProject } from "../model/remoteProjects";
 import type { HostDirectory, HostProject } from "../model/protocol";
 
 /** Adds a project whose folder is on a connected machine. Sessions in it run
- * on that machine; the project otherwise behaves like any other in the rail. */
+ * on that machine; the project otherwise behaves like any other in the rail.
+ * "This computer" (its own host, for phones) is listed first and preselected. */
 export function AddRemoteProjectDialog({
   onCancel,
   onOpen,
@@ -165,14 +167,19 @@ export function AddRemoteProjectDialog({
                 options={machines.map((entry) => ({
                   value: entry.id,
                   label: entry.name,
-                  keywords: entry.ssh?.target ?? entry.endpoint,
+                  keywords: isLocalMachine(entry)
+                    ? "this computer local phone mobile"
+                    : (entry.ssh?.target ?? entry.endpoint),
                 }))}
                 onChange={setMachineId}
                 searchable={false}
               />
             ) : (
               <p className="text-[12px] text-content/55">
-                On <span className="text-content/80">{machine.name}</span>
+                On{" "}
+                <span className="text-content/80">
+                  {isLocalMachine(machine) ? "this computer" : machine.name}
+                </span>
               </p>
             )}
             <input

@@ -35,6 +35,8 @@ export {
 } from "../../../src/features/connections/model/protocol";
 export type {
   CommandReceipt,
+  CreateInitial,
+  CreateWorktree,
   HostCommand,
   HostDescriptor,
   HostModelCatalog,
@@ -45,4 +47,5 @@ export type {
   RemoteProvider,
   SessionSync,
   SessionSyncResponse,
+  TurnOutcome,
 } from "../../../src/features/connections/model/protocol";

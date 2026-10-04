@@ -147,7 +147,7 @@ function setup() {
       runtimeMode: "supervised",
     }).sessionId;
 
-  return { store, engine, pairing, keys, connect, pair, session, turns, project, provider };
+  return { store, engine, rpc, pairing, keys, connect, pair, session, turns, project, provider };
 }
 
 const events = (channel: Channel) => {
@@ -302,6 +302,48 @@ describe("phone channel", () => {
     await vi.waitFor(() => expect(local?.status).toBe("idle"));
     const after = await channel.request<InboxList>("inbox.list");
     expect(after.items[0]).toMatchObject({ attention: "finished", lastText: "Working" });
+  });
+
+  it("honours idempotency keys, queue commands and presence on the channel", async () => {
+    const s = setup();
+    const { channel, welcome, deviceId } = await s.pair();
+    expect(welcome.capabilities).toEqual(
+      expect.arrayContaining(["mutations.idempotent", "sessions.queue", "sessions.createWithPrompt", "presence"]),
+    );
+    // No config store in this host, so no host.config methods to advertise.
+    expect(welcome.capabilities).not.toContain("host.config");
+    const id = s.session();
+    const rename = { projectId: s.project.id, sessionId: id, title: "Renamed" };
+    const first = await channel.request("sessions.update", rename, { key: "rename-1" });
+    const revision = s.store.session(id).revision;
+    await expect(channel.request("sessions.update", rename, { key: "rename-1" })).resolves.toEqual(first);
+    expect(s.store.session(id).revision).toBe(revision);
+    await expect(
+      channel.request("sessions.update", { ...rename, title: "Other" }, { key: "rename-1" }),
+    ).rejects.toMatchObject({ code: "idempotency_conflict", retryable: false });
+
+    await channel.ping({ visible: true, focusedSessionId: id });
+    expect(s.rpc.presence.watching(id, 60_000)).toEqual([deviceId]);
+    await channel.request("presence.update", { visible: false });
+    expect(s.rpc.presence.isPresent(deviceId)).toBe(false);
+    await expect(channel.request("presence.update", { visible: "yes" })).rejects.toMatchObject({
+      code: "invalid_params",
+    });
+
+    await channel.request("commands.dispatch", { type: "send", commandId: "go", sessionId: id, text: "Go" });
+    await vi.waitFor(() => expect(s.turns).toHaveLength(1));
+    await channel.request("commands.dispatch", { type: "queue", commandId: "next", sessionId: id, text: "Next" });
+    s.turns[0].finish();
+    await vi.waitFor(() => expect(s.turns).toHaveLength(2));
+    expect(s.turns[1].input.text).toBe("Next");
+    s.turns[1].finish();
+    await vi.waitFor(() => expect(s.store.session(id).status).toBe("idle"));
+
+    // A closed channel clears its device's presence.
+    await channel.ping({ visible: true });
+    expect(s.rpc.presence.isPresent(deviceId)).toBe(true);
+    channel.close();
+    await vi.waitFor(() => expect(s.rpc.presence.get(deviceId)).toBeUndefined());
   });
 
   it("sends inbox and project hints instead of polling", async () => {

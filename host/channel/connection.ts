@@ -27,7 +27,8 @@ import type { Principal, Via } from "../devices";
 import { HostError, wireError } from "../errors";
 import type { HostKeys } from "../keys";
 import type { PairingManager } from "../pairing";
-import { BASE_CAPABILITIES, BOOT_ID, CHANNEL_CAPABILITIES, clientProviders, type HostRpc } from "../rpc";
+import { BOOT_ID, clientProviders, type HostRpc } from "../rpc";
+import { parsePresence } from "../presence";
 import type { HostStore, SessionChange } from "../store";
 import { MAX_WATCHED_SESSIONS, Watcher } from "./watch";
 import { version } from "../../package.json";
@@ -127,6 +128,7 @@ export class ChannelConnection {
         void this.request(message);
         return;
       case "ping":
+        if (message.presence !== undefined) this.presence(message.presence);
         this.send({ t: "pong", ts: message.ts, now: Date.now() }, 0);
         return;
       case "cancel":
@@ -250,7 +252,7 @@ export class ChannelConnection {
     return {
       ...base,
       device: { id: principal.deviceId, name: principal.name, role: principal.role },
-      capabilities: [...BASE_CAPABILITIES, ...CHANNEL_CAPABILITIES],
+      capabilities: this.host.rpc.capabilities("channel"),
       providers: clientProviders(this.host.providers, this.hello?.providers),
       endpoints: this.host.endpoints(),
       relay: null,
@@ -261,6 +263,7 @@ export class ChannelConnection {
 
   private authenticated(): void {
     this.host.register(this);
+    if (this.hello?.presence !== undefined) this.presence(this.hello.presence);
     this.lifetime = setTimeout(() => this.bye("rekey"), LIFETIME_MS);
     this.lifetime.unref?.();
     this.onAuthenticated?.();
@@ -296,7 +299,8 @@ export class ChannelConnection {
     }
     this.inFlight++;
     try {
-      const result = await this.call(method, params);
+      // A malformed key reaches the receipt check, which rejects it.
+      const result = await this.call(method, params, message.key);
       const bulk = this.host.rpc.methods[method]?.bulk;
       this.send({ t: "res", id, ok: true, r: result ?? null }, bulk ? 2 : 1);
     } catch (error) {
@@ -309,7 +313,7 @@ export class ChannelConnection {
     }
   }
 
-  private call(method: string, params: Record<string, unknown>): unknown {
+  private call(method: string, params: Record<string, unknown>, key?: string): unknown {
     if (this.state === "pairing") {
       if (method !== "pair.claim") throw new HostError("forbidden", "Finish pairing first");
       return this.claim(params);
@@ -327,7 +331,18 @@ export class ChannelConnection {
       principal: this.principal!,
       transport: this.transport,
       channel: this,
+      ...(key === undefined ? {} : { key }),
     });
+  }
+
+  /** Presence from the hello or a ping; malformed values are ignored. */
+  private presence(value: unknown): void {
+    if (!this.principal) return;
+    try {
+      this.host.rpc.presence.update(this.principal.deviceId, parsePresence(value), this.transport);
+    } catch {
+      /* a ping is never answered with an error */
+    }
   }
 
   private claim(params: Record<string, unknown>) {
@@ -417,6 +432,8 @@ export class ChannelConnection {
     this.watcher?.close();
     this.session?.close();
     this.stopPairingListener?.();
+    // A closed channel clears its device's presence (spec 08 §8.3).
+    if (this.principal) this.host.rpc.presence.clear(this.principal.deviceId);
     this.host.unregister(this);
   }
 }

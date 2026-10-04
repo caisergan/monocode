@@ -98,10 +98,13 @@ import { GithubStarPrompt } from "./GithubStarPrompt";
 import { Popover } from "../../shared/ui/Popover";
 import { OPEN_REMOTE_PROJECT_EVENT } from "../../features/connections/model/connections";
 import {
+  isLocalMachine,
   useRemoteMachineOnline,
   useRemoteMachines,
 } from "../../features/connections/model/connections";
 import { remoteProjectFor } from "../../features/connections/model/remoteProjects";
+import { Phone } from "../../features/mobile/ui/icons";
+import { LOCAL_HOST_PROJECT_HINT } from "../../features/mobile/model/mobile";
 import { useProjectMenu } from "./useProjectMenu";
 
 type Props = {
@@ -1208,6 +1211,7 @@ function ProjectCard({
     ? machines.find((entry) => entry.environmentId === remote.environmentId)
     : undefined;
   const online = useRemoteMachineOnline(machine?.id);
+  const local = isLocalMachine(machine);
   const connection = !remote
     ? ""
     : !machine
@@ -1219,7 +1223,9 @@ function ProjectCard({
           : "Reconnecting";
   const cardTitle = projectCardTitle(
     remote
-      ? `${remote.cwd} on ${machine?.name ?? "another machine"} (${connection})`
+      ? local
+        ? `${remote.cwd}\n${LOCAL_HOST_PROJECT_HINT} (${connection})`
+        : `${remote.cwd} on ${machine?.name ?? "another machine"} (${connection})`
       : item.path,
     name,
     stats,
@@ -1313,10 +1319,15 @@ function ProjectCard({
         {remote ? (
           <span
             role="img"
-            aria-label={connection}
+            aria-label={local ? `${LOCAL_HOST_PROJECT_HINT} ${connection}` : connection}
+            title={local ? LOCAL_HOST_PROJECT_HINT : undefined}
             className="relative grid size-4 shrink-0 place-items-center text-content/45"
           >
-            <Internet className="size-3" strokeWidth={1.75} aria-hidden="true" />
+            {local ? (
+              <Phone className="size-3" strokeWidth={1.75} aria-hidden="true" />
+            ) : (
+              <Internet className="size-3" strokeWidth={1.75} aria-hidden="true" />
+            )}
             <span
               aria-hidden="true"
               className={`absolute right-0 bottom-0 size-1.5 rounded-full ring-1 ring-background-base ${

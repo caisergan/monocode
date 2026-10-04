@@ -24,6 +24,20 @@ export const OPEN_CONNECTIONS_EVENT = "monocode:open-connections";
 export const OPEN_REMOTE_PROJECT_EVENT = "monocode:open-remote-project";
 export const refreshRemoteMachines = () =>
   window.dispatchEvent(new Event(CHANGE));
+
+/** A machine this desktop manages. `local` marks "This computer": the host
+ * the desktop installed on its own account, so phones can use its projects. */
+export type ManagedMachine = RemoteMachine & { local?: boolean };
+
+export const isLocalMachine = (machine?: RemoteMachine): boolean =>
+  !!(machine as ManagedMachine | undefined)?.local;
+
+/** This computer first, then the other machines in the order they were added. */
+export function orderMachines(machines: RemoteMachine[]): RemoteMachine[] {
+  return [...machines].sort(
+    (a, b) => Number(isLocalMachine(b)) - Number(isLocalMachine(a)),
+  );
+}
 const TAB_KEY = "monocode.remote-tabs.v2";
 const WORKTREE_KEY = "monocode.remote-pending-worktrees.v1";
 
@@ -220,7 +234,7 @@ export async function remoteMachineFor(
   const known = knownRemoteMachine(environmentId);
   if (known || machinesLoaded) return known;
   const value = await invoke<RemoteMachine[]>("remote_machines");
-  cachedMachines = Array.isArray(value) ? value : [];
+  cachedMachines = Array.isArray(value) ? orderMachines(value) : [];
   machinesLoaded = true;
   return knownRemoteMachine(environmentId);
 }
@@ -235,10 +249,10 @@ export async function connectMachine(
     url,
     token,
   });
-  cachedMachines = [
+  cachedMachines = orderMachines([
     ...cachedMachines.filter((entry) => entry.id !== machine.id),
     machine,
-  ];
+  ]);
   machinesLoaded = true;
   window.dispatchEvent(new Event(CHANGE));
   return machine;
@@ -265,7 +279,7 @@ export function useRemoteMachines(enabled = true): {
       void invoke<RemoteMachine[]>("remote_machines")
         .then((value) => {
           if (!disposed) {
-            cachedMachines = Array.isArray(value) ? value : [];
+            cachedMachines = Array.isArray(value) ? orderMachines(value) : [];
             machinesLoaded = true;
             setState({
               machines: cachedMachines,

@@ -1,5 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import type { Block } from "../src/features/sessions/model/session";
 import type {
@@ -28,9 +28,24 @@ import type {
   WindowedSync,
 } from "@monocode/core/wire";
 import { DeviceStore, migrateDevices, type Principal } from "./devices";
+import { HostError } from "./errors";
 
 const CACHED_SESSIONS = 32;
 const INBOX_RECENT_MS = 7 * 86_400_000;
+const MUTATION_RECEIPT_MS = 86_400_000;
+
+/** JSON with object keys sorted at every depth, so equal params hash equally. */
+export function canonicalJson(value: unknown): string {
+  return JSON.stringify(value, (_key, item: unknown) =>
+    item && typeof item === "object" && !Array.isArray(item)
+      ? Object.fromEntries(
+          Object.keys(item)
+            .sort()
+            .map((key) => [key, (item as Record<string, unknown>)[key]]),
+        )
+      : item,
+  );
+}
 
 /** Phone-facing fields kept beside the desktop summary (`sessions.phone`). */
 export type PhoneSummary = Pick<
@@ -61,6 +76,11 @@ export class HostStore {
   private pending: SessionChange[] | undefined;
   /** Bumped whenever an Agents-relevant field changes; phones compare it. */
   inboxRevision = 0;
+  /** Keyed mutations still running; a duplicate waits for the first. */
+  private mutations = new Map<
+    string,
+    { deviceId: string; method: string; hash: string; result: Promise<unknown> }
+  >();
   private inboxKeys = new Map<string, string>();
 
   constructor(path: string) {
@@ -540,6 +560,55 @@ export class HostStore {
     };
   }
 
+  /** Runs a keyed mutation once (spec 06 §6.8, 09 §9.7). The same key with
+   * the same method and params returns the stored result for 24 h; anything
+   * else under that key is a conflict. Failures are not stored. */
+  async withMutationReceipt<T>(
+    key: string,
+    deviceId: string,
+    method: string,
+    params: unknown,
+    run: () => T | Promise<T>,
+  ): Promise<T> {
+    if (typeof key !== "string" || !key || key.length > 128 || key.includes("\0"))
+      throw new HostError("invalid_params", "Invalid idempotency key");
+    const hash = createHash("sha256").update(canonicalJson(params ?? {})).digest("hex");
+    const conflict = () =>
+      new HostError(
+        "idempotency_conflict",
+        "Idempotency key was already used with a different request",
+      );
+    const row = this.db
+      .prepare(
+        "SELECT device_id, method, params_hash, result FROM mutation_receipts WHERE key=? AND created_at>=?",
+      )
+      .get(key, Date.now() - MUTATION_RECEIPT_MS) as
+      | { device_id: string; method: string; params_hash: string; result: string }
+      | undefined;
+    if (row) {
+      if (row.device_id !== deviceId || row.method !== method || row.params_hash !== hash)
+        throw conflict();
+      return JSON.parse(row.result) as T;
+    }
+    const pending = this.mutations.get(key);
+    if (pending) {
+      if (pending.deviceId !== deviceId || pending.method !== method || pending.hash !== hash)
+        throw conflict();
+      return pending.result as Promise<T>;
+    }
+    const result = Promise.resolve()
+      .then(run)
+      .then((value) => {
+        this.db
+          .prepare("INSERT OR REPLACE INTO mutation_receipts VALUES (?, ?, ?, ?, ?, ?)")
+          .run(key, deviceId, method, hash, JSON.stringify(value ?? null), Date.now());
+        return value;
+      })
+      .finally(() => this.mutations.delete(key));
+    this.mutations.set(key, { deviceId, method, hash, result });
+    return result;
+  }
+
   issueDevice(name: string): { id: string; token: string } {
     return this.devices.issueDesktop(name);
   }
@@ -569,11 +638,16 @@ export class HostStore {
 export function phoneSummary(value: HostSession): PhoneSummary {
   const attention = sessionAttention(value);
   const lastText = lastAssistantText(value.session.blocks);
+  // Snapshots written before `finishedAt` existed fall back to the last
+  // turn's recorded duration.
   const turn = [...value.session.blocks].reverse().find((block) => block.role === "user" && !block.draft);
   const finishedAt =
-    value.status !== "running" && turn?.startedAt && turn.durationMs !== undefined
-      ? turn.startedAt + turn.durationMs
-      : undefined;
+    value.status === "running"
+      ? undefined
+      : (value.finishedAt ??
+        (turn?.startedAt && turn.durationMs !== undefined
+          ? turn.startedAt + turn.durationMs
+          : undefined));
   const approval = pendingApproval(value);
   const question = pendingQuestionSummary(value);
   const queueLength = value.session.queuedMessages?.length;

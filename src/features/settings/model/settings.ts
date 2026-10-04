@@ -20,6 +20,7 @@ const SECTION_KEY = "monocode.settingsSection";
 export type SettingsSectionId =
   | "general"
   | "connections"
+  | "mobile"
   | "appearance"
   | "keybindings"
   | "chat"
@@ -63,6 +64,14 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
     label: "Connections",
     description: "Connect your machines and run agents remotely through SSH.",
     keywords: "ssh remote host machine server environment always on",
+  },
+  {
+    id: "mobile",
+    group: "app",
+    label: "Mobile",
+    description:
+      "Use your machines from your phone: run this computer’s projects through its own host, and pair phones with any machine you manage.",
+    keywords: "phone iphone android pair qr code device relay this computer host",
   },
   {
     id: "appearance",
@@ -163,6 +172,25 @@ export type SettingsEntry = {
 
 export const SETTINGS_INDEX: SettingsEntry[] = [
   { id: "remote-machines", section: "connections", label: "Your machines", keywords: "ssh remote connect host server environment" },
+  {
+    id: "pair-phone",
+    section: "mobile",
+    label: "Pair a phone",
+    keywords: "phone mobile iphone android qr code scan link pairing connect",
+  },
+  {
+    id: "this-computer",
+    section: "mobile",
+    label: "This computer",
+    keywords:
+      "local host set up install update restart remove relay direct network diagnostics doctor",
+  },
+  {
+    id: "mobile-devices",
+    section: "mobile",
+    label: "Devices",
+    keywords: "phones paired rename revoke remove access recent activity",
+  },
   {
     id: "mcp-servers",
     section: "mcp",

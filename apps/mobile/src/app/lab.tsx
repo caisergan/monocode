@@ -100,8 +100,8 @@ export default function Lab() {
   const { run } = useLocalSearchParams<{ run?: string }>();
   useEffect(() => {
     if (run !== "huge" && run !== "huge-stream" && run !== "big") return;
-    load(run === "big" ? 120 : 1000, run);
     const timers = [
+      setTimeout(() => load(run === "big" ? 120 : 1000, run), 0),
       setTimeout(() => {
         if (run === "huge-stream") startStream();
       }, 2_000),

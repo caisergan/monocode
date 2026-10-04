@@ -5,7 +5,15 @@ $version = @@VERSION@@
 $release = @@RELEASE@@
 $forceUpgrade = $env:MONOCODE_HOST_FORCE_UPGRADE -eq '1'
 $hostPort = if ($env:MONOCODE_HOST_PORT) { [int] $env:MONOCODE_HOST_PORT } else { 3774 }
+# Development builds of the desktop install a package from `npm run
+# host:package` (the archive, or its folder) instead of downloading one.
+$localArchive = $env:MONOCODE_HOST_LOCAL_ARCHIVE
 @@ACL@@
+
+# The desktop's local setup shows each step as it starts.
+function Write-MonoCodeStep([string] $Name) {
+  if ($env:MONOCODE_HOST_PROGRESS -eq '1') { [Console]::Out.WriteLine("monocode-step:$Name") }
+}
 
 function Download-MonoCode([string] $Url, [string] $Destination) {
   Add-Type -AssemblyName System.Net.Http
@@ -64,10 +72,20 @@ try {
     New-Item -ItemType Directory -Path $temporary | Out-Null
     $archive = Join-Path $temporary $filename
     $checksum = Join-Path $temporary 'checksum'
-    try {
-      Download-MonoCode "$release/$filename" $archive
-      Download-MonoCode "$release/$filename.sha256" $checksum
-    } catch { throw "The Windows host package for version $version could not be downloaded. Install a release with host packages. $($_.Exception.Message)" }
+    Write-MonoCodeStep 'download'
+    if ($localArchive) {
+      if (Test-Path -LiteralPath $localArchive -PathType Container) { $localArchive = Join-Path $localArchive $filename }
+      try {
+        Copy-Item -LiteralPath $localArchive -Destination $archive
+        Copy-Item -LiteralPath "$localArchive.sha256" -Destination $checksum
+      } catch { throw "The local host package $localArchive is unavailable. Run npm run host:package first. $($_.Exception.Message)" }
+    } else {
+      try {
+        Download-MonoCode "$release/$filename" $archive
+        Download-MonoCode "$release/$filename.sha256" $checksum
+      } catch { throw "The Windows host package for version $version could not be downloaded. Install a release with host packages. $($_.Exception.Message)" }
+    }
+    Write-MonoCodeStep 'verify'
     $expected = ((Get-Content -LiteralPath $checksum -Raw).Trim() -split '\s+')[0]
     if ($expected -notmatch '^[a-fA-F0-9]{64}$') { throw 'Invalid host package checksum.' }
     if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $expected) { throw 'MonoCode Host package checksum mismatch.' }
@@ -97,12 +115,14 @@ try {
   $runtime = [IO.File]::ReadAllText($pointer).Trim()
   $node = Join-Path $runtime 'node.exe'
   $entry = Join-Path $runtime 'host.mjs'
+  Write-MonoCodeStep 'install'
   if ($existed -and $forceUpgrade) {
     & $node $entry service uninstall | Out-Null
     if ($LASTEXITCODE -ne 0) { throw 'Could not stop the old host service.' }
   }
   & $node $entry service install --port $hostPort | Out-Null
   if ($LASTEXITCODE -ne 0) { throw 'Host service setup failed. Check the error above and sign in to the Windows desktop as the SSH user.' }
+  Write-MonoCodeStep 'start'
   & $node $entry connection-info
   if ($LASTEXITCODE -ne 0) { throw 'The host did not report a connection.' }
 } finally {

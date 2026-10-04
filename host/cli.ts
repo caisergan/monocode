@@ -35,7 +35,9 @@ import QRCode from "qrcode";
 import { formatCode } from "@monocode/channel/pairing";
 import type { PairingOffer, PairingStatus } from "@monocode/core/wire";
 import { loadOrCreateKeys } from "./keys";
-import { loadConfig } from "./config";
+import { HostConfigStore, configView, loadConfig } from "./config";
+import { formatDoctor, runDoctor } from "./doctor";
+import { resolveProvider } from "./process";
 import { PairingManager } from "./pairing";
 import { createHostRpc } from "./rpc";
 import { ChannelServer } from "./channel/server";
@@ -194,12 +196,41 @@ async function main() {
   revoke <device-id>    Revoke a device (closes its live connections)
   endpoints             Show the addresses phones will be offered
   keys fingerprint      Print the host fingerprint
+  doctor [--json]       Check the host, database, keys, config, listeners,
+                        providers and disk space
 Options: --data-dir <directory> --port <port> (default 3774)
 Connect another computer using an SSH forward to the loopback port.`);
     return;
   }
   if (!Number.isInteger(port) || port < 1 || port > 65535)
     throw new Error("Invalid port");
+  // Before the data directory is created or re-permissioned: doctor reports
+  // what is there, and changes nothing.
+  if (command === "doctor") {
+    const report = await runDoctor({
+      directory,
+      port,
+      version,
+      status: async () => {
+        const state = readRunning();
+        if (!state) return undefined;
+        const reported = (await lifecycle(state, "status")) as Record<string, unknown>;
+        return { ...reported, pid: state.pid, port: state.port };
+      },
+      providers: async () => {
+        const found: RemoteProvider[] = [];
+        for (const provider of REMOTE_PROVIDERS)
+          await resolveProvider(provider).then(
+            () => found.push(provider),
+            () => undefined,
+          );
+        return found;
+      },
+    });
+    console.log(has("json") ? JSON.stringify(report, null, 2) : formatDoctor(report));
+    if (!report.ok) process.exitCode = 1;
+    return;
+  }
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   if (process.platform === "win32") await protectWindowsDirectory(directory);
   else chmodSync(directory, 0o700);
@@ -393,18 +424,33 @@ Connect another computer using an SSH forward to the loopback port.`);
     const engine = new HostEngine(store, hostProviders);
     const secret = randomBytes(32).toString("base64url");
     const keys = loadOrCreateKeys(directory);
-    const config = loadConfig(directory, port);
-    const rpc = createHostRpc(engine, available);
+    const config = new HostConfigStore(directory, port);
     let channels: ChannelServer | undefined;
+    const listening = () => channels?.listening ?? [];
+    const rpc = createHostRpc(engine, available, { config: { store: config, listening } });
+    // config.changed: rebind the phone listeners, then tell open channels.
+    config.onChanged(() => channels?.reconfigure(() => configView(config.current, listening())));
+    // Hourly cleanup of tombstones, device events, receipts and stale push
+    // registrations (spec 09 §9.4).
+    const housekeeping = () => {
+      try {
+        store.devices.housekeeping();
+      } catch (error) {
+        console.error("Housekeeping failed:", error instanceof Error ? error.message : error);
+      }
+    };
+    housekeeping();
+    const housekeepingTimer = setInterval(housekeeping, 60 * 60_000);
+    housekeepingTimer.unref();
     const pairing = new PairingManager(store.devices, {
       environmentId: store.environmentId,
       name: () => hostname(),
       hostKey: keys.host.publicKey,
       fingerprint: keys.fingerprint,
       endpoints: () => channels?.currentEndpoints ?? [],
-      linkBase: () => config.pairing.linkBase,
-      defaultTtlSeconds: () => config.pairing.defaultTtlSeconds,
-      requireConfirmation: () => config.pairing.requireConfirmation,
+      linkBase: () => config.current.pairing.linkBase,
+      defaultTtlSeconds: () => config.current.pairing.defaultTtlSeconds,
+      requireConfirmation: () => config.current.pairing.requireConfirmation,
     });
     const admin = ["admin" as const];
     rpc.register("pairing.create", {
@@ -460,8 +506,19 @@ Connect another computer using an SSH forward to the loopback port.`);
     // host owner. Its secret never leaves running.json.
     const local = { deviceId: "local", role: "admin" as const, kind: "desktop" as const, name: "This computer" };
     const lifecycleActions: Record<string, (params: Record<string, unknown>) => unknown> = {
-      status: () => ({}),
+      // doctor reads this; older hosts answered {}.
+      status: () => ({
+        version,
+        pid: process.pid,
+        port,
+        listening: listening(),
+        directPort: config.current.direct.port,
+        directMode: config.current.direct.mode,
+      }),
       stop: () => ({}),
+      // The CLI changed config.json: re-read it and apply the change.
+      reload: async () => configView(await config.reload(), listening()),
+      "config.changed": async () => configView(await config.reload(), listening()),
       "pairing.create": (params) => rpc.dispatch("pairing.create", params, { principal: local, transport: "http" }),
       "pairing.status": (params) => rpc.dispatch("pairing.status", params, { principal: local, transport: "http" }),
       "pairing.decide": (params) => rpc.dispatch("pairing.decide", params, { principal: local, transport: "http" }),
@@ -515,6 +572,7 @@ Connect another computer using an SSH forward to the loopback port.`);
     stop = async () => {
       if (stopping) return;
       stopping = true;
+      clearInterval(housekeepingTimer);
       pairing.close();
       await channels?.close();
       server.close();
@@ -551,7 +609,7 @@ Connect another computer using an SSH forward to the loopback port.`);
       keys,
       pairing,
       providers: available,
-      config: () => config,
+      config: () => config.current,
       log: (message) => console.log(message),
     });
     await channels.start();

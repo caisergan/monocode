@@ -15,6 +15,8 @@ export type AgentRow = InboxItem & { env: string; hostLabel: string };
 type AgentsState = {
   items: AgentRow[];
   needsInput: number;
+  /** Some machine's rows are from the cache, waiting for the first fetch. */
+  cached: boolean;
 };
 
-export const useAgents = create<AgentsState>(() => ({ items: [], needsInput: 0 }));
+export const useAgents = create<AgentsState>(() => ({ items: [], needsInput: 0, cached: false }));

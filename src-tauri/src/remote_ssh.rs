@@ -275,14 +275,14 @@ pub fn detect_platform(
     parse_platform(&output)
 }
 
-fn powershell_encoded(script: &str) -> String {
+pub(crate) fn powershell_encoded(script: &str) -> String {
     let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 /// Keep the remote command below cmd.exe's length limit. The actual script is
 /// read from UTF-8 stdin as a single block, rather than evaluated line by line.
-fn powershell_reader() -> String {
+pub(crate) fn powershell_reader() -> String {
     // Prefer this shell's built-in modules if the SSH environment inherited
     // PowerShell 7 module paths through an intermediate process.
     powershell_encoded("$env:PSModulePath = $PSHOME + '\\Modules;' + $env:PSModulePath; $ErrorActionPreference = 'Stop'; [Console]::InputEncoding = [Text.UTF8Encoding]::new($false); [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false); try { & ([ScriptBlock]::Create([Console]::In.ReadToEnd())) } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }")
@@ -384,7 +384,7 @@ fn run_remote_command(
 pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
-fn powershell_quote(value: &str) -> String {
+pub(crate) fn powershell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
@@ -396,9 +396,25 @@ pub fn bootstrap_script(platform: HostPlatform) -> String {
     bootstrap_script_from_template(platform, template)
 }
 
+/// Where host packages are published: one `v<version>` folder per release.
+const DEFAULT_RELEASE_BASE: &str = "https://github.com/hardbeat920/monocode/releases/download";
+
+/// Forks build with `MONOCODE_RELEASE_BASE` set to their own HTTPS release
+/// base, so their desktops install their own host packages.
+fn release_url(base: Option<&str>, version: &str) -> String {
+    let base = base
+        .map(|base| base.trim().trim_end_matches('/'))
+        .filter(|base| {
+            base.strip_prefix("https://")
+                .is_some_and(|rest| !rest.is_empty() && !rest.contains(['\'', '"', '\n']))
+        })
+        .unwrap_or(DEFAULT_RELEASE_BASE);
+    format!("{base}/v{version}")
+}
+
 fn bootstrap_script_from_template(platform: HostPlatform, template: &str) -> String {
     let version = env!("CARGO_PKG_VERSION");
-    let url = format!("https://github.com/hardbeat920/monocode/releases/download/v{version}");
+    let url = release_url(option_env!("MONOCODE_RELEASE_BASE"), version);
     match platform {
         // include_str! preserves checkout line endings, including Windows CRLF.
         HostPlatform::Unix => template
@@ -620,8 +636,8 @@ impl Tunnels {
     }
 }
 
-/// How this desktop appears in the host's device list.
-pub fn device_name() -> String {
+/// This computer's name, as the OS shows it, on one bounded line.
+pub fn computer_name() -> Option<String> {
     #[cfg(not(windows))]
     let run = |program: &str, args: &[&str]| {
         Command::new(program)
@@ -648,10 +664,14 @@ pub fn device_name() -> String {
         .filter(|c| !c.is_control())
         .take(80)
         .collect();
-    if name.is_empty() {
-        "MonoCode desktop".into()
-    } else {
-        format!("MonoCode on {name}")
+    Some(name).filter(|name| !name.is_empty())
+}
+
+/// How this desktop appears in the host's device list.
+pub fn device_name() -> String {
+    match computer_name() {
+        Some(name) => format!("MonoCode on {name}"),
+        None => "MonoCode desktop".into(),
     }
 }
 
@@ -815,6 +835,33 @@ mod tests {
         assert!(!upgrade_script(HostPlatform::Unix, 3774).contains('\r'));
         assert!(upgrade_script(HostPlatform::Windows, 3774)
             .starts_with("$env:MONOCODE_HOST_FORCE_UPGRADE = '1'"));
+    }
+    #[test]
+    fn forks_choose_their_release_base_at_build_time() {
+        assert_eq!(
+            release_url(None, "0.9.0"),
+            "https://github.com/hardbeat920/monocode/releases/download/v0.9.0"
+        );
+        assert_eq!(
+            release_url(
+                Some(" https://github.com/me/monocode/releases/download/ "),
+                "0.9.0"
+            ),
+            "https://github.com/me/monocode/releases/download/v0.9.0"
+        );
+        // Downloads stay on HTTPS, and the value can't break out of quoting.
+        for base in [
+            "http://example.com",
+            "https://",
+            "",
+            "https://a'b",
+            "file:///tmp",
+        ] {
+            assert!(
+                release_url(Some(base), "1.0.0").starts_with(DEFAULT_RELEASE_BASE),
+                "{base}"
+            );
+        }
     }
     #[test]
     fn remote_platform_probe_handles_cmd_powershell_and_unix() {

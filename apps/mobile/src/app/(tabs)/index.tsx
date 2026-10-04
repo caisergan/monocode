@@ -4,9 +4,10 @@ import { Pressable, SectionList, Text, View } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { addDemoHost, allRuntimes } from "@/hosts/registry";
 import { seenKey, useSeen } from "@/hosts/seen";
+import { hostNotice } from "@/hosts/status";
 import { useAgents, useHosts, type AgentRow } from "@/hosts/store";
 import { Body, Button, SectionLabel, Title } from "@/ui/components";
-import { SessionCard } from "@/ui/SessionCard";
+import { cardFromInbox, SessionCard } from "@/ui/SessionCard";
 import { useTokens } from "@/ui/theme";
 
 type Section = { key: string; title: string; dot?: string; data: AgentRow[] };
@@ -15,6 +16,7 @@ type Section = { key: string; title: string; dot?: string; data: AgentRow[] };
 export default function Agents() {
   const t = useTokens();
   const items = useAgents((state) => state.items);
+  const cached = useAgents((state) => state.cached);
   const { records, states, loaded } = useHosts();
   const seen = useSeen((state) => state.seen);
 
@@ -41,9 +43,9 @@ export default function Agents() {
     ].filter((section) => section.data.length);
   }, [items, seen, t.accent]);
 
-  const offline = records.filter((record) => {
-    const state = states[record.env];
-    return state?.kind === "offline" || state?.kind === "blocked";
+  const notices = records.flatMap((record) => {
+    const text = hostNotice(record, states[record.env]);
+    return text ? [{ env: record.env, text }] : [];
   });
 
   return (
@@ -59,20 +61,12 @@ export default function Agents() {
       >
         Agents
       </Title>
-      {offline.map((record) => {
-        const state = states[record.env];
-        return (
-          <View key={record.env} style={{ borderBottomWidth: 1, borderColor: t.stroke, paddingHorizontal: 16, paddingVertical: 8 }}>
-            <Text style={{ color: t.contentAlpha(0.65), fontSize: 12 }}>
-              {state?.kind === "blocked"
-                ? state.reason === "device_revoked"
-                  ? `This phone was removed from ${record.label}.`
-                  : `Can't verify ${record.label}. Pair again.`
-                : `${record.label} is offline.`}
-            </Text>
-          </View>
-        );
-      })}
+      {cached ? <Text style={{ color: t.text.faint, fontSize: 12, paddingHorizontal: 16, marginTop: -8, paddingBottom: 6 }}>Updating…</Text> : null}
+      {notices.map((notice) => (
+        <View key={notice.env} style={{ borderBottomWidth: 1, borderColor: t.stroke, paddingHorizontal: 16, paddingVertical: 8 }}>
+          <Text style={{ color: t.contentAlpha(0.65), fontSize: 12 }}>{notice.text}</Text>
+        </View>
+      ))}
       {loaded && !records.length ? (
         <View style={{ flex: 1, justifyContent: "center", paddingHorizontal: 28, gap: 14 }}>
           <Text style={{ color: t.content, fontSize: 20, lineHeight: 26, fontWeight: "500" }}>Your agents, wherever you are.</Text>
@@ -92,7 +86,7 @@ export default function Agents() {
           renderSectionHeader={({ section }) => <SectionLabel dot={section.dot}>{section.title}</SectionLabel>}
           renderItem={({ item }) => (
             <SessionCard
-              item={item}
+              card={cardFromInbox(item)}
               unseen={(item.finishedAt ?? item.updatedAt) > (seen[seenKey(item.env, item.sessionId)] ?? 0)}
               onPress={() => router.push({ pathname: "/m/[env]/s/[sessionId]", params: { env: item.env, sessionId: item.sessionId } })}
             />

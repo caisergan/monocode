@@ -202,6 +202,33 @@ export async function createHostWorktree(
   return created;
 }
 
+/** The worktree on `branch`, created from `base` when there is none. A
+ * branch left by an earlier attempt is checked out again, not recreated. */
+export async function ensureHostWorktree(
+  cwd: string,
+  branch: string,
+  base: string,
+): Promise<HostWorktree> {
+  let found = (await hostWorktrees(cwd)).worktrees.find(
+    (tree) => tree.branch === branch,
+  );
+  if (found?.missing) {
+    // Its directory was deleted; forget the registration and recreate it.
+    await exec("git", ["worktree", "prune"], options(cwd));
+    found = undefined;
+  }
+  if (found) return found;
+  const exists = await exec(
+    "git",
+    ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`],
+    options(cwd),
+  ).then(
+    () => true,
+    () => false,
+  );
+  return createHostWorktree(cwd, branch, base, exists);
+}
+
 /** Rename only the temporary branch created for this specific worktree. */
 export async function renameHostWorktreeBranch(
   cwd: string,

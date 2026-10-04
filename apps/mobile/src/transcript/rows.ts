@@ -19,6 +19,7 @@ import {
 } from "@monocode/core/transcript";
 import type { RowSpec, TextRun } from "@transcript";
 import { hash, markdownRows } from "./markdown";
+import type { PendingMark } from "./optimistic";
 
 export type RowOptions = {
   /** The session is running: its last turn is live. */
@@ -30,7 +31,23 @@ export type RowOptions = {
   sending?: ReadonlySet<number>;
   /** Show the "Load earlier messages" row. */
   hasOlder?: boolean;
+  /** An older page is on its way. */
+  loadingOlder?: boolean;
+  /** Outbox state under user bubbles, by block id (11 §11.16). */
+  pending?: ReadonlyMap<string, PendingMark>;
+  /** Settled plans offer Build (the host has `sessions.plan`, the session is idle). */
+  canBuild?: boolean;
 };
+
+/** Row actions that open sheets above the transcript. */
+export const TOOL_ACTION = "tool";
+export const ATTACHMENT_ACTION = "attachment:";
+/** A failed outbox entry's row: Retry or Discard. */
+export const OUTBOX_ACTION = "outbox:";
+/** Build a reviewed plan. */
+export const BUILD_ACTION = "build:";
+/** A saved draft: Send or Remove. */
+export const DRAFT_ACTION = "draft:";
 
 export function formatDuration(ms: number): string {
   const seconds = Math.max(0, Math.round(ms / 1000));
@@ -57,19 +74,73 @@ function memo(block: Block, key: string, build: () => RowSpec[]): RowSpec[] {
   return rows;
 }
 
-function userRows(block: Block): RowSpec[] {
-  return memo(block, "user", () => {
-    const attachments = block.attachments?.length ? `${block.attachments.length} attachment${block.attachments.length > 1 ? "s" : ""}\n` : "";
+function userRows(block: Block, mark?: PendingMark): RowSpec[] {
+  return memo(block, `user|${mark?.label ?? ""}|${mark?.failed?.text ?? ""}`, () => {
+    const images = block.attachments?.filter((attachment) => attachment.kind === "image") ?? [];
+    const files = (block.attachments?.length ?? 0) - images.length;
+    const attachments = files ? `${files} attachment${files > 1 ? "s" : ""}\n` : "";
     return [
       {
         id: block.id,
-        v: hash(block.text + attachments, block.draft ? 1 : 0),
+        v: hash(block.text + attachments + (mark?.label ?? ""), block.draft ? 1 : 0),
         k: "userBubble",
         runs: [{ t: attachments + block.text, s: "user" }],
+        ...(mark ? { sub: [{ t: mark.label, s: mark.failed ? "trailFailed" : "meta" }] satisfies TextRun[] } : {}),
         status: block.draft ? "draft" : undefined,
         gap: 20,
-        a11y: `You said: ${block.text}`,
+        a11y: `You said: ${block.text}${mark ? `. ${mark.label}` : ""}`,
       },
+      // The bubble has no buttons; a failed send gets a row that offers
+      // Retry and Discard.
+      ...(mark?.failed
+        ? [
+            {
+              id: `${block.id}:outbox`,
+              v: hash(mark.failed.text),
+              k: "thinkingRow",
+              runs: [
+                { t: `${mark.failed.text} `, s: "trailFailed" },
+                { t: "Retry · Discard", s: "trailTarget", chip: 1 },
+              ],
+              actions: [{ id: `${OUTBOX_ACTION}${mark.failed.commandId}`, label: "", variant: "secondary" }],
+              gap: 0,
+              a11y: `${mark.failed.text} Retry or discard`,
+            } satisfies RowSpec,
+          ]
+        : []),
+      // The host's draft (11 §11.16): its footer's Send and Remove.
+      ...(block.draft && !mark
+        ? [
+            {
+              id: `${block.id}:draft`,
+              v: 1,
+              k: "thinkingRow",
+              runs: [
+                { t: "Draft ", s: "trailVerb" },
+                { t: "Send · Remove", s: "trailTarget", chip: 1 },
+              ],
+              actions: [{ id: `${DRAFT_ACTION}${block.id}`, label: "", variant: "secondary" }],
+              gap: 0,
+              a11y: "Draft. Send or remove",
+            } satisfies RowSpec,
+          ]
+        : []),
+      // Images open in a sheet (attachments.read); the native view has no
+      // image rows yet.
+      ...images.map(
+        (image, index): RowSpec => ({
+          id: `${block.id}:image:${image.id}`,
+          v: hash(image.name, index),
+          k: "thinkingRow",
+          runs: [
+            { t: "Image ", s: "trailVerb" },
+            { t: image.name, s: "trailTarget", chip: 2 },
+          ],
+          actions: [{ id: `${ATTACHMENT_ACTION}${image.id}`, label: "", variant: "secondary" }],
+          gap: index ? 0 : 4,
+          a11y: `Image attachment ${image.name}`,
+        }),
+      ),
     ];
   });
 }
@@ -83,6 +154,7 @@ function trailRow(block: Block, cwd: string | undefined, last: boolean): RowSpec
       k: "thinkingRow",
       runs: [{ t: summary, s: "reasoning" }],
       anim: { pulse: !!block.streaming },
+      actions: [{ id: TOOL_ACTION, label: "", variant: "secondary" }],
       gap: 0,
     };
   }
@@ -106,7 +178,7 @@ function trailRow(block: Block, cwd: string | undefined, last: boolean): RowSpec
     runs,
     last,
     status: state,
-    actions: [{ id: "tool", label: "", variant: "secondary" }],
+    actions: [{ id: TOOL_ACTION, label: "", variant: "secondary" }],
     a11y: label,
   };
 }
@@ -140,6 +212,23 @@ function approvalRow(block: Block, cwd: string | undefined, sending: boolean): R
 function itemRows(item: TurnItem, options: RowOptions): RowSpec[] {
   if (item.type === "block") {
     const block = item.block;
+    const buildable = !block.streaming && !!block.text.trim() && block.plan?.status !== "building" && block.plan?.status !== "built";
+    if (block.role === "plan" && options.canBuild && buildable)
+      return [
+        ...memo(block, `md:${block.text.length}`, () => markdownRows(block.text, block.id)),
+        {
+          id: `${block.id}:build`,
+          v: 1,
+          k: "thinkingRow",
+          runs: [
+            { t: "Build ", s: "trailVerb" },
+            { t: "this plan", s: "trailTarget", chip: 1 },
+          ],
+          actions: [{ id: `${BUILD_ACTION}${block.id}`, label: "", variant: "primary" }],
+          gap: 6,
+          a11y: "Build this plan",
+        },
+      ];
     if (block.role === "assistant" || block.role === "plan" || block.role === "tasks")
       return memo(block, `md:${block.text.length}`, () => markdownRows(block.text, block.id));
     if (block.role === "system" && isNoticeBlock(block))
@@ -159,7 +248,7 @@ function itemRows(item: TurnItem, options: RowOptions): RowSpec[] {
 function turnRows(turn: Block[], live: boolean, options: RowOptions): RowSpec[] {
   const rows: RowSpec[] = [];
   const user = turn[0]?.role === "user" ? turn[0] : undefined;
-  if (user) rows.push(...userRows(user));
+  if (user) rows.push(...userRows(user, options.pending?.get(user.id)));
   const rest = user ? turn.slice(1) : turn;
   const items = groupTurnItems(rest, { settled: !live });
   const fold = live ? undefined : foldableWork(items);
@@ -195,11 +284,18 @@ const turnCache = new WeakMap<Block, { blocks: Block[]; key: string; rows: RowSp
 export function buildRows(blocks: Block[], options: RowOptions): RowSpec[] {
   const turns = groupTurns(blocks);
   const rows: RowSpec[] = [];
-  if (options.hasOlder) rows.push({ id: "older", v: 1, k: "loadOlder", label: "Load earlier messages" });
+  if (options.hasOlder)
+    rows.push({
+      id: "older",
+      v: options.loadingOlder ? 2 : 1,
+      k: "loadOlder",
+      label: options.loadingOlder ? "Loading earlier messages…" : "Load earlier messages",
+    });
   turns.forEach((turn, index) => {
     const live = options.live && index === turns.length - 1;
     const head = turn[0];
-    const key = `${live}|${options.open.has(`${head?.id}:fold`)}|${[...(options.sending ?? [])].join(",")}`;
+    const mark = head ? options.pending?.get(head.id) : undefined;
+    const key = `${live}|${options.open.has(`${head?.id}:fold`)}|${[...(options.sending ?? [])].join(",")}|${mark?.label ?? ""}|${mark?.failed?.text ?? ""}|${!!options.canBuild}`;
     const cached = head ? turnCache.get(head) : undefined;
     if (cached && cached.key === key && cached.blocks.length === turn.length && cached.blocks.every((block, i) => block === turn[i])) {
       rows.push(...cached.rows);

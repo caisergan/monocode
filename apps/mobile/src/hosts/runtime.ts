@@ -8,9 +8,11 @@ import {
   isPairingWelcome,
   type Channel,
   type KeyPair,
+  type Presence,
   type Welcome,
 } from "@monocode/channel";
 import type { InboxList, SyncWindow, WatchSet } from "@monocode/core/wire";
+import { randomUUID } from "expo-crypto";
 import { race } from "./connect";
 import { connectDemo } from "@/demo/demoHost";
 import { HandshakeCounter, saveHostRecord } from "./secrets";
@@ -20,20 +22,32 @@ const PING_MS = 15_000;
 const REQUEST_WAIT_MS = 15_000;
 const BACKOFF = [1_000, 2_000, 4_000, 8_000, 16_000, 30_000];
 const LINGER_MS = 30_000;
+/** How long a backgrounding app keeps its channel for work in flight. */
+const BACKGROUND_GRACE_MS = 4_000;
+
+/** Work to finish before a backgrounding host says bye (the outbox flush). */
+let backgroundHold: ((env: string) => Promise<unknown> | undefined) | undefined;
+
+export function setBackgroundHold(hold: (env: string) => Promise<unknown> | undefined): void {
+  backgroundHold = hold;
+}
 
 export type SessionInterest = {
   /** What the phone holds now; sent with every watch.set. */
   current: () => { revision?: number; window: SyncWindow };
 };
 
-type RuntimeEvent =
+export type RuntimeEvent =
   | { type: "state"; state: HostConnState }
   | { type: "evt"; name: string; data: unknown }
-  | { type: "inbox"; inbox: InboxList };
+  /** `cached` until the first `inbox.list` of this launch. */
+  | { type: "inbox"; inbox: InboxList; cached: boolean };
 
 export class HostRuntime {
   state: HostConnState = { kind: "idle" };
   inbox?: InboxList;
+  /** The inbox came from the cache and hasn't been fetched yet. */
+  inboxCached = false;
   private channel?: Channel;
   private counter: HandshakeCounter;
   private listeners = new Set<(event: RuntimeEvent) => void>();
@@ -45,9 +59,12 @@ export class HostRuntime {
   private disposed = false;
   private preferred?: string;
   private inboxWatchers = 0;
+  private projects = new Map<string, number>();
   private sessions = new Map<string, { interest: SessionInterest; count: number; linger?: ReturnType<typeof setTimeout> }>();
   private watchTimer?: ReturnType<typeof setTimeout>;
   private inboxLoading?: Promise<void>;
+  private presence: Presence = { visible: true };
+  private backgrounded = 0;
 
   constructor(
     public record: HostRecord,
@@ -58,6 +75,12 @@ export class HostRuntime {
 
   get env(): string {
     return this.record.env;
+  }
+
+  /** A capability from the last welcome (06 §6.4), checked once per call
+   * site rather than per request. */
+  has(capability: string): boolean {
+    return !!this.record.lastWelcome?.capabilities.includes(capability);
   }
 
   subscribe(listener: (event: RuntimeEvent) => void): () => void {
@@ -165,7 +188,7 @@ export class HostRuntime {
     });
     clearInterval(this.ping);
     this.ping = setInterval(() => {
-      channel.ping({ visible: true }).catch(() => channel.close(4000, "ping timeout"));
+      channel.ping(this.presence).catch(() => channel.close(4000, "ping timeout"));
     }, PING_MS);
     this.sendWatch();
     if (this.inboxWatchers > 0) void this.refreshInbox();
@@ -183,8 +206,9 @@ export class HostRuntime {
     this.emit({ type: "evt", name, data });
   }
 
-  /** Reads wait up to 15 s for a channel, then fail with `offline`. */
-  async request<T>(method: string, params?: Record<string, unknown>, timeoutMs?: number): Promise<T> {
+  /** Reads wait up to 15 s for a channel, then fail with `offline`. `key` is
+   * the envelope's idempotency key for mutating methods (06 §6.8). */
+  async request<T>(method: string, params?: Record<string, unknown>, timeoutMs?: number, options: { key?: string } = {}): Promise<T> {
     if (!this.channel) {
       this.connect();
       await new Promise<void>((resolve, reject) => {
@@ -199,7 +223,19 @@ export class HostRuntime {
         this.waiters.add(wake);
       });
     }
-    return this.channel!.request<T>(method, params, { timeoutMs });
+    return this.channel!.request<T>(method, params, { timeoutMs, ...(options.key ? { key: options.key } : {}) });
+  }
+
+  /** Who is looking at what (08 §8.3): sent in pings, and at once through
+   * `presence.update` when the host has it. */
+  setPresence(presence: Presence): void {
+    if (presence.visible === this.presence.visible && presence.focusedSessionId === this.presence.focusedSessionId) return;
+    this.presence = presence;
+    // Superseded by the next ping, so never retried; keyed when the host can.
+    if (this.channel && this.has("presence"))
+      this.channel
+        .request("presence.update", presence as Record<string, unknown>, this.has("mutations.idempotent") ? { key: randomUUID() } : {})
+        .catch(() => undefined);
   }
 
   // ── Watch ────────────────────────────────────────────────────────────────
@@ -238,6 +274,22 @@ export class HostRuntime {
     };
   }
 
+  /** `project.sessions` events for one project while any screen shows it. */
+  watchProject(projectId: string): () => void {
+    this.projects.set(projectId, (this.projects.get(projectId) ?? 0) + 1);
+    this.scheduleWatch(true);
+    this.connect();
+    let stopped = false;
+    return () => {
+      if (stopped) return;
+      stopped = true;
+      const count = (this.projects.get(projectId) ?? 1) - 1;
+      if (count > 0) this.projects.set(projectId, count);
+      else this.projects.delete(projectId);
+      this.scheduleWatch();
+    };
+  }
+
   /** Re-sends the watch, e.g. after loading older history moved the anchor. */
   refreshWatch(): void {
     this.scheduleWatch(true);
@@ -252,6 +304,7 @@ export class HostRuntime {
     if (!this.channel) return;
     const watch: WatchSet = {
       inbox: this.inboxWatchers > 0,
+      projects: [...this.projects.keys()].slice(-64),
       sessions: [...this.sessions.entries()].slice(-8).map(([id, entry]) => {
         const current = entry.interest.current();
         return {
@@ -270,7 +323,8 @@ export class HostRuntime {
     this.inboxLoading = this.request<InboxList>("inbox.list", { limit: 200 })
       .then((inbox) => {
         this.inbox = inbox;
-        this.emit({ type: "inbox", inbox });
+        this.inboxCached = false;
+        this.emit({ type: "inbox", inbox, cached: false });
       })
       .catch(() => undefined)
       .finally(() => {
@@ -279,24 +333,46 @@ export class HostRuntime {
     return this.inboxLoading;
   }
 
+  /** Paints the cached inbox until the first fetch replaces it. */
+  seedInbox(inbox: InboxList): void {
+    if (this.inbox) return;
+    this.inbox = inbox;
+    this.inboxCached = true;
+    this.emit({ type: "inbox", inbox, cached: true });
+  }
+
   // ── Lifecycle ────────────────────────────────────────────────────────────
 
   onForeground(): void {
+    this.backgrounded += 1;
     if (this.state.kind === "blocked") return;
     if (this.channel) {
-      this.channel.ping({ visible: true }, 2_000).catch(() => this.channel?.close(4000, "verify failed"));
+      this.channel.ping(this.presence, 2_000).catch(() => this.channel?.close(4000, "verify failed"));
     } else {
       this.attempt = 0;
       this.connect();
     }
   }
 
+  /** Says bye, after letting queued commands go out for a few seconds
+   * (12 §12.8 background flush). */
   onBackground(): void {
     clearTimeout(this.retry);
-    this.channel?.sayBye("background");
-    this.channel = undefined;
-    clearInterval(this.ping);
-    this.setState({ kind: "idle" });
+    const token = ++this.backgrounded;
+    const hold = this.channel ? backgroundHold?.(this.env) : undefined;
+    const close = () => {
+      // Back in the foreground meanwhile: keep the channel.
+      if (token !== this.backgrounded) return;
+      this.channel?.sayBye("background");
+      this.channel = undefined;
+      clearInterval(this.ping);
+      this.setState({ kind: "idle" });
+    };
+    if (!hold) {
+      close();
+      return;
+    }
+    void Promise.race([hold.catch(() => undefined), new Promise((resolve) => setTimeout(resolve, BACKGROUND_GRACE_MS))]).then(close);
   }
 
   dispose(): void {

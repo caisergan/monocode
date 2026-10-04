@@ -18,6 +18,7 @@ mod inbox_media;
 mod jira;
 mod linear;
 mod link_preview;
+mod local_host;
 #[cfg(target_os = "macos")]
 mod macos;
 #[cfg(target_os = "macos")]
@@ -228,6 +229,7 @@ pub fn run() {
         .manage(harness::HarnessHost::new())
         .manage(pty::PtyHost::new())
         .manage(remote::RemoteConnections::default())
+        .manage(local_host::LocalHost::default())
         .manage(window_transfer::WindowTransferState::new())
         .setup(|app| {
             harness::reap_orphaned_harness_processes();
@@ -268,6 +270,15 @@ pub fn run() {
             remote::remote_ssh_poll,
             remote::remote_ssh_answer,
             remote::remote_ssh_cancel,
+            local_host::local_host_status,
+            local_host::local_host_setup,
+            local_host::local_host_update,
+            local_host::local_host_restart,
+            local_host::local_host_remove,
+            local_host::local_host_start,
+            local_host::local_host_doctor,
+            local_host::local_host_poll,
+            local_host::local_host_cancel,
             control::control_enable,
             control::control_disable,
             control::control_reply,

@@ -2,7 +2,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import { basename, isAbsolute } from "node:path";
-import { renameHostWorktreeBranch, resolveHostWorktree } from "./git-worktrees";
+import {
+  ensureHostWorktree,
+  renameHostWorktreeBranch,
+  resolveHostWorktree,
+} from "./git-worktrees";
 import {
   applyHarnessEvent,
   stopStreaming,
@@ -19,19 +23,54 @@ import {
   canReplaceSessionTitle,
   formatSessionTitle,
   titleFromPrompt,
+  type Attachment,
+  type Block,
+  type QueuedMessage,
   type Session,
 } from "../src/features/sessions/model/session";
+import {
+  canDispatchQueuedHead,
+  dequeueQueuedMessage,
+  queuedHead,
+} from "../src/features/sessions/model/messageQueue";
 import { namedWorktreeBranch } from "../src/features/source-control/model/worktrees";
 import {
   isRemoteProvider,
+  type CreateInitial,
+  type CreateWorktree,
   type HostCommand,
   type HostSession,
   type CommandReceipt,
   type RemoteProvider,
+  type TurnOutcome,
 } from "../src/features/connections/model/protocol";
 import type { HostProvider } from "./providers";
 import { HostStore } from "./store";
 import { parseRemoteAttachments, resolveAttachments } from "./attachments";
+import { HostError } from "./errors";
+
+/** Bounds a session snapshot; the desktop's composer has no practical limit. */
+const MAX_QUEUED = 100;
+
+/** Hashes the parsed command, so retries match however the client ordered keys. */
+const commandSignature = (command: HostCommand) =>
+  createHash("sha256").update(JSON.stringify(command)).digest("hex");
+
+/** The temporary branch of a `worktree: {mode: "new"}` create. Derived from
+ * the command id so a retried create finds the same worktree. */
+export const createWorktreeBranch = (commandId: string) =>
+  `mc/${createHash("sha256").update(commandId).digest("hex").slice(0, 8)}`;
+
+type Turn = {
+  /** The user block id: a command id, or a queued message id. */
+  id: string;
+  text: string;
+  compact?: boolean;
+  attachments: Attachment[];
+  intent?: "default" | "plan" | "build";
+  /** A reviewed plan this turn builds. */
+  plan?: Block;
+};
 
 // Streamed output is written in batches. Anything a user may need to act on
 // (approvals, questions, errors, completion) is written immediately.
@@ -74,6 +113,52 @@ function modelSettings(value: unknown): Record<string, string> {
   return Object.fromEntries(entries) as Record<string, string>;
 }
 
+/** A message body: text, or empty text when files carry the message. */
+function prompt(value: unknown, attachments: number): string {
+  if (
+    typeof value !== "string" ||
+    value.length > 256_000 ||
+    value.includes("\0") ||
+    (!value.trim() && attachments === 0)
+  )
+    throw new Error("Invalid prompt");
+  return value;
+}
+
+/** `default` or `plan`: a queued or initial message cannot build a plan. */
+function messageIntent(value: unknown): { intent?: "default" | "plan" } {
+  if (value === undefined) return {};
+  if (value !== "default" && value !== "plan")
+    throw new Error("Invalid turn intent");
+  return { intent: value };
+}
+
+function parseWorktree(value: unknown): CreateWorktree {
+  const v = value as Record<string, unknown> | null;
+  if (!v || typeof v !== "object" || Array.isArray(v))
+    throw new Error("Invalid worktree");
+  if (v.mode === "current") return { mode: "current" };
+  if (v.mode === "existing")
+    return { mode: "existing", cwd: text(v.cwd, "working copy", 4096) };
+  if (v.mode === "new")
+    return v.base === undefined
+      ? { mode: "new" }
+      : { mode: "new", base: text(v.base, "worktree base", 255) };
+  throw new Error("Invalid worktree");
+}
+
+function parseInitial(value: unknown): CreateInitial {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("Invalid initial message");
+  const v = value as Record<string, unknown>;
+  const attachments = parseRemoteAttachments(v.attachments);
+  return {
+    text: prompt(v.text, attachments.length),
+    ...(attachments.length ? { attachments } : {}),
+    ...messageIntent(v.intent),
+  };
+}
+
 export function parseCommand(input: unknown): HostCommand {
   if (!input || typeof input !== "object" || Array.isArray(input))
     throw new Error("Invalid command");
@@ -92,6 +177,13 @@ export function parseCommand(input: unknown): HostCommand {
         !/^mc\/[a-z0-9]{8}$/.test(v.autoWorktreeBranch))
     )
       throw new Error("Invalid automatically created worktree branch");
+    const worktree =
+      v.worktree === undefined ? undefined : parseWorktree(v.worktree);
+    if (
+      worktree &&
+      (v.worktreeCwd !== undefined || v.autoWorktreeBranch !== undefined)
+    )
+      throw new Error("Invalid worktree: send worktree or worktreeCwd, not both");
     return {
       type: "create",
       commandId,
@@ -108,9 +200,47 @@ export function parseCommand(input: unknown): HostCommand {
         ? { modelSettings: modelSettings(v.modelSettings) }
         : {}),
       runtimeMode: v.runtimeMode as Session["runtimeMode"],
+      ...(worktree ? { worktree } : {}),
+      ...(v.initial !== undefined ? { initial: parseInitial(v.initial) } : {}),
     };
   }
   const sessionId = text(v.sessionId, "session ID");
+  if (v.type === "queue") {
+    const attachments = parseRemoteAttachments(v.attachments);
+    return {
+      type: "queue",
+      commandId,
+      sessionId,
+      text: prompt(v.text, attachments.length),
+      ...(attachments.length ? { attachments } : {}),
+      ...messageIntent(v.intent),
+    };
+  }
+  if (v.type === "unqueue")
+    return {
+      type: "unqueue",
+      commandId,
+      sessionId,
+      queuedId: text(v.queuedId, "queued message ID"),
+    };
+  if (v.type === "resumeQueue")
+    return { type: "resumeQueue", commandId, sessionId };
+  if (v.type === "editQueued") {
+    // Empty text is allowed when the item has files; checked against the item.
+    if (
+      typeof v.text !== "string" ||
+      v.text.length > 256_000 ||
+      v.text.includes("\0")
+    )
+      throw new Error("Invalid prompt");
+    return {
+      type: "editQueued",
+      commandId,
+      sessionId,
+      queuedId: text(v.queuedId, "queued message ID"),
+      text: v.text,
+    };
+  }
   if (v.type === "configure") {
     if (!RUNTIME_MODES.includes(v.runtimeMode as never))
       throw new Error("Invalid permission mode");
@@ -146,8 +276,17 @@ export function parseCommand(input: unknown): HostCommand {
       (v.type !== "send" || v.intent !== "build")
     )
       throw new Error("Invalid plan build");
+    // Key order is part of the receipt signature; keep it stable.
+    if (v.type === "draft")
+      return {
+        type: "draft",
+        commandId,
+        sessionId,
+        text: v.text,
+        ...(attachments.length ? { attachments } : {}),
+      };
     return {
-      type: v.type,
+      type: "send",
       commandId,
       sessionId,
       text: v.text,
@@ -173,6 +312,14 @@ export function parseCommand(input: unknown): HostCommand {
   const runId = text(v.runId, "run ID");
   if (v.type === "cancel")
     return { type: "cancel", commandId, sessionId, runId };
+  if (v.type === "steer")
+    return {
+      type: "steer",
+      commandId,
+      sessionId,
+      queuedId: text(v.queuedId, "queued message ID"),
+      runId,
+    };
   if (!Number.isSafeInteger(v.requestId) || Number(v.requestId) < 0)
     throw new Error("Invalid request ID");
   const requestId = Number(v.requestId);
@@ -243,11 +390,32 @@ export function parseCommand(input: unknown): HostCommand {
   throw new Error("Unsupported command");
 }
 
+/** The provider reported an error during the last turn. */
+function lastTurnFailed(blocks: readonly Block[]): boolean {
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    if (blocks[i].notice === "error") return true;
+    if (blocks[i].role === "user" && !blocks[i].draft) return false;
+  }
+  return false;
+}
+
 export class HostEngine {
   private switchingProjects = new Set<string>();
   private running = new Map<
     string,
-    { runId: string; done: Promise<void>; cancelled: boolean; persistenceFailed: boolean }
+    {
+      runId: string;
+      done: Promise<void>;
+      cancelled: boolean;
+      persistenceFailed: boolean;
+      /** Set by `steer`: send this queued message next, without pausing. */
+      steer?: string;
+    }
+  >();
+  /** Creates still making their worktree, so a duplicate waits for the first. */
+  private inflight = new Map<
+    string,
+    { signature: string; receipt: Promise<CommandReceipt> }
   >();
   /** Running sessions, including streamed events not yet written to disk. */
   private live = new Map<
@@ -414,11 +582,54 @@ export class HostEngine {
   command(raw: unknown): CommandReceipt {
     if (this.closing) throw new Error("Host is stopping");
     const command = parseCommand(raw);
-    const signature = createHash("sha256")
-      .update(JSON.stringify(command))
-      .digest("hex");
+    return this.execute(command, commandSignature(command));
+  }
+
+  /** `command()` for creates that first make a worktree (spec 09 §9.6).
+   * Every other command runs synchronously, as through `command()`. */
+  async commandAsync(raw: unknown): Promise<CommandReceipt> {
+    if (this.closing) throw new Error("Host is stopping");
+    const command = parseCommand(raw);
+    const signature = commandSignature(command);
+    if (command.type !== "create" || command.worktree?.mode !== "new")
+      return this.execute(command, signature);
     const previous = this.store.receipt(command.commandId, signature);
     if (previous) return previous;
+    const pending = this.inflight.get(command.commandId);
+    if (pending) {
+      if (pending.signature !== signature)
+        throw new Error("Command ID was already used with a different payload");
+      return pending.receipt;
+    }
+    const base = command.worktree.base ?? "HEAD";
+    const receipt = (async () => {
+      const project = this.store.project(command.projectId);
+      if (this.switchingProjects.has(project.id))
+        throw new Error("Wait for the branch switch to finish");
+      this.provider(command.harness);
+      const branch = createWorktreeBranch(command.commandId);
+      // A retry after a crash finds the worktree (or just the branch) the
+      // first attempt made, instead of failing on it or making a second one.
+      const tree = await ensureHostWorktree(project.cwd, branch, base);
+      if (this.closing) throw new Error("Host is stopping");
+      return this.execute(command, signature, { cwd: tree.path, branch });
+    })().finally(() => this.inflight.delete(command.commandId));
+    this.inflight.set(command.commandId, { signature, receipt });
+    return receipt;
+  }
+
+  private execute(
+    command: HostCommand,
+    signature: string,
+    worktree?: { cwd: string; branch: string },
+  ): CommandReceipt {
+    const previous = this.store.receipt(command.commandId, signature);
+    if (previous) return previous;
+    if (command.type === "create" && command.worktree?.mode === "new" && !worktree)
+      throw new HostError(
+        "invalid_params",
+        "Invalid worktree: a new worktree is created through commands.dispatch",
+      );
     // Commands apply to the latest state, including batched stream output.
     if (command.type !== "create") this.flush(command.sessionId);
     let effect: ((saved: HostSession) => void) | undefined;
@@ -429,11 +640,19 @@ export class HostEngine {
         if (this.switchingProjects.has(project.id))
           throw new Error("Wait for the branch switch to finish");
         this.provider(command.harness);
-        const cwd = resolveHostWorktree(project.cwd, command.worktreeCwd);
+        const cwd =
+          worktree?.cwd ??
+          resolveHostWorktree(
+            project.cwd,
+            command.worktree?.mode === "existing"
+              ? command.worktree.cwd
+              : command.worktreeCwd,
+          );
+        const autoWorktreeBranch = worktree?.branch ?? command.autoWorktreeBranch;
         const now = Date.now();
         value = {
           projectId: project.id,
-          autoWorktreeBranch: command.autoWorktreeBranch,
+          autoWorktreeBranch,
           revision: 0,
           status: "idle",
           createdAt: now,
@@ -446,12 +665,24 @@ export class HostEngine {
             runtimeMode: command.runtimeMode,
             modelSettings: command.modelSettings ?? {},
             title: "New remote session",
-            ...(command.autoWorktreeBranch
-              ? { branch: command.autoWorktreeBranch, worktreeCwd: cwd }
+            ...(autoWorktreeBranch
+              ? { branch: autoWorktreeBranch, worktreeCwd: cwd }
               : {}),
             blocks: [],
           },
         };
+        // The first message is part of the create: one receipt, and no
+        // moment in which the session exists without it.
+        if (command.initial)
+          ({ value, effect } = this.beginTurn(value, {
+            id: command.commandId,
+            text: command.initial.text,
+            attachments: resolveAttachments(
+              this.store,
+              command.initial.attachments ?? [],
+            ),
+            intent: command.initial.intent,
+          }));
       } else {
         value = this.store.session(command.sessionId);
         if (
@@ -460,6 +691,12 @@ export class HostEngine {
         )
           throw new Error("Wait for the branch switch to finish");
         const provider = this.provider(value.session.harness);
+        const queued = value.session.queuedMessages ?? [];
+        const findQueued = (id: string) => {
+          const item = queued.find((message) => message.id === id);
+          if (!item) throw new HostError("not_found", "Queued message not found");
+          return item;
+        };
         if (command.type === "configure") {
           if (value.status === "running")
             throw new Error(
@@ -524,10 +761,6 @@ export class HostEngine {
         } else if (command.type === "send" || command.type === "compact") {
           if (value.status === "running")
             throw new Error("This session is already running");
-          if (command.type === "compact" && !provider.compact)
-            throw new Error(
-              "Context compaction is unavailable for this provider",
-            );
           const draft =
             command.type === "send" && command.draftBlockId
               ? value.session.blocks.find(
@@ -553,96 +786,118 @@ export class HostEngine {
               plan.plan?.status === "built")
           )
             throw new Error("Plan is not ready to build");
-          const attachments =
-            command.type === "send"
-              ? (draft?.attachments ??
-                resolveAttachments(this.store, command.attachments ?? []))
-              : [];
-          const runId = randomUUID();
-          const firstTurn =
-            command.type === "send" &&
-            !value.session.blocks.some((block) => !block.draft);
-          const placeholderTitle =
-            value.session.title === "New remote session" ||
-            canReplaceSessionTitle(
-              value.session.title,
-              value.session.harness,
-              HARNESS_LABEL[value.session.harness],
-            );
-          const model = resolveModel(
-            value.session.harness,
-            value.session.model,
+          ({ value, effect } = this.beginTurn(value, {
+            id: command.commandId,
+            text: command.type === "send" ? command.text : "/compact",
+            compact: command.type === "compact",
+            attachments:
+              command.type === "send"
+                ? (draft?.attachments ??
+                  resolveAttachments(this.store, command.attachments ?? []))
+                : [],
+            intent: command.type === "send" ? command.intent : undefined,
+            plan,
+          }));
+        } else if (command.type === "queue") {
+          const attachments = resolveAttachments(
+            this.store,
+            command.attachments ?? [],
           );
+          if (
+            value.status !== "running" &&
+            !queued.length &&
+            !value.session.usageLimit
+          )
+            // Nothing to wait for: exactly a send.
+            ({ value, effect } = this.beginTurn(value, {
+              id: command.commandId,
+              text: command.text,
+              attachments,
+              intent: command.intent,
+            }));
+          else {
+            if (queued.length >= MAX_QUEUED)
+              throw new HostError(
+                "invalid_params",
+                `Invalid queue: at most ${MAX_QUEUED} messages can wait`,
+              );
+            value = {
+              ...value,
+              session: {
+                ...value.session,
+                queuedMessages: [
+                  ...queued,
+                  {
+                    id: command.commandId,
+                    text: command.text,
+                    attachments,
+                    ...(command.intent ? { intent: command.intent } : {}),
+                  },
+                ],
+              },
+            };
+          }
+        } else if (command.type === "unqueue") {
+          findQueued(command.queuedId);
           value = {
             ...value,
-            status: "running",
-            runId,
+            session: dequeueQueuedMessage(value.session, command.queuedId),
+          };
+        } else if (command.type === "editQueued") {
+          const item = findQueued(command.queuedId);
+          if (!command.text.trim() && !item.attachments.length)
+            throw new Error("Invalid prompt");
+          value = {
+            ...value,
             session: {
               ...value.session,
-              busy: true,
-              pendingQuestion: undefined,
-              title:
-                firstTurn && placeholderTitle
-                  ? titleFromPrompt(
-                      command.text,
-                      value.session.harness,
-                      attachments,
-                    )
-                  : value.session.title,
-              blocks: [
-                ...value.session.blocks
-                  .filter((block) => !block.draft)
-                  .map((block) =>
-                    block === plan
-                      ? {
-                          ...block,
-                          plan: {
-                            ...(block.plan ?? { status: "ready" as const }),
-                            status: "building" as const,
-                            approvedText: block.text,
-                          },
-                        }
-                      : block,
-                  ),
-                {
-                  id: command.commandId,
-                  role: "user",
-                  text: command.type === "compact" ? "/compact" : command.text,
-                  ...(attachments.length ? { attachments } : {}),
-                  startedAt: Date.now(),
-                  turnModel: {
-                    harness: value.session.harness,
-                    id: value.session.model,
-                    name:
-                      model.id === value.session.model
-                        ? model.name
-                        : value.session.model.replace(/^[^:]+:/, ""),
-                  },
-                },
-              ],
+              queuedMessages: queued.map((message) =>
+                message === item ? { ...message, text: command.text } : message,
+              ),
             },
           };
-          effect = (saved) => {
-            this.run(
-              saved,
-              command.type === "compact" ? null : command.text,
-              command.type === "send" ? command.intent : undefined,
-              attachments,
-            );
-            if (firstTurn && command.type === "send") {
-              this.generateFirstTurnNames(
-                saved,
-                command.text,
-                placeholderTitle,
-              );
-            }
+        } else if (command.type === "resumeQueue") {
+          // Resuming is the person's explicit go-ahead, so it also lifts the
+          // hold a usage limit put on the queue.
+          value = {
+            ...value,
+            session: {
+              ...value.session,
+              usageLimit: undefined,
+              queueStatus: queued.length ? "active" : undefined,
+            },
           };
+          const head = queuedHead(value.session);
+          if (value.status !== "running" && head && canDispatchQueuedHead(value.session))
+            ({ value, effect } = this.beginQueued(value, head));
         } else {
           if (value.runId !== command.runId || value.status !== "running")
             throw new Error(
               "This request belongs to a finished or replaced turn",
             );
-          if (command.type === "cancel") {
+          if (command.type === "steer") {
+            const item = findQueued(command.queuedId);
+            value = {
+              ...value,
+              session: {
+                ...value.session,
+                queuedMessages: [
+                  item,
+                  ...queued.filter((message) => message !== item),
+                ],
+              },
+            };
+            effect = () => {
+              const active = this.running.get(command.sessionId);
+              if (active) {
+                active.cancelled = true;
+                active.steer = command.queuedId;
+              }
+              void provider
+                .cancel(command.sessionId)
+                .catch(() => provider.stop(command.sessionId));
+            };
+          } else if (command.type === "cancel") {
             effect = () => {
               const active = this.running.get(command.sessionId);
               if (active) active.cancelled = true;
@@ -709,6 +964,149 @@ export class HostEngine {
     // A receipt means durable host acceptance, not provider completion.
     effect?.(saved);
     return receipt;
+  }
+
+  /** Starts a turn whose user block is `turn.id`. Returns the running value
+   * to save and the effect that runs the provider once it is saved. */
+  private beginTurn(
+    value: HostSession,
+    turn: Turn,
+  ): { value: HostSession; effect: (saved: HostSession) => void } {
+    if (this.switchingProjects.has(value.projectId))
+      throw new Error("Wait for the branch switch to finish");
+    const provider = this.provider(value.session.harness);
+    if (value.status === "running")
+      throw new Error("This session is already running");
+    if (turn.compact && !provider.compact)
+      throw new Error("Context compaction is unavailable for this provider");
+    const runId = randomUUID();
+    const firstTurn =
+      !turn.compact && !value.session.blocks.some((block) => !block.draft);
+    const placeholderTitle =
+      value.session.title === "New remote session" ||
+      canReplaceSessionTitle(
+        value.session.title,
+        value.session.harness,
+        HARNESS_LABEL[value.session.harness],
+      );
+    const model = resolveModel(value.session.harness, value.session.model);
+    const { plan } = turn;
+    return {
+      value: {
+        ...value,
+        status: "running",
+        runId,
+        session: {
+          ...value.session,
+          busy: true,
+          pendingQuestion: undefined,
+          // A new turn is the next attempt; the desktop clears it on send too.
+          usageLimit: undefined,
+          title:
+            firstTurn && placeholderTitle
+              ? titleFromPrompt(
+                  turn.text,
+                  value.session.harness,
+                  turn.attachments,
+                )
+              : value.session.title,
+          blocks: [
+            ...value.session.blocks
+              .filter((block) => !block.draft)
+              .map((block) =>
+                block === plan
+                  ? {
+                      ...block,
+                      plan: {
+                        ...(block.plan ?? { status: "ready" as const }),
+                        status: "building" as const,
+                        approvedText: block.text,
+                      },
+                    }
+                  : block,
+              ),
+            {
+              id: turn.id,
+              role: "user",
+              text: turn.text,
+              ...(turn.attachments.length
+                ? { attachments: turn.attachments }
+                : {}),
+              startedAt: Date.now(),
+              turnModel: {
+                harness: value.session.harness,
+                id: value.session.model,
+                name:
+                  model.id === value.session.model
+                    ? model.name
+                    : value.session.model.replace(/^[^:]+:/, ""),
+              },
+            },
+          ],
+        },
+      },
+      effect: (saved) => {
+        this.run(
+          saved,
+          turn.compact ? null : turn.text,
+          turn.intent,
+          turn.attachments,
+        );
+        if (firstTurn)
+          this.generateFirstTurnNames(saved, turn.text, placeholderTitle);
+      },
+    };
+  }
+
+  /** Sends a queued message as the next turn; its id becomes the block id. */
+  private beginQueued(value: HostSession, item: QueuedMessage) {
+    return this.beginTurn(
+      { ...value, session: dequeueQueuedMessage(value.session, item.id) },
+      {
+        id: item.id,
+        text: item.text,
+        attachments: item.attachments,
+        intent:
+          item.intent === "plan" || item.intent === "default"
+            ? item.intent
+            : undefined,
+      },
+    );
+  }
+
+  /** After a turn settles: send the steered message, or the queue head when
+   * the queue may run. A failure pauses the queue instead of looping. */
+  private dispatchQueued(id: string, steer?: string): void {
+    try {
+      const value = this.store.session(id);
+      if (value.status === "running") return;
+      // A steered message removed meanwhile falls back to the normal rules.
+      const item =
+        (steer && value.session.queuedMessages?.find((message) => message.id === steer)) ||
+        (canDispatchQueuedHead(value.session) ? queuedHead(value.session) : undefined);
+      if (!item) return;
+      const started = this.beginQueued(value, item);
+      const saved = this.save(started.value, {
+        type: "queue.dispatched",
+        queuedId: item.id,
+      });
+      started.effect(saved);
+    } catch (error) {
+      console.error(
+        "Could not send the next queued message:",
+        error instanceof Error ? error.message : error,
+      );
+      try {
+        const latest = this.store.session(id);
+        if (latest.status !== "running" && latest.session.queuedMessages?.length)
+          this.save(
+            { ...latest, session: { ...latest.session, queueStatus: "paused" } },
+            { type: "queue.paused" },
+          );
+      } catch {
+        /* the session is gone */
+      }
+    }
   }
 
   private generateFirstTurnNames(
@@ -783,7 +1181,13 @@ export class HostEngine {
   ): void {
     const { session, runId } = value;
     const provider = this.provider(session.harness);
-    const active = { runId: runId!, done: Promise.resolve(), cancelled: false, persistenceFailed: false };
+    const active: {
+      runId: string;
+      done: Promise<void>;
+      cancelled: boolean;
+      persistenceFailed: boolean;
+      steer?: string;
+    } = { runId: runId!, done: Promise.resolve(), cancelled: false, persistenceFailed: false };
     this.running.set(session.id, active);
     this.live.set(session.id, { value, events: [] });
     active.done = Promise.resolve()
@@ -826,7 +1230,8 @@ export class HostEngine {
         this.flush(session.id);
         this.live.delete(session.id);
         const latest = this.store.session(session.id);
-        if (latest.runId === runId) {
+        const current = latest.runId === runId;
+        if (current) {
           const message = this.closing
             ? "Host stopped. This turn was interrupted."
             : active.persistenceFailed
@@ -839,6 +1244,8 @@ export class HostEngine {
               latest,
               this.closing || active.persistenceFailed ? "interrupted" : "idle",
               message,
+              undefined,
+              { cancelled: active.cancelled, error, steer: !!active.steer },
             ),
             { type: "settled", error, cancelled: active.cancelled },
           );
@@ -849,6 +1256,8 @@ export class HostEngine {
         const persisted = this.store.session(session.id).session;
         if (persisted.providerSessionId)
           provider.bind(session.id, persisted.providerSessionId, persisted.cwd);
+        // Only after the running entry is gone: the next turn registers its own.
+        if (current && !this.closing) this.dispatchQueued(session.id, active.steer);
       })
       .catch((error) => {
         clearTimeout(this.live.get(session.id)?.timer);
@@ -878,11 +1287,14 @@ export class HostEngine {
       );
   }
 
+  /** The settled value: streaming stopped, the outcome recorded (spec 09
+   * §9.6), and the queue paused unless the turn simply finished. */
   private settled(
     value: HostSession,
     status: "idle" | "interrupted",
     message?: string,
     endedAt = Date.now(),
+    turn: { cancelled?: boolean; error?: string; steer?: boolean } = {},
   ): HostSession {
     const stopped = stopStreaming(value.session, endedAt);
     const session = {
@@ -902,6 +1314,13 @@ export class HostEngine {
           : block,
       ),
     };
+    const outcome: TurnOutcome = turn.cancelled
+      ? "cancelled"
+      : turn.error || lastTurnFailed(session.blocks)
+        ? "failed"
+        : status === "interrupted"
+          ? "interrupted"
+          : "finished";
     if (message)
       session.blocks.push({
         id: randomUUID(),
@@ -909,11 +1328,24 @@ export class HostEngine {
         text: message,
         streaming: false,
       });
-    return { ...value, status, session };
+    // A steer's cancel hands over to the steered message instead.
+    const pause =
+      !turn.steer &&
+      !!session.queuedMessages?.length &&
+      (outcome !== "finished" || !!session.usageLimit);
+    return {
+      ...value,
+      status,
+      finishedAt: endedAt,
+      lastTurnOutcome: outcome,
+      session: pause ? { ...session, queueStatus: "paused" } : session,
+    };
   }
 
   async close(): Promise<void> {
     this.closing = true;
+    // Creates still making a worktree stop before saving; a retry reuses it.
+    await Promise.allSettled([...this.inflight.values()].map((entry) => entry.receipt));
     for (const timer of this.retryTimers.values()) clearTimeout(timer);
     this.retryTimers.clear();
     await Promise.all(

@@ -11,17 +11,22 @@ import {
   Palette,
   SlidersHorizontal,
   Sparkles,
-  type IconComponent,
 } from "../../shared/ui/icons";
 import { useLockOverscroll } from "../../shared/hooks/useLockOverscroll";
+import { Phone } from "../../features/mobile/ui/icons";
 import {
   settingsSectionsByGroup,
   type SettingsSectionId,
 } from "../../features/settings/model/settings";
+import type { ComponentType } from "react";
 
-const SECTION_ICONS: Record<SettingsSectionId, IconComponent> = {
+/** A chrome icon, or a feature glyph drawn like one (Mobile's phone). */
+type RailIcon = ComponentType<{ className?: string; strokeWidth?: number }>;
+
+const SECTION_ICONS: Record<SettingsSectionId, RailIcon> = {
   general: SlidersHorizontal,
   connections: Internet,
+  mobile: Phone,
   appearance: Palette,
   keybindings: Keyboard,
   chat: MessageSquare,
@@ -81,7 +86,7 @@ function NavRow({
   onClick,
 }: {
   label: string;
-  icon: IconComponent;
+  icon: RailIcon;
   active?: boolean;
   onClick: () => void;
 }) {

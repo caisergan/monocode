@@ -1,12 +1,16 @@
 // Paired hosts and their runtimes. Created at startup from the Keychain,
-// outside React; screens read the stores and call runtimes directly.
+// outside React; screens read the stores and call runtimes directly. The
+// Agents data paints from the cache, then refreshes (12 §12.7).
 
+import { randomUUID } from "expo-crypto";
 import { AppState } from "react-native";
 import { compareInboxItems } from "@monocode/core/summary";
 import type { KeyPair } from "@monocode/channel";
 import { HostRuntime } from "./runtime";
 import { generateKeyPair } from "@monocode/channel";
 import { DEMO_ENV, demoRecord } from "@/demo/demoHost";
+import { runMutation } from "@/outbox/mutate";
+import { openCache } from "@/storage/cache";
 import { deleteHost, loadDeviceKey, loadHostRecords, saveDeviceKey, saveHostRecord } from "./secrets";
 import { useAgents, useHosts, type AgentRow } from "./store";
 import type { HostRecord } from "./types";
@@ -27,7 +31,11 @@ function mergeAgents(): void {
   for (const host of runtimes.values())
     for (const item of host.inbox?.items ?? []) items.push({ ...item, env: host.env, hostLabel: host.record.label });
   items.sort(compareInboxItems);
-  useAgents.setState({ items, needsInput: items.filter((item) => item.needsInput).length });
+  useAgents.setState({
+    items,
+    needsInput: items.filter((item) => item.needsInput).length,
+    cached: [...runtimes.values()].some((host) => host.inboxCached),
+  });
 }
 
 function publishHosts(): void {
@@ -43,7 +51,12 @@ function add(record: HostRecord, key: KeyPair): HostRuntime {
   const host = new HostRuntime(record, key);
   host.subscribe((event) => {
     if (event.type === "state") publishHosts();
-    if (event.type === "inbox") mergeAgents();
+    if (event.type === "inbox") {
+      mergeAgents();
+      // The demo machine is never persisted.
+      if (!event.cached && !host.record.demo)
+        void openCache().then((cache) => cache?.saveInbox(host.env, event.inbox).catch(() => undefined));
+    }
   });
   runtimes.set(record.env, host);
   return host;
@@ -57,6 +70,7 @@ export function startHosts(): Promise<void> {
     }
     publishHosts();
     for (const host of runtimes.values()) host.connect();
+    void restoreCache();
     AppState.addEventListener("change", (state) => {
       for (const host of runtimes.values()) {
         if (state === "active") host.onForeground();
@@ -65,6 +79,20 @@ export function startHosts(): Promise<void> {
     });
   })();
   return started;
+}
+
+/** Drops cache rows of hosts that are gone, then paints each host's last
+ * inbox until its first fetch arrives. */
+async function restoreCache(): Promise<void> {
+  const cache = await openCache();
+  if (!cache) return;
+  const paired = [...runtimes.values()].filter((host) => !host.record.demo).map((host) => host.env);
+  await cache.purgeHostsExcept(paired).catch(() => undefined);
+  for (const host of runtimes.values()) {
+    if (host.record.demo) continue;
+    const cached = await cache.loadInbox(host.env).catch(() => undefined);
+    if (cached) host.seedInbox(cached.inbox);
+  }
 }
 
 /** Called when pairing finishes: remember the host and connect. */
@@ -97,11 +125,18 @@ export async function removeHost(env: string): Promise<void> {
     return;
   }
   if (host) {
-    await host.request("devices.revokeSelf", {}, 5_000).catch(() => undefined);
+    // One keyed try: removal never waits on an unreachable machine.
+    await runMutation({
+      idempotent: host.has("mutations.idempotent"),
+      request: (key) => host.request("devices.revokeSelf", {}, 5_000, { key }),
+      newKey: randomUUID,
+      retryForMs: 0,
+    }).catch(() => undefined);
     host.dispose();
     runtimes.delete(env);
   }
   await deleteHost(env);
+  await openCache().then((cache) => cache?.purgeHost(env).catch(() => undefined));
   publishHosts();
   mergeAgents();
 }

@@ -604,6 +604,7 @@ describe("settings navigation", () => {
     expect(groups.flatMap((group) => group.sections.map((s) => s.id))).toEqual([
       "general",
       "connections",
+      "mobile",
       "appearance",
       "keybindings",
       "chat",
@@ -666,6 +667,20 @@ describe("settings search", () => {
         label: "Skills",
       },
     ]);
+  });
+
+  it("finds This computer, pairing and devices on the Mobile page", () => {
+    for (const [query, settingId] of [
+      ["this computer", "this-computer"],
+      ["pair a phone", "pair-phone"],
+      ["revoke", "mobile-devices"],
+    ]) {
+      expect(searchSettings(query)[0], query).toMatchObject({
+        section: "mobile",
+        sectionLabel: "Mobile",
+        settingId,
+      });
+    }
   });
 
   it("caps the result list", () => {

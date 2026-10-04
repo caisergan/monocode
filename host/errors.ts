@@ -31,7 +31,11 @@ const MESSAGE_CODES: [RegExp, ChannelErrorCode, boolean][] = [
   [/^Host is stopping/, "host_stopping", true],
   [/^Session transfer expired/, "transfer_expired", true],
   [/^Device credential is invalid or revoked/, "unauthorized", false],
-  [/^(Invalid|Unsupported command|Session does not belong|No session changes|Choose an absolute|Project path is not)/, "invalid_params", false],
+  [
+    /^(Invalid|Unsupported command|Session does not belong|No session changes|Choose an absolute|Choose an available|Enter a valid branch name|Project path is not)/,
+    "invalid_params",
+    false,
+  ],
 ];
 
 export function toHostError(error: unknown): HostError {

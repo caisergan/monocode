@@ -57,6 +57,20 @@ const config: ExpoConfig = {
       { backgroundColor: "#141414", image: "./assets/images/splash-icon.png", imageWidth: 76 },
     ],
     ["expo-build-properties", { ios: { deploymentTarget: "16.4" } }],
+    // The cache is encrypted with SQLCipher (12 §12.6); needs a new dev build.
+    ["expo-sqlite", { useSQLCipher: true }],
+    // Photo attachments (12 §12.10). PHPicker needs no library permission;
+    // the string covers older paths. No video, so no microphone.
+    [
+      "expo-image-picker",
+      {
+        photosPermission: "Choose photos to send to agents.",
+        cameraPermission: "Scan pairing codes and take photos to send to agents.",
+        microphonePermission: false,
+      },
+    ],
+    // The outbox retries unsent commands in a background task (12 §12.8).
+    "expo-background-task",
   ],
   experiments: { typedRoutes: true, reactCompiler: true },
   extra: { publisher: publisher.track },

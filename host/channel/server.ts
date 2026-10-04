@@ -97,6 +97,19 @@ export class ChannelServer {
       });
   }
 
+  /** `config.changed`: rebinds every listener with the new settings, then
+   * sends each device channel `evt host.config` with the resulting view. */
+  async reconfigure(view: () => unknown): Promise<void> {
+    if (this.stopping) return;
+    // Open channels keep their sockets; only the listening sockets close.
+    for (const server of this.servers.values()) server.close();
+    this.servers.clear();
+    await this.rescan();
+    const data = view();
+    for (const channel of this.channels)
+      if (channel.state === "device") channel.send({ t: "evt", e: "host.config", d: data }, 1);
+  }
+
   private listen(address: string, port: number): Promise<void> {
     const server = createServer((request, response) => {
       response.writeHead(request.headers.origin ? 403 : 404).end();

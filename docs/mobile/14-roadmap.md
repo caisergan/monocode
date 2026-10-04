@@ -74,19 +74,45 @@ section.
 ### As built (2026-10-04, branch `feat/mobile-app`)
 
 The owner dropped the "small upstream PRs" constraint, so foundations and the first
-slice landed together. What exists, and what is still unverified:
+slice landed together. A second pass the same day added the host write path, the
+app's read and write paths (M2, M3) and the desktop changes from spec 10. What
+exists, and what is still unverified:
 
 | Item | Status |
 |---|---|
 | S6 monorepo | Root `workspaces: ["packages/*"]`. **Deviation:** `apps/mobile` is its own npm project (React Native 0.86 pins React 19.2.3; the desktop has 19.2.8). Metro watches `packages/` and `src/` and resolves their deps from the app. `@tauri-apps/*` is stubbed in Metro, because the desktop model reaches `platform/tauri/fs.ts` through `terminalTab.ts`. Both apps type-check; desktop `npm test` is green |
 | `@monocode/channel` | Noise IK passes the cacophony and snow vectors. Records, priorities, bounded deflate, offers, proof, confirmation code, channel client. Push crypto not written yet |
-| `@monocode/core` | **Deviation:** re-exports the desktop model in place (moving files is deferred while other branches edit them), so its type-check still needs DOM types. Adds wire types, windowing, truncation, inbox summaries |
+| `@monocode/core` | **Deviation:** re-exports the desktop model in place (moving files is deferred while other branches edit them), so its type-check still needs DOM types. Adds wire types (now also `HostConfigView`, `HostConfigPatch`, `PresenceUpdate` and `DoctorReport`), windowing, truncation, inbox summaries. `HostWorktree`, the question helpers and `buildPlanPrompt` are not exported yet, so the app keeps local copies |
 | `@monocode/design` | Palette, tokens, type scale; parity test against `index.css`, `appearance.ts`, `tabGroups.ts` passes |
-| Host | `rpc.ts` dispatcher with error codes (HTTP contract unchanged, 93 old tests green), migration 1, keys, config, pairing manager, direct listener on LAN and Tailscale (:3775), watch with coalesced deltas, `inbox.list`, `sessions.page`, windowed sync, `pair --mobile` with terminal QR. In-memory and real-process end-to-end tests pass. Not done: relay, push, presence, mutation receipts, queue commands, `doctor` |
-| S11 native transcript | `MonoTranscriptView` (Swift): CoreText measuring on a layout queue, tail-first cold layout then parallel, exact prefix sums, recycled layers rasterised off the main thread, anchoring, follow-tail, taps, fold, approval buttons, in-app fling benchmark writing `Documents/benchmarks/latest.json`. **Compiles and signs for device; the benchmark has not been run on the iPhone 13 yet**, so the go/no-go is open |
-| App | Agents, Settings, pairing (QR, paste, links, 6-digit confirm), session screen (native transcript, send, stop, approve), minimal New session, transcript lab, demo machine over a real Noise channel in memory. **Not yet run on a device or simulator by hand** |
+| Host (M1, M2) | `rpc.ts` dispatcher with error codes (HTTP contract unchanged, 93 old tests green), migration 1, keys, config, pairing manager, direct listener on LAN and Tailscale (:3775), watch with coalesced deltas, `inbox.list`, `sessions.page`, `sessions.blocks` and `sessions.block`, windowed sync, `pair --mobile` with terminal QR. In-memory and real-process end-to-end tests pass |
+| Host (M3) | Commands through `engine.commandAsync`: `queue`, `unqueue`, `editQueued`, `steer`, `resumeQueue`, and `create` with `initial` and `worktree`. Mutation receipts keyed by the envelope key, with hourly housekeeping. `finishedAt` and `lastTurnOutcome` on sessions. `host.config.get` and `set`, `presence.update`, and `doctor --json` (`DoctorReport`). New capabilities: `mutations.idempotent`, `sessions.queue`, `sessions.createWithPrompt`, `presence`, `host.config`; `environment.describe` reports `hostVersion`. Not done: relay, push |
+| Host deviations | Starting a turn clears `usageLimit`. The queue pauses only when it has items, and `steer` still sends while it is paused. An error-notice block counts as a failed turn. Reusing a receipt key from another device or for another method is a conflict. A new worktree is created only through `commands.dispatch`. At most 100 queued items, with only the `default` and `plan` intents. Config validation is stricter than 06 §6.5. An enabled relay reports `error`, since there is no relay client yet. `doctor` has no firewall, relay, push or clock checks. Presence is tracked per device |
+| S11 native transcript | `MonoTranscriptView` (Swift): CoreText measuring on a layout queue, tail-first cold layout then parallel, exact prefix sums, recycled layers rasterised off the main thread, anchoring, follow-tail, taps, fold, approval buttons, in-app fling benchmark writing `Documents/benchmarks/latest.json`. **Compiles and signs for device; the benchmark has not been run on the iPhone 13 yet**, so the go/no-go is open. Unchanged by the second pass |
+| App (M1) | Agents, Settings, pairing (QR, paste, links, 6-digit confirm), session screen (native transcript, send, stop, approve), transcript lab, demo machine over a real Noise channel in memory |
+| App read path (M2) | Encrypted cache in `src/storage` (expo-sqlite with SQLCipher, forward-only migrations). Projects tab and Project screen with paged session cards (FlashList). Older history, tool sheet, attachment sheet. The demo host serves all of it. ESLint with `eslint-config-expo` |
+| App write path (M3) | The outbox (`src/outbox`) sends every command. Other mutating methods are keyed and retried for 60 s when the host lists `mutations.idempotent`. Composer with top bar, chips, + sheet, slash picker, model and access sheets, queue card and usage tab. Approval banner, question form, Plan and Build, Stop, `/compact`. New session with `initial` and `worktree`. Drafts (cache migration 2). **Not built:** the docking animation, Plan burst, dot grid, coloured `/plan` text, context ring, file picking, hardware-keyboard Enter |
+| App deviations | Backgrounding keeps the channel for 4 s while the outbox flushes, then relies on `expo-background-task`, which runs after 15 minutes at the earliest. Failed and draft bubbles get an action row under them, so the Swift transcript did not change |
+| Desktop (spec 10) | `local_host.rs`: "This computer" setup, update, restart, remove, start and doctor. `StoredMachine.local` and the §10.5 allow-list additions in `remote.rs`. `MONOCODE_HOST_LOCAL_ARCHIVE` in both bootstrap scripts. A fork can build with `MONOCODE_RELEASE_BASE` so its desktop installs the fork's host packages. `src/features/mobile`: the Mobile settings page (its own section after Connections), the pairing dialog, the device list, presence calls. "This computer" projects get the phone badge, and the machine picker lists it first. **Not built:** the firewall fix (§10.5), the scheduled host update on launch and every 6 h (updates run only from the Mobile page), and the project menu's "Open on this computer's host" |
+| Validation | Desktop `npm test` (4,501 passed, 13 skipped) and `tsc`; `npm run test:host` (172 passed, 5 skipped); `npm run check:rust` (fmt, clippy, 616 tests). App: `tsc`, `expo lint` with no errors or warnings, 89 unit tests, 10 transcript tests. The app's commands and methods, the demo host and the desktop allow-list were checked against the host |
 | S4 | `NSAllowsLocalNetworking` plus a `ts.net` exception are configured; not yet verified on the phone |
 | Markdown | **Deviation:** a small block/inline parser instead of remark (S1 not run). Code highlighting not done |
+
+**Still unverified:** the S11 benchmark on the iPhone 13, the camera scan, LAN and
+Tailscale access from the phone, and every new screen and sheet. None of them has run
+on a device or simulator. The same goes for the background flush, SQLCipher on device,
+and a real "This computer" setup run. The app needs a new dev build first: expo-sqlite
+(SQLCipher), expo-image-picker, expo-image-manipulator, expo-background-task and
+expo-task-manager are native.
+
+**Not started:** relay, push, Android, app lock, and Changes and commit.
+
+**Follow-ups:**
+
+- The firewall fix (§10.5) and scheduled host updates on the desktop.
+- Export `HostWorktree`, the question helpers and `buildPlanPrompt` from
+  `@monocode/core`, so the app can drop its copies.
+- Host contract gaps: no question-in-progress signal, no host clock offset, and no
+  context usage on the wire.
 
 ## 14.3 Risks
 

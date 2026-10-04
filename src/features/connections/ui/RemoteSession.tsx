@@ -21,6 +21,8 @@ import { notifyGitChanged } from "../../../platform/tauri/fs";
 import type { Worktree } from "../../source-control/model/worktrees";
 import { useProjectBranchesState } from "../../source-control/hooks/useProjectBranches";
 import { registerRemoteSessionActions } from "../model/remoteSessionActions";
+import { useHostPresence } from "../../mobile/model/presence";
+import { supportsPresence } from "../../mobile/model/mobile";
 import {
   clearPendingRemoteCommand,
   loadRemoteSession,
@@ -309,6 +311,12 @@ function ConnectedRemoteSession({
     online,
   );
   const activeSessionId = hostSession?.id ?? sessionId;
+  // The host holds back phone notifications for the session shown here.
+  const focusPresence = useHostPresence(
+    machine.id,
+    activeSessionId,
+    visible && supportsPresence(descriptor),
+  );
   const hasHostBlock = (commandId: string) =>
     !!hostSession?.blocks.some((block) => block.id === commandId);
   const unseenActive =
@@ -1269,7 +1277,11 @@ function ConnectedRemoteSession({
 
   return (
     <ModelSourceContext.Provider value={modelSource}>
-      <div className="relative flex h-full min-h-0 flex-col">
+      <div
+        className="relative flex h-full min-h-0 flex-col"
+        onPointerDownCapture={focusPresence}
+        onFocusCapture={focusPresence}
+      >
         {notice ? (
           <div
             role={error ? "alert" : "status"}

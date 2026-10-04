@@ -46,7 +46,8 @@ export function sessionAttention(value: HostSession): Attention {
   if (value.status === "running") return null;
   const turn = lastTurn(session.blocks);
   if (!turn.some((block) => block.role === "user" && !block.draft)) return null;
-  if (turn.some((block) => block.notice === "error")) return "error";
+  // A thrown provider error leaves a plain system block; the outcome has it.
+  if (turn.some((block) => block.notice === "error") || value.lastTurnOutcome === "failed") return "error";
   if (value.status === "interrupted") return "interrupted";
   if (session.usageLimit) return "usage_limit";
   return "finished";
