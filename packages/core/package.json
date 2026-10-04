@@ -1,0 +1,11 @@
+{
+  "name": "@monocode/core",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Session model and wire types shared by the desktop, the host and the phone",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  }
+}
