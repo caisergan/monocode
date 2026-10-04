@@ -1,0 +1,11 @@
+{
+  "name": "@monocode/design",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MonoCode design tokens shared by the desktop and the phone, parity-tested against src/styles/index.css",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  }
+}
