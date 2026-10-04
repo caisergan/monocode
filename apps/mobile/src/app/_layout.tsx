@@ -36,6 +36,10 @@ export default function RootLayout() {
         <Stack.Screen name="new" options={{ title: "New session", presentation: "modal" }} />
         <Stack.Screen name="m/[env]/p/[projectId]" options={{ title: "" }} />
         <Stack.Screen name="m/[env]/s/[sessionId]" options={{ title: "" }} />
+        <Stack.Screen name="m/[env]/explorer" options={{ title: "" }} />
+        <Stack.Screen name="m/[env]/changes" options={{ title: "" }} />
+        <Stack.Screen name="m/[env]/file" options={{ title: "" }} />
+        <Stack.Screen name="m/[env]/diff" options={{ title: "" }} />
         <Stack.Screen
           name="m/[env]/s/[sessionId]/tool"
           options={{ presentation: "formSheet", sheetAllowedDetents: [0.5, 1], sheetGrabberVisible: true, headerShown: false }}

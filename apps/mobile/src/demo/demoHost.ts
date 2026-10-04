@@ -11,6 +11,12 @@
 // Prompts steer the demo: "question" asks one, "plan" or Plan mode writes a
 // plan, "usage limit" stops at a limit, "fail:" is refused for good, and
 // "flaky" fails once with a retryable error.
+//
+// Explorer and Changes read in-memory repositories (demoRepo.ts). Staging,
+// commit and push are refused, as by the host, while a session in the
+// project runs (a turn waiting for approval keeps running). A commit message with "busy" is
+// refused the same way, as if a session had just started on the host, and
+// one with "flaky" fails once with a retryable error, so the key is reused.
 
 import {
   FRAME_HANDSHAKE_1,
@@ -36,6 +42,7 @@ import type { InboxItem, SessionListItem, WatchSet } from "@monocode/core/wire";
 import { hello } from "@/hosts/connect";
 import type { Connected } from "@/hosts/connect";
 import { answer, fixtureSession } from "@/transcript/fixtures";
+import { DemoRepo } from "./demoRepo";
 
 export const DEMO_ENV = "00000000-0000-4000-8000-00000000d3e0";
 const BOOT = "demo-boot";
@@ -121,10 +128,15 @@ class DemoHost {
   private sent = new Map<string, number>();
   private projectTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private receipts = new Map<string, { signature: string; receipt: Promise<CommandReceipt> }>();
-  private mutations = new Map<string, { signature: string; result: unknown }>();
+  private mutations = new Map<string, { signature: string; result: Promise<unknown> }>();
   private uploads = new Map<string, { size: number; data: string }>();
   private worktrees = new Map<string, { path: string; branch: string }[]>();
   private flaky = new Set<string>();
+  /** One repository per working copy path. */
+  private repos = new Map<string, DemoRepo>();
+  private flakyGit = new Set<string>();
+  /** Projects with a `git.action` running (the host's `withIdleProject`). */
+  private gitBusy = new Set<string>();
   private runs = 0;
   private requests = 100;
 
@@ -737,19 +749,105 @@ class DemoHost {
     return { commandId: command.commandId, sessionId: id, revision: this.sessions.get(id)!.value.revision };
   }
 
+  // ── Workspace ─────────────────────────────────────────────────────────────
+
+  /** The repository behind `projectId` and `cwd`, as `resolveHostWorktree`
+   * picks it: the project folder, or one of its worktrees. */
+  private repo(params: Record<string, unknown>): DemoRepo {
+    const project = this.projects.find((p) => p.id === params.projectId);
+    if (!project) throw new DemoError("not_found", "Project is not registered on this machine");
+    const cwd = typeof params.cwd === "string" && params.cwd ? params.cwd : project.cwd;
+    const tree = cwd === project.cwd ? undefined : (this.worktrees.get(project.id) ?? []).find((item) => item.path === cwd);
+    if (cwd !== project.cwd && !tree) throw new DemoError("invalid_params", "Choose an available worktree of this project");
+    let repo = this.repos.get(cwd);
+    if (!repo) {
+      repo = tree
+        ? tree.branch === "fix/auth"
+          ? DemoRepo.fixAuthWorktree()
+          : DemoRepo.newWorktree(tree.branch)
+        : project.id === "p-app"
+          ? DemoRepo.mainCheckout()
+          : project.id === "p-api"
+            ? DemoRepo.api()
+            : DemoRepo.newWorktree("main");
+      this.repos.set(cwd, repo);
+    }
+    return repo;
+  }
+
+  /** `git.action`, inside the host's `withIdleProject`: one at a time per
+   * project, and none while a session in it runs. */
+  private async gitAction(params: Record<string, unknown>): Promise<null> {
+    const repo = this.repo(params);
+    const projectId = String(params.projectId);
+    if (this.gitBusy.has(projectId)) throw new DemoError("branch_switching", "A branch switch is already in progress", true);
+    const message = typeof params.message === "string" ? params.message : "";
+    const running = [...this.sessions.values()].some((entry) => entry.value.projectId === params.projectId && entry.value.status === "running");
+    if (running || /\bbusy\b/i.test(message)) throw new DemoError("session_busy", "Wait for running host sessions before switching branches");
+    if (/\bflaky\b/i.test(message) && !this.flakyGit.has(message)) {
+      this.flakyGit.add(message);
+      throw new DemoError("branch_switching", "Wait for the branch switch to finish", true);
+    }
+    this.gitBusy.add(projectId);
+    try {
+      await this.runGitAction(repo, params);
+    } finally {
+      this.gitBusy.delete(projectId);
+    }
+    return null;
+  }
+
+  private async runGitAction(repo: DemoRepo, params: Record<string, unknown>): Promise<void> {
+    const wait = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+    switch (params.action) {
+      case "stage":
+        await wait(150);
+        repo.stage(params.path);
+        break;
+      case "unstage":
+        await wait(150);
+        repo.unstage(params.path);
+        break;
+      case "stageAll":
+        await wait(250);
+        repo.stageAll();
+        break;
+      case "unstageAll":
+        await wait(250);
+        repo.unstageAll();
+        break;
+      case "commit":
+        await wait(400);
+        repo.commit(params.message);
+        break;
+      case "push":
+        // Pushing takes a while; the phone allows 120 s.
+        await wait(1_500);
+        repo.push();
+        break;
+      default:
+        throw new Error("Unsupported Git action");
+    }
+  }
+
   // ── Methods ───────────────────────────────────────────────────────────────
 
-  /** Mutating methods with an envelope key run once (06 §6.8). */
+  /** Mutating methods with an envelope key run once (06 §6.8). As in the
+   * host's receipts, a retry while the first run is in flight shares it,
+   * and failures are not kept. */
   async handle(method: string, params: Record<string, unknown>, key?: string): Promise<unknown> {
-    if (key && ["attachments.upload", "presence.update", "projects.open"].includes(method)) {
+    if (key && ["attachments.upload", "presence.update", "projects.open", "git.action"].includes(method)) {
       const signature = `${method}|${JSON.stringify(params)}`;
       const previous = this.mutations.get(key);
       if (previous) {
         if (previous.signature !== signature) throw new DemoError("idempotency_conflict", "Idempotency key was already used with a different request");
         return previous.result;
       }
-      const result = await this.call(method, params);
+      const result = this.call(method, params);
       this.mutations.set(key, { signature, result });
+      result.catch(() => {
+        if (this.mutations.get(key)?.result === result) this.mutations.delete(key);
+      });
       return result;
     }
     return this.call(method, params);
@@ -874,6 +972,18 @@ class DemoHost {
         const start = (offset / 3) * 4;
         return { data: image.data.slice(start, start + Math.ceil(bytes / 3) * 4), offset: offset + bytes, size: image.size };
       }
+      case "files.list":
+        return this.repo(params).list(params.path);
+      case "files.read":
+        return this.repo(params).read(params.path);
+      case "files.search":
+        return this.repo(params).search(params.query);
+      case "git.index":
+        return this.repo(params).status();
+      case "git.fileDiff":
+        return this.repo(params).fileDiff(params.path, params.staged === true);
+      case "git.action":
+        return this.gitAction(params);
       case "commands.dispatch":
         return this.dispatch(params as HostCommand);
       default:
@@ -917,6 +1027,12 @@ export async function connectDemo(deviceKey: KeyPair, n: number): Promise<Connec
           "sessions.draft",
           "git.worktrees",
           "git.branches",
+          "files.list",
+          "files.read",
+          "files.search",
+          "git.index",
+          "git.fileDiff",
+          "git.action",
           "mutations.idempotent",
           "sessions.queue",
           "sessions.createWithPrompt",
@@ -944,12 +1060,15 @@ export async function connectDemo(deviceKey: KeyPair, n: number): Promise<Connec
       .then((result) => reply.send({ t: "res", id: message.id, ok: true, r: result ?? null }, 0))
       .catch((error: unknown) => {
         const known = error instanceof DemoError ? error : undefined;
+        const text = (error as Error).message;
         reply.send(
           {
             t: "res",
             id: message.id,
             ok: false,
-            e: { code: known?.code ?? "internal", message: (error as Error).message, retryable: known?.retryable ?? false },
+            // A plain error gets the code the host's `toHostError` gives its
+            // message: the workspace's "Invalid …" refusals are invalid_params.
+            e: { code: known?.code ?? (/^Invalid/.test(text) ? "invalid_params" : "internal"), message: text, retryable: known?.retryable ?? false },
           },
           0,
         );

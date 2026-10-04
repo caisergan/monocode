@@ -60,11 +60,15 @@ export async function existingPath(root: string, input: unknown, allowRoot = fal
   return actual;
 }
 
-async function git(root: string, args: string[], maxBuffer = 4 * 1024 * 1024) {
+/** A push waits on the network. The phone gives `git.action` push 120 s
+ * (06 §6.4), so the host stops first and can still answer. */
+const PUSH_TIMEOUT_MS = 110_000;
+
+async function git(root: string, args: string[], maxBuffer = 4 * 1024 * 1024, timeout = 10_000) {
   return (
     await exec("git", ["-c", "core.pager=cat", ...args], {
       cwd: root,
-      timeout: 10_000,
+      timeout,
       maxBuffer,
       encoding: "utf8",
       env: { ...process.env, LC_ALL: "C" },
@@ -822,7 +826,7 @@ export async function hostGitAction(
       return;
     }
     case "push":
-      await git(root, ["push", "-u", "origin", "HEAD"]);
+      await git(root, ["push", "-u", "origin", "HEAD"], undefined, PUSH_TIMEOUT_MS);
       return;
     case "createPr": {
       const output = await exec("gh", ["pr", "create", "--fill"], {

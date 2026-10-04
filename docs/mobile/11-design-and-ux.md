@@ -969,6 +969,10 @@ menu, where they are scoped to the session's working copy.
 - **List:** "CHANGES" caption with a count pill. Rows: file-type icon, name (15 pt),
   directory (13 pt α .45), status letter at right (M amber, A or U emerald, D red, R
   accent), from `git.index`.
+- **Staging,** as on the desktop: "STAGED CHANGES" above "CHANGES" when something is
+  staged, Stage Changes or Unstage Changes on each row, and Stage All Changes or
+  Unstage All Changes on each caption. Like Commit, they are disabled while a session
+  in the project runs.
 - **Diff viewer** (`git.fileDiff`): the desktop unified diff, with rows 22 pt, hunk
   headers on `fill.hover`, mono 12 text, add and delete tints, Prev and Next file, and
   a wrap toggle.

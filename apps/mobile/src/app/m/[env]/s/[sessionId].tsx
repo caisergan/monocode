@@ -26,6 +26,7 @@ import { useFocusedSession } from "@/ui/focus";
 import { Icon } from "@/ui/icon";
 import { modelLabel } from "@/ui/SessionCard";
 import { transcriptTheme, useTokens } from "@/ui/theme";
+import { hostCan } from "@/workspace/ChangesPane";
 
 type Header = {
   title: string;
@@ -39,6 +40,8 @@ type Header = {
   question?: UserQuestionPrompt;
   branch?: string;
   worktree: boolean;
+  /** The session's working copy, for Explorer and Changes. */
+  cwd?: string;
 };
 
 /** An approval's buttons keep reading "Sending…" this long after the
@@ -67,6 +70,7 @@ function headerOf(value: HostSession | undefined, state: WindowState, previous: 
     question: session.pendingQuestion,
     branch: session.branch,
     worktree: !!session.worktreeCwd,
+    cwd: session.cwd,
   };
 }
 
@@ -376,6 +380,15 @@ export default function SessionScreen() {
     </View>
   );
 
+  // Explorer and Changes for this session's working copy (11 §11.20).
+  const openWorkspace = (screen: "explorer" | "changes") => {
+    if (!header.projectId) return;
+    router.push({
+      pathname: screen === "explorer" ? "/m/[env]/explorer" : "/m/[env]/changes",
+      params: { env, projectId: header.projectId, ...(header.cwd ? { cwd: header.cwd } : {}) },
+    });
+  };
+
   const title = header.title || (local ? "New session" : "Session");
   const subline = [modelLabel(config?.model), hostLabel].filter(Boolean).join(" · ");
   return (
@@ -395,6 +408,18 @@ export default function SessionScreen() {
           ),
         }}
       />
+      {sessionId && header.projectId ? (
+        <Stack.Toolbar placement="right">
+          <Stack.Toolbar.Menu icon="ellipsis" accessibilityLabel="Session menu">
+            <Stack.Toolbar.MenuAction icon="folder" hidden={!hostCan(env, "files.list")} onPress={() => openWorkspace("explorer")}>
+              Explorer
+            </Stack.Toolbar.MenuAction>
+            <Stack.Toolbar.MenuAction icon="plusminus" hidden={!hostCan(env, "git.index")} onPress={() => openWorkspace("changes")}>
+              Changes
+            </Stack.Toolbar.MenuAction>
+          </Stack.Toolbar.Menu>
+        </Stack.Toolbar>
+      ) : null}
       {notice || header.error ? (
         <NoticeBar text={(notice ?? header.error)!} action={{ label: "Dismiss", onPress: () => setNotice(undefined) }} />
       ) : failed ? (
