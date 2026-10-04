@@ -8,6 +8,10 @@ import { Sidebar } from "./Sidebar";
 import { loadSessionFolders } from "../../features/sessions/model/sessionFolders";
 import { useProjectDiffStats } from "../../features/source-control/hooks/useProjectDiffStats";
 import { copyText } from "../../platform/tauri/clipboard";
+import {
+  orchestrator,
+  type OrchestrationRun,
+} from "../../features/orchestration/model/orchestration";
 
 // Keep native services out of these menu/input interaction tests.
 vi.mock("../../features/source-control/hooks/useProjectDiffStats", () => ({
@@ -1020,6 +1024,93 @@ describe("sidebar orchestration card", () => {
     expect(
       card().querySelector('[data-orchestration-agent="worker"]'),
     ).not.toBeNull();
+  });
+
+  it("names the branch and worktree each agent works in", () => {
+    props.sessions[0].orchestration = {
+      status: "active",
+      live: true,
+      tasks: [
+        {
+          sessionId: "worker-a",
+          title: "Build settings",
+          harness: "codex",
+          model: "codex:test",
+          status: "running",
+          branch: "mc/orch-a1",
+          worktreeCwd: "/workspace/project-worktrees/mc-orch-a1",
+        },
+        {
+          sessionId: "worker-b",
+          title: "Check types",
+          harness: "codex",
+          model: "codex:test",
+          status: "queued",
+        },
+      ],
+    };
+    act(() => render());
+    const row = (id: string) =>
+      card().querySelector<HTMLElement>(`[data-orchestration-agent="${id}"]`)!;
+    act(() => row("worker-a").querySelector("button")!.click());
+    expect(
+      row("worker-a").querySelector('[title="Branch mc/orch-a1"]')
+        ?.textContent,
+    ).toBe("mc/orch-a1");
+    expect(
+      row("worker-a").querySelector(
+        '[title="Worktree /workspace/project-worktrees/mc-orch-a1"]',
+      )?.textContent,
+    ).toBe("mc-orch-a1");
+    // Queued work has no checkout yet, so it names none.
+    act(() => row("worker-b").querySelector("button")!.click());
+    expect(
+      row("worker-b").querySelector('[title^="Branch "], [title^="Worktree "]'),
+    ).toBeNull();
+  });
+
+  it("keeps Resume clickable inside the draggable card", () => {
+    props.onPrefetchSession = vi.fn();
+    props.sessions[0].orchestration = {
+      status: "paused",
+      live: true,
+      tasks: [
+        {
+          sessionId: "worker",
+          title: "Build settings",
+          harness: "codex",
+          model: "codex:test",
+          status: "interrupted",
+        },
+      ],
+    };
+    vi.spyOn(orchestrator, "snapshot").mockReturnValue([
+      {
+        leadId: "session-1",
+        status: "paused",
+        allowedHarnesses: ["codex"],
+        maxWorkers: 2,
+        tasks: [],
+      } as unknown as OrchestrationRun,
+    ]);
+    vi.spyOn(orchestrator, "resumeBlocker").mockReturnValue(undefined);
+    vi.spyOn(orchestrator, "resumeLeadBusy").mockReturnValue(false);
+    const start = vi.spyOn(orchestrator, "start").mockResolvedValue();
+    act(() => render());
+    const resume = Array.from(card().querySelectorAll("button")).find(
+      (button) => button.textContent === "Resume",
+    )!;
+    expect(resume.disabled).toBe(false);
+    // A press that reached the card would start its drag and pointer capture.
+    act(() => {
+      resume.dispatchEvent(
+        new MouseEvent("pointerdown", { bubbles: true, button: 0 }),
+      );
+    });
+    expect(props.onPrefetchSession).not.toHaveBeenCalled();
+    act(() => resume.click());
+    expect(start).toHaveBeenCalledExactlyOnceWith("session-1", ["codex"], 2);
+    expect(props.onSelectSession).not.toHaveBeenCalled();
   });
 
   it("opens the custom subagent tooltip immediately on hover", () => {

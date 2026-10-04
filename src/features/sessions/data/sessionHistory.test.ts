@@ -9,7 +9,10 @@ import {
 } from "./sessionHistory";
 import { newSession } from "../model/session";
 import type { SessionSummary } from "./sessionStore";
-import type { OrchestrationRun } from "../../orchestration/model/orchestration";
+import {
+  workspaceIdentity,
+  type OrchestrationRun,
+} from "../../orchestration/model/orchestration";
 
 function summary(id: string, cwd: string, updatedAt = 1): SessionSummary {
   return {
@@ -78,6 +81,39 @@ describe("historyWithLiveSessions", () => {
       status: "active",
       tasks: [{ sessionId: "worker-a" }, { sessionId: "worker-b" }],
     });
+  });
+
+  it("names each worker's own checkout in the live summary", () => {
+    const rows = historyWithLiveSessions(
+      [summary("lead", run.cwd)],
+      [],
+      run.cwd,
+      undefined,
+      [
+        {
+          ...run,
+          tasks: [
+            {
+              ...run.tasks[0],
+              workspace: workspaceIdentity(
+                run.cwd,
+                "/tmp/project-a-worktrees/mc-orch-a",
+                "mc/orch-a",
+              ),
+            },
+            // A shared worker writes in the lead's checkout: nothing to name.
+            { ...run.tasks[1], workspace: workspaceIdentity(run.cwd, run.cwd) },
+          ],
+        },
+      ],
+    );
+    const [own, shared] = rows[0].orchestration!.tasks;
+    expect(own).toMatchObject({
+      branch: "mc/orch-a",
+      worktreeCwd: "/tmp/project-a-worktrees/mc-orch-a",
+    });
+    expect(shared.branch).toBeUndefined();
+    expect(shared.worktreeCwd).toBeUndefined();
   });
 
   it("keeps ownership after restart, cache merges, and replacement runs", () => {

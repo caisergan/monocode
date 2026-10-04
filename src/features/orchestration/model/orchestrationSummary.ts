@@ -14,6 +14,9 @@ export type OrchestrationSummary = {
     needsInput?: boolean;
     /** Stopped by a usage limit; continues at the reset. */
     usageLimited?: boolean;
+    /** Where the worker writes, once it has a checkout of its own. */
+    branch?: string;
+    worktreeCwd?: string;
   }[];
 };
 
@@ -26,7 +29,7 @@ export function summarizeOrchestration(
     status: run.status,
     live: true,
     tasks: run.tasks.map(
-      ({ sessionId, title, harness, model, status, usageLimit }) => ({
+      ({ sessionId, title, harness, model, status, usageLimit, workspace }) => ({
         sessionId,
         title,
         harness,
@@ -35,6 +38,10 @@ export function summarizeOrchestration(
         needsInput:
           !!byId.get(sessionId) && sessionNeedsInput(byId.get(sessionId)!),
         ...(status === "running" && usageLimit ? { usageLimited: true } : {}),
+        ...(workspace?.branch ? { branch: workspace.branch } : {}),
+        ...(workspace?.kind === "worktree"
+          ? { worktreeCwd: workspace.checkoutCwd }
+          : {}),
       }),
     ),
   };
