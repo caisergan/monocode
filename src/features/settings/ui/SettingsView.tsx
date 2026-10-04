@@ -305,6 +305,7 @@ import {
   loadKeybindingOverrides,
   loadQuickComposerEnabled,
   loadQuickComposerShortcut,
+  loadResumeAfterUsageLimit,
   loadTabAnimationsEnabled,
   saveClaudeHooks,
   saveCloseToTray,
@@ -319,6 +320,7 @@ import {
   saveModelControls,
   saveNotesEnabled,
   saveKeybindingOverride,
+  saveResumeAfterUsageLimit,
   validateKeybindingShortcut,
   saveQuickComposerEnabled,
   saveQuickComposerShortcut,
@@ -940,6 +942,9 @@ function ChatPage() {
     useState<FollowUpBehavior>(loadFollowUpBehavior);
   const [modelControls, setModelControls] =
     useState<ModelControls>(loadModelControls);
+  const [resumeAfterUsageLimit, setResumeAfterUsageLimit] = useState(
+    loadResumeAfterUsageLimit,
+  );
   const [diffViewer, setDiffViewer] = useState<DiffViewer>(loadDiffViewer);
   const [formatOnSave, setFormatOnSave] = useState(loadFormatOnSave);
   const [composerRunner, setComposerRunner] = useState(loadComposerRunner);
@@ -975,6 +980,11 @@ function ChatPage() {
   const onModelControls = (next: ModelControls) => {
     saveModelControls(next);
     setModelControls(next);
+  };
+
+  const onResumeAfterUsageLimit = (next: boolean) => {
+    saveResumeAfterUsageLimit(next);
+    setResumeAfterUsageLimit(next);
   };
 
   const onDiffViewer = (next: DiffViewer) => {
@@ -1063,6 +1073,23 @@ function ChatPage() {
               { value: "beside", label: "Beside" },
             ]}
             onChange={onModelControls}
+          />
+        </Row>
+      </Group>
+
+      <Group
+        title="Usage limits"
+        description="What a session does when a provider's usage limit stops it."
+      >
+        <Row
+          id="resume-after-usage-limit"
+          label="Resume after usage limit"
+          description="Arm every session that hits a usage limit to continue on its own once the limit resets. Cancel it for one session from the limit notice above its composer."
+        >
+          <Toggle
+            label="Resume after usage limit"
+            on={resumeAfterUsageLimit}
+            onChange={onResumeAfterUsageLimit}
           />
         </Row>
       </Group>

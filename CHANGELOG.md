@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - What the agent writes in the terminal is read back into the session's history, so it appears in the sidebar and in search. Edits made in the terminal are not captured by MonoCode's per-session checkpoints; Source Control still shows them.
 - The session import sheet lists Codex conversations, and reads Claude conversations saved under a named provider account.
 - Claude Code sessions list Claude's own slash commands in the composer's `/` picker, next to MonoCode skills: `/advisor`, `/model`, `/context`, `/usage`, `/config` and whatever else the installed Claude Code reports, with their argument hints. A command is sent as typed and Claude's reply appears as the answer. `/model` and `/effort` also move the model picker to what Claude applied, so the next launch keeps it.
+- Settings → Chat → Usage limits adds **Resume after usage limit**. When on, a session that hits a provider usage limit is armed to continue on its own once the limit resets, without clicking **Resume at reset** first. The limit notice still cancels it for one session, and a limit whose reset has already passed is never armed.
 
 ## [0.7.0] - 2026-10-02
 

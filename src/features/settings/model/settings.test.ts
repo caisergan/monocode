@@ -30,7 +30,9 @@ import {
   keybindingPressed,
   matchCustomKeybinding,
   loadQuickComposerShortcut,
+  loadResumeAfterUsageLimit,
   loadTabAnimationsEnabled,
+  RESUME_AFTER_USAGE_LIMIT_DEFAULT,
   NOTES_ENABLED_DEFAULT,
   saveComposerRunner,
   saveAutosave,
@@ -46,6 +48,7 @@ import {
   saveKeybindingOverride,
   type KeybindingOverride,
   saveQuickComposerShortcut,
+  saveResumeAfterUsageLimit,
   saveTabAnimationsEnabled,
 } from "./settings";
 import { IS_MAC, MOD, SHIFT } from "../../../platform/tauri/platform";
@@ -111,6 +114,21 @@ function mockLocalStorage() {
     configurable: true,
   });
 }
+
+describe("resume after usage limit setting", () => {
+  beforeEach(mockLocalStorage);
+
+  it("defaults to off", () => {
+    expect(RESUME_AFTER_USAGE_LIMIT_DEFAULT).toBe(false);
+    expect(loadResumeAfterUsageLimit()).toBe(false);
+  });
+
+  it("persists an on switch", () => {
+    saveResumeAfterUsageLimit(true);
+    expect(localStorage.getItem("monocode.resumeAfterUsageLimit")).toBe("1");
+    expect(loadResumeAfterUsageLimit()).toBe(true);
+  });
+});
 
 describe("composer runner setting", () => {
   beforeEach(mockLocalStorage);

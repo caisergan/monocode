@@ -335,6 +335,12 @@ export const SETTINGS_INDEX: SettingsEntry[] = [
       "effort thinking reasoning fast service tier model picker composer",
   },
   {
+    id: "resume-after-usage-limit",
+    section: "chat",
+    label: "Resume after usage limit",
+    keywords: "rate limit quota reset continue auto resume arm wait",
+  },
+  {
     id: "composer-mascot",
     section: "chat",
     label: "Composer mascot",
@@ -545,6 +551,8 @@ const COMPOSER_RUNNER_KEY = "monocode.composerRunner";
 
 const FOLLOW_UP_BEHAVIOR_KEY = "monocode.followUpBehavior";
 
+const RESUME_AFTER_USAGE_LIMIT_KEY = "monocode.resumeAfterUsageLimit";
+
 const COMPOSER_EFFORT_VISIBLE_KEY = "monocode.composerEffortVisible";
 
 const MODEL_CONTROLS_KEY = "monocode.modelControls";
@@ -576,6 +584,19 @@ export function saveFollowUpBehavior(value: FollowUpBehavior) {
   } catch {
     // private mode / quota
   }
+}
+
+export const RESUME_AFTER_USAGE_LIMIT_DEFAULT = false;
+
+/** Arm every usage-limited session to continue once its limit resets. */
+export function loadResumeAfterUsageLimit(): boolean {
+  return (
+    readFlag(RESUME_AFTER_USAGE_LIMIT_KEY) ?? RESUME_AFTER_USAGE_LIMIT_DEFAULT
+  );
+}
+
+export function saveResumeAfterUsageLimit(value: boolean) {
+  writeFlag(RESUME_AFTER_USAGE_LIMIT_KEY, value);
 }
 
 export type FileTabMode = "pane" | "workspace";
