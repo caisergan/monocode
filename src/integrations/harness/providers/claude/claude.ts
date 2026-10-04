@@ -170,6 +170,12 @@ type Live = {
   turnResultSeen: boolean;
   /** Latest `rate_limit_event` refused requests; reported when the turn ends. */
   usageLimit: { resetsAt?: number } | null;
+  /**
+   * The window Claude last refused, kept across turns: Claude sends
+   * `rate_limit_event` only when the status changes, so a later refused turn
+   * says nothing but its text and this is still where its reset time lives.
+   */
+  refusedWindow: { resetsAt?: number } | null;
   cancelled: boolean;
   muteUpdates: boolean;
   turns: Promise<void>;
@@ -526,6 +532,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     claudeTasks,
     turnResultSeen: false,
     usageLimit: null,
+    refusedWindow: null,
     cancelled: false,
     muteUpdates: false,
     turns: Promise.resolve(),
@@ -762,6 +769,7 @@ function handleLine(sessionId: string, live: Live, line: string): void {
   }
   if (type === "rate_limit_event") {
     live.usageLimit = usageLimitFromRateLimitEvent(rec);
+    live.refusedWindow = live.usageLimit;
     return;
   }
   if (type === "conversation_reset") {
@@ -1128,6 +1136,15 @@ function settleInlineAgentTask(live: Live, toolUseId: string): void {
   syncBackgroundWait(live);
 }
 
+/** A reset already behind us belongs to an earlier window; look it up again. */
+function refusedWindowReset(
+  window: { resetsAt?: number } | null,
+): { resetsAt?: number } {
+  return window?.resetsAt != null && window.resetsAt > Date.now()
+    ? { resetsAt: window.resetsAt }
+    : {};
+}
+
 function handleResult(
   sessionId: string,
   live: Live,
@@ -1151,7 +1168,8 @@ function handleResult(
   // that ended in error was stopped by it.
   const turnErrored = rec.is_error === true || result.status === "failed";
   const usageLimit =
-    live.usageLimit ?? (isUsageLimitResult(rec) ? {} : null);
+    live.usageLimit ??
+    (isUsageLimitResult(rec) ? refusedWindowReset(live.refusedWindow) : null);
   live.usageLimit = null;
   if (usageLimit && turnErrored && !live.cancelled) {
     live.onEvent({ type: "usage.limited", ...usageLimit });

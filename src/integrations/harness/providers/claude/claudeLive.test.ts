@@ -874,6 +874,112 @@ describe("claude assistant message boundaries", () => {
   });
 });
 
+describe("claude usage limits", () => {
+  it("reports a limit Claude refuses again without a new rate limit event", async () => {
+    const resetsAt = Math.floor(Date.now() / 1000) + 3_600;
+    const limitText = "You've hit your session limit · resets 8am (Europe/Istanbul)";
+    const refuse = () =>
+      emit({
+        type: "result",
+        subtype: "success",
+        is_error: true,
+        result: limitText,
+        session_id: "sess_1",
+      });
+    const first = await startTurn("s1");
+    emit({
+      type: "rate_limit_event",
+      session_id: "sess_1",
+      rate_limit_info: { status: "rejected", resetsAt, rateLimitType: "five_hour" },
+    });
+    refuse();
+    await first.turn;
+    expect(first.events).toContainEqual({
+      type: "usage.limited",
+      resetsAt: resetsAt * 1000,
+    });
+
+    // Claude only sends the event when the status changes: the next refused
+    // turn carries nothing but its text.
+    const secondEvents: HarnessEvent[] = [];
+    const userMessages = parse().filter(
+      (message) => message.type === "user",
+    ).length;
+    const second = sendClaudeTurn({
+      sessionId: "s1",
+      cwd: "/repo",
+      model: "claude:claude-sonnet-5",
+      runtimeMode: "supervised",
+      text: "Worker results are ready.",
+      attachments: [],
+      onEvent: (event) => secondEvents.push(event),
+    });
+    await waitFor(
+      () =>
+        parse().filter((message) => message.type === "user").length >
+        userMessages,
+      "second user prompt",
+    );
+    refuse();
+    await second;
+    expect(secondEvents).toContainEqual({
+      type: "usage.limited",
+      resetsAt: resetsAt * 1000,
+    });
+  });
+
+  it("looks a stale refused window's reset up again", async () => {
+    const first = await startTurn("s1");
+    emit({
+      type: "rate_limit_event",
+      session_id: "sess_1",
+      rate_limit_info: { status: "rejected", resetsAt: 1_000 },
+    });
+    emit({
+      type: "result",
+      subtype: "success",
+      is_error: true,
+      result: "You've hit your weekly limit",
+      session_id: "sess_1",
+    });
+    await first.turn;
+    // The event's own reset reports as is; apply.ts decides it is not ahead.
+    expect(first.events).toContainEqual({
+      type: "usage.limited",
+      resetsAt: 1_000_000,
+    });
+
+    const secondEvents: HarnessEvent[] = [];
+    const userMessages = parse().filter(
+      (message) => message.type === "user",
+    ).length;
+    const second = sendClaudeTurn({
+      sessionId: "s1",
+      cwd: "/repo",
+      model: "claude:claude-sonnet-5",
+      runtimeMode: "supervised",
+      text: "continue",
+      attachments: [],
+      onEvent: (event) => secondEvents.push(event),
+    });
+    await waitFor(
+      () =>
+        parse().filter((message) => message.type === "user").length >
+        userMessages,
+      "second user prompt",
+    );
+    emit({
+      type: "result",
+      subtype: "success",
+      is_error: true,
+      result: "You've hit your weekly limit",
+      session_id: "sess_1",
+    });
+    await second;
+    expect(secondEvents).toContainEqual({ type: "usage.limited" });
+  });
+});
+
 describe("claude model switching", () => {
   it("restarts a named account with the new model while resuming the provider conversation", async () => {
     const first = await startTurn("s1", {
