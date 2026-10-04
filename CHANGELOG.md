@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Claude Code sessions recognize "You've hit your session limit" (and weekly or model limits) when Claude refuses a turn again without a new rate limit event, so the session shows the limit notice and can resume at the reset instead of looking finished.
+- A turn stopped by a usage limit no longer counts as completed. An orchestration worker it stops stays in its task, marked **Usage limit** in the sidebar, and continues the same assignment when the limit resets; dismissing its limit notice hands the task back to the lead as failed. The lead is not sent worker results while it is usage-limited, and a lead turn stopped by a limit no longer pauses the run and stops its agents.
 
 ## [0.7.0] - 2026-10-02
 

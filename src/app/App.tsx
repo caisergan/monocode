@@ -7077,6 +7077,7 @@ function Workspace({
         const planEventKey = planTurnKey(gen);
         let nativePlanSeen = false;
         let providerFailureSeen = false;
+        let usageLimitSeen = false;
         const routePlanEvent = (event: HarnessEvent): HarnessEvent | null => {
           if (event.type === "session.error") providerFailureSeen = true;
           if (proposalDraft) {
@@ -7115,6 +7116,7 @@ function Workspace({
             controlText += "\n";
           if (event.type === "session.error")
             controlOutcome.error = event.message;
+          if (event.type === "usage.limited") usageLimitSeen = true;
           if (
             wrap &&
             (event.type === "session.started" ||
@@ -7340,12 +7342,18 @@ function Workspace({
           controlOutcome = {
             status:
               providerFailureSeen ||
+              usageLimitSeen ||
               isProviderFailureText(controlText) ||
               !buildSucceeded
                 ? "failed"
                 : "completed",
             text: controlText.trim(),
-            ...(providerFailureSeen ? { error: controlOutcome.error } : {}),
+            ...(providerFailureSeen
+              ? { error: controlOutcome.error }
+              : usageLimitSeen
+                ? { error: "A usage limit stopped this turn." }
+                : {}),
+            ...(usageLimitSeen ? { usageLimited: true } : {}),
           };
           // A failed provider can leave its process alive with a dead event
           // stream or poisoned turn state. Park it now; the next prompt will
@@ -8010,6 +8018,7 @@ function Workspace({
   );
 
   const onUsageLimitDismiss = useCallback((sessionId: string) => {
+    void orchestrator.dismissUsageLimit(sessionId).catch(console.error);
     setSessions((prev) =>
       prev.map((session) =>
         session.id === sessionId && session.usageLimit
@@ -8041,6 +8050,17 @@ function Workspace({
         (entry) => entry.id === sessionId,
       );
       if (!session?.usageLimit || session.busy) return;
+      // A worker continues within its dispatch, so that turn settles its
+      // task; otherwise only its run sends it turns.
+      if (orchestrator.isWorker(sessionId)) {
+        orchestrator.resumeAfterUsageLimit(sessionId);
+        setSessions((prev) =>
+          prev.map((entry) =>
+            entry.id === sessionId ? { ...entry, usageLimit: undefined } : entry,
+          ),
+        );
+        return;
+      }
       onUsageLimitDismiss(sessionId);
       onSubmit(sessionId, CONTINUE_PROMPT);
     },

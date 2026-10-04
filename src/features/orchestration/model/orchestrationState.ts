@@ -82,6 +82,8 @@ export type OrchestrationTask = {
   error?: string;
   /** A retained worker can continue safely with this recovery turn. */
   recoveryPrompt?: string;
+  /** A usage limit stopped the running turn; it continues at the reset. */
+  usageLimit?: { resetsAt?: number };
   delivered: boolean;
   /** Workspace selection is independent from task/dependency identity. */
   workspacePolicy?: WorkspacePolicy;

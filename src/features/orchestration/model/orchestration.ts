@@ -4,6 +4,7 @@ import { pathKey } from "../../../shared/lib/paths";
 import type { ApprovalDecision, HarnessEvent } from "../../../integrations/harness/core/types";
 import { pendingApprovalForSession } from "../../notifications/model/approvalToast";
 import type { UserQuestionReply } from "../../sessions/model/userQuestion";
+import { CONTINUE_PROMPT } from "../../sessions/model/inFlight";
 import {
   validateOrchestrationSettings,
   validateProposedTasks,
@@ -41,6 +42,8 @@ export type ControlOutcome = {
   status: "completed" | "failed" | "cancelled";
   text: string;
   error?: string;
+  /** A provider usage limit stopped the turn; it can continue at the reset. */
+  usageLimited?: boolean;
 };
 export type WorkerPreparation = {
   scratchDir?: string;
@@ -309,6 +312,62 @@ export class Orchestrator {
     return this.runs.find(
       (run) =>
         run.leadId === id || run.tasks.some((task) => task.sessionId === id),
+    );
+  }
+  /** A worker of a run that can still resume, so the run owns its turns. */
+  isWorker(id: string) {
+    const run = this.forSession(id);
+    return (
+      !!run &&
+      run.leadId !== id &&
+      (run.status === "active" || run.status === "paused")
+    );
+  }
+  private usageLimitedTask(id: string) {
+    const run = this.forSession(id);
+    const task = run?.tasks.find(
+      (entry) =>
+        entry.sessionId === id &&
+        entry.status === "running" &&
+        !!entry.usageLimit &&
+        !!entry.activeDispatchId,
+    );
+    return run && run.leadId !== id && task ? { run, task } : undefined;
+  }
+  /**
+   * Continue a worker its usage limit stopped, within the same dispatch, so
+   * the continued turn is what settles the task. False for any other session.
+   */
+  resumeAfterUsageLimit(id: string): boolean {
+    const waiting = this.usageLimitedTask(id);
+    if (!waiting || waiting.run.status !== "active") return false;
+    const { run, task } = waiting;
+    const dispatchId = task.activeDispatchId!;
+    void this.patchTask(run.leadId, task.id, { usageLimit: undefined }).catch(
+      console.error,
+    );
+    this.host!.submit(id, CONTINUE_PROMPT, (outcome) => {
+      void this.settle(run.leadId, task.id, outcome, dispatchId).catch(
+        console.error,
+      );
+    });
+    return true;
+  }
+  /** The user gave up on a worker's resume; its lead decides what is next. */
+  async dismissUsageLimit(id: string) {
+    const waiting = this.usageLimitedTask(id);
+    if (!waiting) return;
+    const { run, task } = waiting;
+    await this.settle(
+      run.leadId,
+      task.id,
+      {
+        status: "failed",
+        text: task.result,
+        error:
+          "A usage limit stopped this worker before it finished, and its resume was dismissed. Retry it once the limit resets.",
+      },
+      task.activeDispatchId!,
     );
   }
   resumeBlocker(leadId: string, checkoutCwd?: string): Session | undefined {
@@ -659,7 +718,8 @@ export class Orchestrator {
       leadId,
       `The user confirmed the orchestration card, including any edits. The app has already queued the exact assignments below; do not delegate duplicates. Supervise them through the control CLI, review their changes, request corrections when needed, and finish the original request.\n\nOriginal request:\n${proposal.request}\n\nApproved assignments:\n${JSON.stringify(tasks.map(({ id, title, prompt, harness, model, modelSettings, files, dependsOn }) => ({ taskId: id, title, prompt, harness, model, modelSettings, files, dependsOn })))}`,
       (outcome) => {
-        if (outcome.status !== "completed")
+        // A usage limit only parks the lead; it resumes at the reset.
+        if (outcome.status !== "completed" && !outcome.usageLimited)
           void this.pause(
             leadId,
             outcome.error ??
@@ -1512,6 +1572,7 @@ export class Orchestrator {
                     status: "running",
                     activeDispatchId: dispatchId,
                     acceptedDispatchId: undefined,
+                    usageLimit: undefined,
                   }
                 : entry,
             ),
@@ -1647,6 +1708,17 @@ export class Orchestrator {
     )
       return;
     this.writeChecks.delete(dispatchId);
+    if (outcome.usageLimited) {
+      // Stopped mid-assignment, not finished: the task stays running until
+      // the worker continues at the reset or the user dismisses the limit.
+      const limit = this.host?.session(task.sessionId)?.usageLimit;
+      await this.patchTask(leadId, taskId, {
+        usageLimit: limit?.resetsAt != null ? { resetsAt: limit.resetsAt } : {},
+        result: outcome.text.slice(-20_000),
+      });
+      this.sync();
+      return;
+    }
     const run = this.run(leadId)!;
     await this.commit({
       ...run,
@@ -1655,6 +1727,7 @@ export class Orchestrator {
           ? {
               ...entry,
               status: outcome.status,
+              usageLimit: undefined,
               result: outcome.text.slice(-20_000),
               error: outcome.error,
               recoveryPrompt: undefined,
@@ -1980,7 +2053,9 @@ export class Orchestrator {
     for (const run of this.runs) {
       if (run.status !== "active" || this.waking.has(run.leadId)) continue;
       const lead = this.host?.session(run.leadId);
-      if (!lead || lead.busy || lead.queuedMessages?.length) continue;
+      // A usage-limited lead hears the results once it resumes.
+      if (!lead || lead.busy || lead.queuedMessages?.length || lead.usageLimit)
+        continue;
       const announced = this.announced.get(run.leadId) ?? new Set<string>();
       const results = run.tasks.filter((task) => !task.delivered);
       const blocked = this.blockedKeys(run).filter(
@@ -1999,7 +2074,8 @@ export class Orchestrator {
               current.status !== "active" ||
               !session ||
               session.busy ||
-              session.queuedMessages?.length
+              session.queuedMessages?.length ||
+              session.usageLimit
             )
               return;
             const results = current.tasks.filter(
@@ -2066,7 +2142,10 @@ export class Orchestrator {
               .filter(Boolean)
               .join("\n\n");
             this.host!.submit(run.leadId, body, (outcome) => {
-              if (outcome.status !== "completed") {
+              // The results are in the lead's conversation; it reads them
+              // when it continues at the reset.
+              if (outcome.usageLimited) this.sync();
+              else if (outcome.status !== "completed") {
                 void this.pause(
                   run.leadId,
                   outcome.error ??

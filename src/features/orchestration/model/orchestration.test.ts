@@ -11,6 +11,7 @@ import {
   shellPath,
 } from "./orchestration";
 import { newSession } from "../../sessions/model/session";
+import { CONTINUE_PROMPT } from "../../sessions/model/inFlight";
 import type { OrchestrationProposal } from "./orchestrationPlan";
 import { normalizeOrchestrationRun } from "./orchestrationState";
 import { previewFromToolPart } from "../../../integrations/harness/providers/opencode/opencodeProtocol";
@@ -1102,6 +1103,93 @@ describe("local orchestration", () => {
     );
     expect(f.tasks()[0].delivered).toBe(false);
     f.manager.sync();
+    expect(f.host.submit).toHaveBeenCalledTimes(2);
+  });
+  const usageLimitedWorker = async () => {
+    const f = setup();
+    await f.start();
+    await f.delegate(["a"]);
+    await vi.waitFor(() => expect(f.host.submit).toHaveBeenCalledTimes(1));
+    f.lead.busy = false;
+    const workerId = f.tasks()[0].sessionId;
+    const worker = f.sessions.find((session) => session.id === workerId)!;
+    // The App has applied the turn's usage.limited event before it settles.
+    worker.usageLimit = { resetsAt: 5_000, resumeAtReset: true };
+    f.completions.get(workerId)!({
+      status: "failed",
+      text: "Half done",
+      error: "A usage limit stopped this turn.",
+      usageLimited: true,
+    });
+    await vi.waitFor(() =>
+      expect(f.tasks()[0].usageLimit).toEqual({ resetsAt: 5_000 }),
+    );
+    return { f, workerId, worker };
+  };
+  it("keeps a usage-limited worker running and settles it from its continued turn", async () => {
+    const { f, workerId, worker } = await usageLimitedWorker();
+    expect(f.tasks()[0].status).toBe("running");
+    f.manager.sync();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(f.host.submit).toHaveBeenCalledTimes(1);
+
+    expect(f.manager.isWorker(workerId)).toBe(true);
+    expect(f.manager.resumeAfterUsageLimit(workerId)).toBe(true);
+    worker.usageLimit = undefined;
+    expect(vi.mocked(f.host.submit).mock.calls[1]).toEqual([
+      workerId,
+      CONTINUE_PROMPT,
+      expect.any(Function),
+    ]);
+    expect(f.tasks()[0].usageLimit).toBeUndefined();
+    expect(f.manager.resumeAfterUsageLimit(workerId)).toBe(false);
+
+    f.completions.get(workerId)!({ status: "completed", text: "All done" });
+    await vi.waitFor(() => expect(f.tasks()[0].status).toBe("completed"));
+    expect(f.tasks()[0].result).toBe("All done");
+    await vi.waitFor(() => expect(f.host.submit).toHaveBeenCalledTimes(3));
+    expect(vi.mocked(f.host.submit).mock.calls[2][0]).toBe("lead");
+    expect(vi.mocked(f.host.submit).mock.calls[2][1]).toContain("All done");
+  });
+  it("hands a usage-limited worker to its lead when the resume is dismissed", async () => {
+    const { f, workerId } = await usageLimitedWorker();
+    await f.manager.dismissUsageLimit(workerId);
+    expect(f.tasks()[0].status).toBe("failed");
+    expect(f.tasks()[0].usageLimit).toBeUndefined();
+    expect(f.tasks()[0].error).toContain("usage limit stopped this worker");
+    await vi.waitFor(() => expect(f.host.submit).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(f.host.submit).mock.calls[1][0]).toBe("lead");
+  });
+  it("holds results for a usage-limited lead and does not pause on its limit", async () => {
+    const f = setup();
+    await f.start();
+    await f.delegate(["a"]);
+    await vi.waitFor(() => expect(f.host.submit).toHaveBeenCalledTimes(1));
+    f.lead.busy = false;
+    f.lead.usageLimit = { resetsAt: 5_000, resumeAtReset: true };
+    f.completions.get(f.tasks()[0].sessionId)!({
+      status: "completed",
+      text: "Result",
+    });
+    await vi.waitFor(() => expect(f.tasks()[0].status).toBe("completed"));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(f.host.submit).toHaveBeenCalledTimes(1);
+
+    f.lead.usageLimit = undefined;
+    f.manager.sync();
+    await vi.waitFor(() => expect(f.host.submit).toHaveBeenCalledTimes(2));
+    // The delivery itself hits the limit: the results are in the lead's
+    // conversation and it reads them when it continues at the reset.
+    f.lead.usageLimit = { resumeAtReset: true };
+    f.completions.get("lead")!({
+      status: "failed",
+      text: "",
+      error: "A usage limit stopped this turn.",
+      usageLimited: true,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(f.manager.run("lead")!.status).toBe("active");
+    expect(f.tasks()[0].delivered).toBe(true);
     expect(f.host.submit).toHaveBeenCalledTimes(2);
   });
   it("recovers interrupted tasks without claiming completion and continues them on Resume", async () => {
