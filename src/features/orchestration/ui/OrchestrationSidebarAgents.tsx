@@ -244,9 +244,15 @@ export function OrchestrationSidebarAgents({
         </p>
       )}
       {/* Stopping a run belongs to the composer, which stops the lead and its
-          agents together. Resume has no other home, so it stays. */}
+          agents together. Resume has no other home, so it stays. The card
+          captures the pointer on press for dragging, which retargets the
+          click to the card, so presses must not reach it. */}
       {run?.status === "paused" && (
-        <div className="mt-1.5 space-y-1.5 border-t border-stroke pt-1.5">
+        <div
+          className="mt-1.5 space-y-1.5 border-t border-stroke pt-1.5"
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
+        >
           <p className="px-0.5 text-[11px] leading-relaxed text-content/45">
             {stopping
               ? "Stopping interrupted work before this run can resume."
