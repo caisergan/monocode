@@ -152,7 +152,7 @@ apps/ios/
     MonoDemo/                     # The demo host
   UITests/
   scripts/
-    gen-design-tokens.mjs         # @monocode/design → MonoDesign/Sources/Generated/Tokens.swift
+    gen-design-tokens.mjs         # @monocode/design → MonoDesign/Sources/MonoDesign/Generated/Tokens.swift
     gen-fixtures.mjs              # TypeScript implementations → golden JSON fixtures (§16.5)
 ```
 
@@ -570,6 +570,15 @@ is known.
   coding agent may do this);
 - a run on the iPhone 13 (the owner does this);
 - the spec updates for that milestone, in the same change.
+
+### R0 deviations
+
+Recorded as R0 is built; [14 "As built, R0"](14-roadmap.md#as-built-r0-2026-10-06-branch-featios-native-design)
+has the detail.
+
+| # | Deviation from this plan | Reason |
+|---|---|---|
+| R0-1 | MonoDesign carries the palette resolved at the default tint, for dark and light, not a Swift port of `palette()` for any hue, saturation and lightness. It has no spacing tokens | The custom tint is an Appearance setting that has no screen until R7; `@monocode/design` has no spacing tokens to generate |
 
 ## 16.8 Spikes
 
