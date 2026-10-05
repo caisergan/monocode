@@ -1025,6 +1025,86 @@ describe("claude model switching", () => {
   });
 });
 
+describe("claude context window", () => {
+  const contextProbe = () =>
+    parse().find(
+      (m) =>
+        (m.request as Record<string, unknown> | undefined)?.subtype ===
+        "get_context_usage",
+    );
+
+  function replyContextUsage(response: Record<string, unknown>) {
+    emit({
+      type: "control_response",
+      response: {
+        subtype: "success",
+        request_id: contextProbe()!.request_id,
+        response,
+      },
+    });
+  }
+
+  it("asks for the window at startup so the first turn shows the gauge", async () => {
+    const { events, turn } = await startTurn("s1");
+    await waitFor(() => !!contextProbe(), "get_context_usage");
+    replyContextUsage({ totalTokens: 15_000, maxTokens: 1_000_000 });
+
+    expect(events).toContainEqual({
+      type: "context",
+      window: 1_000_000,
+      used: 15_000,
+    });
+    const session = events.reduce(
+      (current, event) => applyHarnessEvent(current, event),
+      newSession("/repo", "claude"),
+    );
+    expect(session.context).toEqual({ used: 15_000, window: 1_000_000 });
+
+    emit({ type: "result", subtype: "success", session_id: "sess_1" });
+    await turn;
+  });
+
+  it("keeps the turn's own reading when the reply comes after it", async () => {
+    const { events, turn } = await startTurn("s1");
+    await waitFor(() => !!contextProbe(), "get_context_usage");
+    emit({
+      type: "assistant",
+      session_id: "sess_1",
+      message: {
+        content: [{ type: "text", text: "hi" }],
+        usage: { input_tokens: 40_000, output_tokens: 10 },
+      },
+    });
+    replyContextUsage({ totalTokens: 15_000, maxTokens: 200_000 });
+
+    expect(events.filter((event) => event.type === "context")).toEqual([
+      { type: "context", used: 40_010 },
+      { type: "context", window: 200_000 },
+    ]);
+
+    emit({ type: "result", subtype: "success", session_id: "sess_1" });
+    await turn;
+  });
+
+  it("waits for the turn result when Claude Code cannot answer", async () => {
+    const { events, turn } = await startTurn("s1");
+    await waitFor(() => !!contextProbe(), "get_context_usage");
+    emit({
+      type: "control_response",
+      response: {
+        subtype: "error",
+        request_id: contextProbe()!.request_id,
+        error: "get_context_usage is not supported in this context",
+      },
+    });
+    emit({ type: "result", subtype: "success", session_id: "sess_1" });
+    await turn;
+
+    expect(events.some((event) => event.type === "context")).toBe(false);
+    expect(events.some((event) => event.type === "session.error")).toBe(false);
+  });
+});
+
 describe("claude legacy account resume", () => {
   it("resumes a legacy thread when the missing account resolves to default", async () => {
     bindClaudeSession("s1", "legacy-session", "/repo");
@@ -2327,6 +2407,29 @@ describe("claude slash commands", () => {
       ]);
     },
   );
+
+  it("asks for the new model's window after /model switches it", async () => {
+    const { events, turn } = await sendCommand("/model opus");
+    emitCommandReply("Set model to Opus 5.5");
+    await emitApplied({ model: "claude-opus-5-5[1m]", effort: "high" });
+    await turn;
+
+    const probes = () =>
+      parse().filter((m) => asRequest(m)?.subtype === "get_context_usage");
+    await waitFor(() => probes().length === 2, "second get_context_usage");
+    emit({
+      type: "control_response",
+      response: {
+        subtype: "success",
+        request_id: probes()[1]!.request_id,
+        response: { totalTokens: 50_000, maxTokens: 1_000_000 },
+      },
+    });
+    // Only the window: the level is still the one the switch turn reported.
+    expect(events.filter((event) => event.type === "context")).toEqual([
+      { type: "context", window: 1_000_000 },
+    ]);
+  });
 
   it("keeps MonoCode's model when Claude is still on it or does not say", async () => {
     const same = await sendCommand("/model sonnet");

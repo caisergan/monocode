@@ -29,6 +29,7 @@ import {
   assistantThinkingBlocks,
   assistantToolUses,
   contextFromResult,
+  contextFromUsageReply,
   contextUsedFromAssistant,
   turnMetricsFromResult,
   buildClaudeSpawnArgs,
@@ -204,6 +205,11 @@ type Live = {
     | null;
   /** The turn stays open until Claude has said what it applied. */
   settingsCheck: { requestId: string; settle: () => void } | null;
+  /**
+   * An unanswered `get_context_usage`. `level` drops to false once a fresher
+   * reading arrives, so the late reply only fills in the window.
+   */
+  contextProbe: { requestId: string; level: boolean } | null;
 };
 
 type Resume = {
@@ -549,6 +555,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     compactionConfirmed: false,
     settingsSwitch: null,
     settingsCheck: null,
+    contextProbe: null,
   };
   liveRef.current = live;
 
@@ -602,6 +609,8 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
       providerSessionId: live.claudeSessionId,
     });
     live.onEvent({ type: "session.started" });
+    // A resumed conversation already has a reading from its last turn.
+    askContextUsage(input.sessionId, live, !launch.resume);
     return live;
   } catch (error) {
     await stopClaudeSession(input.sessionId);
@@ -736,7 +745,8 @@ function handleLine(sessionId: string, live: Live, line: string): void {
 
   if (type === "control_response") {
     markInitialized(live);
-    noteAppliedSettings(live, rec);
+    noteAppliedSettings(sessionId, live, rec);
+    noteContextUsage(live, rec);
     return;
   }
 
@@ -871,7 +881,10 @@ function handleAssistant(live: Live, rec: Record<string, unknown>): void {
   }
 
   const used = contextUsedFromAssistant(rec);
-  if (used !== undefined) live.onEvent({ type: "context", used });
+  if (used !== undefined) {
+    if (live.contextProbe) live.contextProbe.level = false;
+    live.onEvent({ type: "context", used });
+  }
 
   const snapshot = assistantTextBlocks(rec).join("");
   if (snapshot) closePendingAssistantMessage(live);
@@ -980,7 +993,11 @@ function askAppliedSettings(sessionId: string, live: Live): void {
   ).catch(settle);
 }
 
-function noteAppliedSettings(live: Live, rec: Record<string, unknown>): void {
+function noteAppliedSettings(
+  sessionId: string,
+  live: Live,
+  rec: Record<string, unknown>,
+): void {
   const check = live.settingsCheck;
   const reply = parseControlResponse(rec);
   if (!check || reply?.requestId !== check.requestId) return;
@@ -992,8 +1009,46 @@ function noteAppliedSettings(live: Live, rec: Record<string, unknown>): void {
         ? modelChange(selected, applied)
         : effortChange(selected, applied);
     if (change) live.onEvent({ type: "session.configChanged", ...change });
+    // The process keeps running on the new model, so no restart will re-ask.
+    if (change && selected.command === "model") {
+      askContextUsage(sessionId, live, false);
+    }
   }
   check.settle();
+}
+
+/**
+ * Ask Claude for the context window, which it otherwise only reports when a
+ * turn ends. `level` also takes its token count, which is only right before
+ * the turn's own readings start arriving. An older Claude Code may refuse or
+ * not answer; the gauge then just waits for the turn `result` as before.
+ */
+function askContextUsage(sessionId: string, live: Live, level: boolean): void {
+  const requestId = nextControlId(live);
+  live.contextProbe = { requestId, level };
+  void writeJson(
+    sessionId,
+    buildControlRequest(requestId, {
+      subtype: "get_context_usage",
+      detail: "summary",
+    }),
+  ).catch(() => {
+    if (live.contextProbe?.requestId === requestId) live.contextProbe = null;
+  });
+}
+
+function noteContextUsage(live: Live, rec: Record<string, unknown>): void {
+  const probe = live.contextProbe;
+  const reply = parseControlResponse(rec);
+  if (!probe || reply?.requestId !== probe.requestId) return;
+  live.contextProbe = null;
+  const context = reply.ok ? contextFromUsageReply(reply.payload) : undefined;
+  if (!context) return;
+  live.onEvent({
+    type: "context",
+    window: context.window,
+    ...(probe.level && context.used ? { used: context.used } : {}),
+  });
 }
 
 /**
@@ -1152,10 +1207,15 @@ function handleResult(
 ): void {
   if (isSubagentMessage(rec)) return;
   // A /compact result reports the summarizer call's usage, not the rebuilt
-  // conversation level. The next real turn will provide the fresh reading.
+  // conversation level, so ask Claude for the rebuilt one instead.
   if (!live.manualCompaction) {
     const context = contextFromResult(rec);
-    if (context) live.onEvent({ type: "context", ...context });
+    if (context) {
+      if (live.contextProbe) live.contextProbe.level = false;
+      live.onEvent({ type: "context", ...context });
+    }
+  } else if (live.compactionConfirmed) {
+    askContextUsage(sessionId, live, true);
   }
   const metrics = turnMetricsFromResult(rec);
   if (metrics) live.onEvent({ type: "turn.metrics", ...metrics });
