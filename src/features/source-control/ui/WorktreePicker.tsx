@@ -2,7 +2,11 @@ import { useEffect, useRef, useState } from "react";
 import { useProjectBranchesState } from "../hooks/useProjectBranches";
 import { useProjectWorktrees } from "../hooks/useProjectWorktrees";
 import { pathKey, prettyCwd } from "../../../shared/lib/paths";
-import { NO_BRANCH_LABEL, type Worktree } from "../model/worktrees";
+import {
+  NO_BRANCH_LABEL,
+  worktreeMatches,
+  type Worktree,
+} from "../model/worktrees";
 import { BranchPicker } from "./BranchPicker";
 import { CreateWorktreeDialog } from "./CreateWorktreeDialog";
 import { GitPickerTrigger } from "./GitPickerTrigger";
@@ -93,11 +97,7 @@ export function WorktreePicker({
     }
   };
   const rows =
-    data?.worktrees.filter((tree) =>
-      `${tree.branch ?? "detached"} ${tree.path}`
-        .toLowerCase()
-        .includes(query.toLowerCase()),
-    ) ?? [];
+    data?.worktrees.filter((tree) => worktreeMatches(tree, query)) ?? [];
   // Default to the current working copy, including when rows arrive after open.
   // Track navigation by path so background refreshes cannot move the highlight.
   const active = Math.max(

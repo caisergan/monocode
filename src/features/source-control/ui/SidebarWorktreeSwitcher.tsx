@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useProjectWorktrees } from "../hooks/useProjectWorktrees";
 import { useWorktreeFocus, type WorktreeFocus } from "../model/worktreeFocus";
+import { worktreeMatches } from "../model/worktrees";
 import { pathKey, prettyCwd } from "../../../shared/lib/paths";
 import { Popover } from "../../../shared/ui/Popover";
 import {
@@ -9,6 +10,7 @@ import {
   FolderTree,
   GitBranch,
   Loader,
+  Search,
 } from "../../../shared/ui/icons";
 
 /** The sidebar title. Picking a worktree narrows the sidebar, and the
@@ -28,7 +30,11 @@ export function SidebarWorktreeSwitcher({
   tabStats?: ReadonlyMap<string, { tabs: number; busy: boolean }>;
 }) {
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [activeKey, setActiveKey] = useState<string>();
   const anchor = useRef<HTMLButtonElement>(null);
+  const search = useRef<HTMLInputElement>(null);
+  const activeOption = useRef<HTMLButtonElement>(null);
   const focus = useWorktreeFocus(cwd);
   const { data, error, refresh } = useProjectWorktrees(cwd);
   // The project folder is the default, unfocused entry; missing worktrees
@@ -57,10 +63,51 @@ export function SidebarWorktreeSwitcher({
   useEffect(() => {
     if (switchError) setOpen(true);
   }, [switchError]);
+  useEffect(() => {
+    if (!open) return;
+    const frame = requestAnimationFrame(() => search.current?.focus());
+    return () => cancelAnimationFrame(frame);
+  }, [open]);
 
   const focused =
     focus &&
     worktrees.find((tree) => pathKey(tree.path) === pathKey(focus.path));
+  // The project folder row stands for every session, so it stays listed
+  // until a search rules out its branch and path.
+  const showDefault = !query.trim() || (!!main && worktreeMatches(main, query));
+  const rows = worktrees.filter((tree) => worktreeMatches(tree, query));
+  const keys = [
+    ...(showDefault ? ["default"] : []),
+    ...rows.map((tree) => tree.path),
+  ];
+  // Default to the shown working copy; track keys so a refresh keeps the spot.
+  const active = Math.max(
+    0,
+    keys.findIndex((key) =>
+      activeKey
+        ? key === activeKey
+        : focus
+          ? key !== "default" && pathKey(key) === pathKey(focus.path)
+          : key === "default",
+    ),
+  );
+  const activeRow = keys[active];
+  useEffect(() => {
+    if (open) activeOption.current?.scrollIntoView({ block: "nearest" });
+  }, [open, activeRow]);
+  const close = () => {
+    setOpen(false);
+    setQuery("");
+    setActiveKey(undefined);
+  };
+  const pick = (key: string) => {
+    if (key === "default") onSelect?.(undefined);
+    else {
+      const tree = rows.find((row) => row.path === key);
+      if (tree) onSelect?.({ path: tree.path, branch: tree.branch });
+    }
+    close();
+  };
   const title = focus
     ? (focused?.branch ?? focus.branch ?? "Detached worktree")
     : "Workspace";
@@ -77,19 +124,19 @@ export function SidebarWorktreeSwitcher({
     icon: ReactNode,
     label: string,
     detail: string,
-    onPick: () => void,
     path: string,
   ) => (
     <button
       key={key}
+      ref={key === activeRow ? activeOption : undefined}
       type="button"
       role="option"
       aria-selected={selected}
-      onClick={() => {
-        onPick();
-        setOpen(false);
-      }}
-      className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-content/5"
+      onMouseEnter={() => setActiveKey(key)}
+      onClick={() => pick(key)}
+      className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left ${
+        key === activeRow ? "bg-selection" : "hover:bg-content/5"
+      }`}
     >
       {icon}
       <span className="min-w-0 flex-1">
@@ -110,7 +157,7 @@ export function SidebarWorktreeSwitcher({
         type="button"
         data-tauri-drag-region="false"
         aria-label="Switch working copy"
-        aria-haspopup="listbox"
+        aria-haspopup="dialog"
         aria-expanded={open}
         aria-busy={pending}
         title={
@@ -119,8 +166,12 @@ export function SidebarWorktreeSwitcher({
             : (main?.branch ?? "Project folder")
         }
         onClick={() => {
-          if (!open) void refresh();
-          setOpen(!open);
+          if (open) {
+            close();
+            return;
+          }
+          void refresh();
+          setOpen(true);
         }}
         className="-ml-1.5 flex h-6.5 min-w-0 max-w-full items-center gap-2 rounded-md px-1.5 text-sm font-medium leading-tight hover:bg-content/8 aria-expanded:bg-content/8"
       >
@@ -141,42 +192,88 @@ export function SidebarWorktreeSwitcher({
           align="start"
           width={280}
           maxHeight={360}
-          onDismiss={() => setOpen(false)}
-          role="listbox"
+          onDismiss={(reason) => {
+            close();
+            if (reason === "escape") anchor.current?.focus();
+          }}
+          role="dialog"
           aria-label="Working copies"
-          className="overflow-y-auto p-1"
+          className="flex flex-col overflow-hidden"
         >
-          {row(
-            "default",
-            !focus,
-            <GitBranch className="size-3.5 shrink-0 text-content/50" />,
-            main?.branch ?? "Project folder",
-            "Project folder · all sessions",
-            () => onSelect?.(undefined),
-            main?.path ?? cwd,
-          )}
-          {!data && !error ? (
-            <div className="flex items-center gap-2 p-2 text-[12px] text-content/50">
-              <Loader className="size-3.5 animate-spin" />
-              Loading working copies…
-            </div>
-          ) : null}
-          {worktrees.map((tree) =>
-            row(
-              tree.path,
-              !!focus && pathKey(focus.path) === pathKey(tree.path),
-              <FolderTree className="size-3.5 shrink-0 text-content/50" />,
-              tree.branch ?? `Detached ${tree.head.slice(0, 7)}`,
-              prettyCwd(tree.path),
-              () => onSelect?.({ path: tree.path, branch: tree.branch }),
-              tree.path,
-            ),
-          )}
-          {switchError || error ? (
-            <p role="alert" className="px-2 py-2 text-[11px] text-red-400">
-              {switchError || error}
-            </p>
-          ) : null}
+          <label className="flex shrink-0 items-center gap-2 border-b border-stroke px-3 py-2 text-content/40">
+            <Search className="size-3.5 shrink-0" />
+            <input
+              ref={search}
+              value={query}
+              placeholder="Search working copies…"
+              aria-label="Search working copies"
+              spellCheck={false}
+              onChange={(event) => {
+                setQuery(event.target.value);
+                setActiveKey(undefined);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                  event.preventDefault();
+                  const next = Math.max(
+                    0,
+                    Math.min(
+                      keys.length - 1,
+                      active + (event.key === "ArrowDown" ? 1 : -1),
+                    ),
+                  );
+                  setActiveKey(keys[next]);
+                }
+                if (event.key === "Enter" && activeRow) {
+                  event.preventDefault();
+                  pick(activeRow);
+                }
+              }}
+              className="min-w-0 flex-1 bg-transparent text-[12px] text-content outline-none placeholder:text-content/40"
+            />
+          </label>
+          <div
+            role="listbox"
+            aria-label="Working copies"
+            className="min-h-0 overflow-y-auto p-1"
+          >
+            {showDefault
+              ? row(
+                  "default",
+                  !focus,
+                  <GitBranch className="size-3.5 shrink-0 text-content/50" />,
+                  main?.branch ?? "Project folder",
+                  "Project folder · all sessions",
+                  main?.path ?? cwd,
+                )
+              : null}
+            {!data && !error ? (
+              <div className="flex items-center gap-2 p-2 text-[12px] text-content/50">
+                <Loader className="size-3.5 animate-spin" />
+                Loading working copies…
+              </div>
+            ) : null}
+            {rows.map((tree) =>
+              row(
+                tree.path,
+                !!focus && pathKey(focus.path) === pathKey(tree.path),
+                <FolderTree className="size-3.5 shrink-0 text-content/50" />,
+                tree.branch ?? `Detached ${tree.head.slice(0, 7)}`,
+                prettyCwd(tree.path),
+                tree.path,
+              ),
+            )}
+            {data && keys.length === 0 ? (
+              <p className="p-2 text-[12px] text-content/45">
+                No matching working copies
+              </p>
+            ) : null}
+            {switchError || error ? (
+              <p role="alert" className="px-2 py-2 text-[11px] text-red-400">
+                {switchError || error}
+              </p>
+            ) : null}
+          </div>
         </Popover>
       ) : null}
     </>

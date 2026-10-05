@@ -40,6 +40,13 @@ const trigger = () =>
   container.querySelector<HTMLButtonElement>(
     '[aria-label="Switch working copy"]',
   )!;
+const type = (input: HTMLInputElement, value: string) => {
+  Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype,
+    "value",
+  )!.set!.call(input, value);
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+};
 const option = (name: string) =>
   [...document.querySelectorAll<HTMLButtonElement>('[role="option"]')].find(
     (button) => button.textContent?.includes(name),
@@ -98,4 +105,40 @@ it("requests fallback from a deleted worktree once and does not retry while pend
   await render(false, "Could not switch working copy");
   expect(select).toHaveBeenCalledTimes(1);
   expect(worktreeFocus("/picker")?.path).toBe("/deleted");
+});
+
+it("searches working copies and picks the highlighted match with Enter", async () => {
+  await render();
+  await act(async () => trigger().click());
+  const search = document.querySelector<HTMLInputElement>(
+    '[aria-label="Search working copies"]',
+  )!;
+  const shown = () =>
+    [...document.querySelectorAll('[role="option"]')].map(
+      (node) => node.textContent,
+    );
+  expect(shown()).toHaveLength(3);
+
+  await act(async () => type(search, "FEATURE"));
+  expect(shown()).toEqual([
+    expect.stringContaining("feature-a"),
+    expect.stringContaining("feature-b"),
+  ]);
+  await act(async () => type(search, "nothing-here"));
+  expect(shown()).toEqual([]);
+  expect(document.body.textContent).toContain("No matching working copies");
+
+  await act(async () => type(search, "feature"));
+  for (const key of ["ArrowDown", "Enter"]) {
+    await act(async () =>
+      search.dispatchEvent(
+        new KeyboardEvent("keydown", { key, bubbles: true }),
+      ),
+    );
+  }
+  expect(select).toHaveBeenLastCalledWith({
+    path: "/picker-b",
+    branch: "feature-b",
+  });
+  expect(trigger().getAttribute("aria-expanded")).toBe("false");
 });

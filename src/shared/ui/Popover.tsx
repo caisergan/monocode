@@ -340,6 +340,7 @@ function WebPopover({
   return createPortal(
     <div
       ref={frame}
+      data-popover-layer
       data-popover-side={position?.side ?? side}
       style={{ ...placed, zIndex: layer }}
       className={bare ? undefined : FRAME}

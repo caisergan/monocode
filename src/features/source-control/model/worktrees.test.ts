@@ -5,6 +5,7 @@ import {
   sessionInWorktree,
   detachSessionWorktree,
   assertWorktreeFilesClosed,
+  worktreeMatches,
   worktreeSessionIds,
   type Worktree,
 } from "./worktrees";
@@ -21,6 +22,22 @@ const tree: Worktree = {
   unpushed: 0,
   sessionIds: [],
 };
+
+describe("worktree search", () => {
+  it("matches every word against the branch or path, ignoring case", () => {
+    const orch = { ...tree, branch: "mc/orch-0c347c6d5f2c" };
+    expect(worktreeMatches(orch, "")).toBe(true);
+    expect(worktreeMatches(orch, "ORCH 0c3")).toBe(true);
+    expect(worktreeMatches(orch, " worktrees  orch ")).toBe(true);
+    expect(worktreeMatches(orch, "orch feature-x")).toBe(false);
+  });
+
+  it("finds a detached worktree by its short HEAD", () => {
+    const detached = { ...tree, branch: null, head: "1234567890abcdef" };
+    expect(worktreeMatches(detached, "detached 1234567")).toBe(true);
+    expect(worktreeMatches(detached, "890abc")).toBe(false);
+  });
+});
 
 describe("worktree deletion preflight", () => {
   it("blocks open files and terminals, including nested working folders", () => {

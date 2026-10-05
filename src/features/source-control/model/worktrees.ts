@@ -20,6 +20,17 @@ export type Worktree = {
 };
 export type Worktrees = { worktrees: Worktree[]; defaultRoot: string };
 
+/** Each word of the query has to appear in the branch (or detached HEAD) or
+ * the path, ignoring case, so "orch 0c3" finds `mc/orch-0c347c6d5f2c`. */
+export function worktreeMatches(tree: Worktree, query: string): boolean {
+  const text =
+    `${tree.branch ?? `detached ${tree.head.slice(0, 7)}`} ${tree.path}`.toLowerCase();
+  return query
+    .toLowerCase()
+    .split(/\s+/)
+    .every((word) => text.includes(word));
+}
+
 export const listWorktrees = (cwd: string) =>
   invokeWorkspace<Worktrees>("git_worktrees", { cwd });
 

@@ -9,7 +9,10 @@ import {
 } from "react";
 import { useProjectBranchesState } from "../../source-control/hooks/useProjectBranches";
 import { useProjectWorktrees } from "../../source-control/hooks/useProjectWorktrees";
-import type { Worktree } from "../../source-control/model/worktrees";
+import {
+  worktreeMatches,
+  type Worktree,
+} from "../../source-control/model/worktrees";
 import { MOD, SHIFT } from "../../../platform/tauri/platform";
 import { prettyCwd } from "../../../shared/lib/paths";
 import type { WorkspaceMode } from "../../sessions/model/session";
@@ -35,7 +38,8 @@ import {
 export const WORKSPACE_MODE_SHORTCUT = `${MOD}${SHIFT}G`;
 const WORKSPACE_SURFACES =
   "[data-workspace-picker],[data-existing-worktrees-submenu]";
-const SUBMENU_GAP = 4;
+/** Clears the menu's border and padding: glass stacked on glass flickers. */
+const SUBMENU_GAP = 8;
 const HOVER_CLOSE_MS = 100;
 
 export function isWorkspaceModeShortcut(event: {
@@ -177,25 +181,47 @@ function WorkspaceModePicker({
   }, [open, onOpenChange]);
   useEffect(() => () => onOpenChange?.(false), [onOpenChange]);
   const [worktreeMenu, setWorktreeMenu] = useState(false);
+  const [worktreeQuery, setWorktreeQuery] = useState("");
+  const [activeWorktree, setActiveWorktree] = useState(0);
   const [busyPath, setBusyPath] = useState<string>();
   const [pickError, setPickError] = useState<string>();
   const anchor = useRef<HTMLDivElement>(null);
   const worktreeAnchor = useRef<HTMLButtonElement>(null);
+  const worktreeSubmenu = useRef<HTMLDivElement>(null);
+  const worktreeSearch = useRef<HTMLInputElement>(null);
+  const activeWorktreeRow = useRef<HTMLButtonElement>(null);
+  const worktreeFocusReturn = useRef<Element | null>(null);
   const closeWorktreeTimer = useRef<number | null>(null);
+  const worktreeMenuOpen = open && worktreeMenu;
   const { data, error: loadError } = useProjectWorktrees(
     cwd,
-    enabled && open && worktreeMenu && !!onSelectWorktree,
+    enabled && worktreeMenuOpen && !!onSelectWorktree,
   );
   const worktrees =
     data?.worktrees.filter((tree) => !tree.isMain && !tree.missing) ?? [];
+  const worktreeRows = worktrees.filter((tree) =>
+    worktreeMatches(tree, worktreeQuery),
+  );
+  const activeWorktreeIndex = Math.min(activeWorktree, worktreeRows.length - 1);
 
   useEffect(() => {
     if (enabled) return;
     setOpen(false);
     setWorktreeMenu(false);
+    setWorktreeQuery("");
     setBusyPath(undefined);
     setPickError(undefined);
   }, [enabled]);
+  useEffect(() => {
+    if (!worktreeMenuOpen) return;
+    const frame = requestAnimationFrame(() =>
+      worktreeSearch.current?.focus({ preventScroll: true }),
+    );
+    return () => cancelAnimationFrame(frame);
+  }, [worktreeMenuOpen]);
+  useEffect(() => {
+    activeWorktreeRow.current?.scrollIntoView({ block: "nearest" });
+  }, [activeWorktreeIndex, worktreeQuery]);
   useEffect(
     () => () => {
       if (closeWorktreeTimer.current != null) {
@@ -212,6 +238,7 @@ function WorkspaceModePicker({
     }
     setOpen(false);
     setWorktreeMenu(false);
+    setWorktreeQuery("");
     setBusyPath(undefined);
     setPickError(undefined);
     onClose?.();
@@ -233,24 +260,39 @@ function WorkspaceModePicker({
       window.clearTimeout(closeWorktreeTimer.current);
       closeWorktreeTimer.current = null;
     }
+    // The flyout's search takes the keyboard while it is open.
+    if (!worktreeMenu) worktreeFocusReturn.current = document.activeElement;
     setWorktreeMenu(true);
+  };
+  const hideWorktreeMenu = () => {
+    const focusReturn = worktreeFocusReturn.current;
+    if (
+      focusReturn instanceof HTMLElement &&
+      worktreeSubmenu.current?.contains(document.activeElement)
+    ) {
+      focusReturn.focus({ preventScroll: true });
+    }
+    setWorktreeMenu(false);
+    setWorktreeQuery("");
+    setActiveWorktree(0);
+    setPickError(undefined);
   };
   const closeWorktreeMenu = () => {
     if (closeWorktreeTimer.current != null) {
       window.clearTimeout(closeWorktreeTimer.current);
       closeWorktreeTimer.current = null;
     }
-    setWorktreeMenu(false);
-    setPickError(undefined);
+    hideWorktreeMenu();
   };
   const scheduleCloseWorktreeMenu = () => {
     if (closeWorktreeTimer.current != null) {
       window.clearTimeout(closeWorktreeTimer.current);
     }
+    // A search in progress stays put when the pointer drifts off.
+    if (worktreeQuery) return;
     closeWorktreeTimer.current = window.setTimeout(() => {
       closeWorktreeTimer.current = null;
-      setWorktreeMenu(false);
-      setPickError(undefined);
+      hideWorktreeMenu();
     }, HOVER_CLOSE_MS);
   };
   const label = mode === "worktree" ? "New worktree" : "Current checkout";
@@ -344,7 +386,6 @@ function WorkspaceModePicker({
               onMouseDown={(event) => event.preventDefault()}
               onMouseEnter={openWorktreeMenu}
               onMouseLeave={scheduleCloseWorktreeMenu}
-              onFocus={openWorktreeMenu}
               onClick={openWorktreeMenu}
               onKeyDown={(event) => {
                 if (event.key === "ArrowRight") {
@@ -389,45 +430,94 @@ function WorkspaceModePicker({
           ) : null}
         </Popover>
       ) : null}
-      {open && worktreeMenu ? (
+      {worktreeMenuOpen ? (
         <Popover
+          ref={worktreeSubmenu}
           anchor={worktreeAnchor}
           side="right"
           gap={SUBMENU_GAP}
           width={300}
-          maxHeight={320}
+          maxHeight={360}
           layer={LAYER.submenu}
           role="menu"
           aria-label="Existing worktrees"
           data-existing-worktrees-submenu
-          className="flex flex-col overflow-hidden p-1.5"
+          className="flex flex-col overflow-hidden"
           onMouseEnter={openWorktreeMenu}
           onMouseLeave={scheduleCloseWorktreeMenu}
           onKeyDown={(event) => {
-            if (event.key === "ArrowLeft") {
-              event.preventDefault();
-              closeWorktreeMenu();
-              worktreeAnchor.current?.focus();
-            }
+            if (event.key !== "ArrowLeft") return;
+            // In the search, ArrowLeft leaves only from the start of the text.
+            if (
+              event.target instanceof HTMLInputElement &&
+              event.target.selectionEnd !== 0
+            )
+              return;
+            event.preventDefault();
+            closeWorktreeMenu();
+            worktreeAnchor.current?.focus();
           }}
         >
-          {!data && !loadError ? (
-            <p className="flex items-center gap-2 px-2 py-3 text-[12px] text-content/50">
-              <Loader className="size-3.5 animate-spin" />
-              Loading worktrees…
-            </p>
-          ) : null}
-          <div className="min-h-0 overflow-y-auto">
-            {worktrees.map((tree) => (
+          <label className="flex shrink-0 items-center gap-2 border-b border-stroke px-3.5 py-2.5 text-content/50">
+            <Search className="size-3.5 shrink-0" />
+            <input
+              ref={worktreeSearch}
+              value={worktreeQuery}
+              placeholder="Search worktrees…"
+              aria-label="Search worktrees"
+              spellCheck={false}
+              onChange={(event) => {
+                setWorktreeQuery(event.target.value);
+                setActiveWorktree(0);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+                  event.preventDefault();
+                  setActiveWorktree(
+                    Math.max(
+                      0,
+                      Math.min(
+                        worktreeRows.length - 1,
+                        activeWorktreeIndex +
+                          (event.key === "ArrowDown" ? 1 : -1),
+                      ),
+                    ),
+                  );
+                }
+                const tree = worktreeRows[activeWorktreeIndex];
+                if (event.key === "Enter" && tree) {
+                  event.preventDefault();
+                  void selectWorktree(tree);
+                }
+              }}
+              className="min-w-0 flex-1 bg-transparent text-[12px] text-content outline-none placeholder:text-content/40"
+            />
+          </label>
+          <div className="min-h-0 overflow-y-auto p-1.5">
+            {!data && !loadError ? (
+              <p className="flex items-center gap-2 px-2 py-3 text-[12px] text-content/50">
+                <Loader className="size-3.5 animate-spin" />
+                Loading worktrees…
+              </p>
+            ) : null}
+            {worktreeRows.map((tree, index) => (
               <button
                 key={tree.path}
+                ref={
+                  index === activeWorktreeIndex ? activeWorktreeRow : undefined
+                }
                 type="button"
                 role="menuitem"
                 title={tree.path}
                 disabled={!!busyPath}
                 onMouseDown={(event) => event.preventDefault()}
+                onMouseEnter={() => setActiveWorktree(index)}
                 onClick={() => void selectWorktree(tree)}
-                className="flex min-h-11 w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-content/80 hover:bg-content/8 hover:text-content disabled:opacity-40"
+                className={`flex min-h-11 w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left hover:bg-content/8 hover:text-content disabled:opacity-40 ${
+                  index === activeWorktreeIndex
+                    ? "bg-selection text-content"
+                    : "text-content/80"
+                }`}
               >
                 {busyPath === tree.path ? (
                   <Loader className="size-4 shrink-0 animate-spin text-content/55" />
@@ -444,9 +534,11 @@ function WorkspaceModePicker({
                 </span>
               </button>
             ))}
-            {data && worktrees.length === 0 ? (
+            {data && worktreeRows.length === 0 ? (
               <p className="px-2 py-3 text-[12px] text-content/50">
-                No existing worktrees
+                {worktrees.length === 0
+                  ? "No existing worktrees"
+                  : "No matching worktrees"}
               </p>
             ) : null}
           </div>

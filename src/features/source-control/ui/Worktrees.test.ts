@@ -244,6 +244,74 @@ it("selects an existing worktree from the draft workspace menu", async () => {
   expect(gitCheckout).not.toHaveBeenCalled();
 });
 
+it("searches existing worktrees from the draft workspace menu", async () => {
+  const onSelectWorktree = vi.fn(async () => {});
+  const claude = {
+    ...tree,
+    path: "/repo-worktrees/claude",
+    branch: "feat/claude-code-commands",
+  };
+  const orch = {
+    ...tree,
+    path: "/repo-worktrees/orch",
+    branch: "mc/orch-0c347c6d5f2c",
+  };
+  vi.mocked(listWorktrees).mockResolvedValue({
+    worktrees: [
+      { ...tree, path: "/repo", branch: "main", isMain: true },
+      claude,
+      tree,
+      orch,
+    ],
+    defaultRoot: "/repo-worktrees",
+  });
+  await act(async () =>
+    root.render(
+      createElement(WorkspacePicker, {
+        cwd: "/searchable-worktree-picker",
+        mode: "current",
+        onModeChange: vi.fn(),
+        onBaseChange: vi.fn(),
+        onSelectWorktree,
+      }),
+    ),
+  );
+  await act(async () =>
+    container
+      .querySelector<HTMLButtonElement>(
+        '[aria-label="Workspace Current checkout"]',
+      )!
+      .click(),
+  );
+  await act(async () => button("Existing worktree…").click());
+  const search = document.querySelector<HTMLInputElement>(
+    '[aria-label="Search worktrees"]',
+  )!;
+  const shown = () =>
+    [...document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')].map(
+      (item) => item.title,
+    );
+  expect(shown()).toEqual([claude.path, tree.path, orch.path]);
+
+  await act(async () => type(search, "ORCH 0c3"));
+  expect(shown()).toEqual([orch.path]);
+  await act(async () => type(search, "nothing-here"));
+  expect(shown()).toEqual([]);
+  expect(document.body.textContent).toContain("No matching worktrees");
+
+  await act(async () => type(search, "feat"));
+  expect(shown()).toEqual([claude.path, tree.path]);
+  const key = (name: string) =>
+    act(async () =>
+      search.dispatchEvent(
+        new KeyboardEvent("keydown", { key: name, bubbles: true }),
+      ),
+    );
+  await key("ArrowDown");
+  await key("Enter");
+  expect(onSelectWorktree).toHaveBeenCalledExactlyOnceWith(tree);
+});
+
 it("renders a started session's workspace as a non-interactive identity", () => {
   const markup = renderToStaticMarkup(
     createElement(WorkspaceIdentity, { worktree: true }),

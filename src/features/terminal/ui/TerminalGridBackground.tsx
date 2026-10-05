@@ -31,6 +31,20 @@ const SPRITE_SCALE = 0.8;
 const BUBBLE_EASE = 0.2;
 const FRAME_MS = 33;
 
+/**
+ * Menus and dialogs float glass over the board. WebKit re-renders that glass
+ * for every frame painted beneath it, and glass stacked on re-rendering glass
+ * (a flyout on its menu, a menu on the composer) flashes stale, unblurred
+ * frames. The board holds still while one is open.
+ */
+function overlaid(): boolean {
+  return (
+    document.querySelector(
+      "body > [data-popover-layer], body > [data-dialog-layer]",
+    ) != null
+  );
+}
+
 const HEADING: Record<string, { x: number; y: number }> = {
   ArrowUp: { x: 0, y: -1 },
   ArrowDown: { x: 0, y: 1 },
@@ -330,6 +344,11 @@ export function TerminalGridBackground() {
         return;
       }
       raf = requestAnimationFrame(draw);
+      if (overlaid()) {
+        // Pick up with an ordinary step, not the whole pause at once.
+        lastFrame = 0;
+        return;
+      }
       if (time - lastFrame < FRAME_MS) return;
       const dt = lastFrame ? time - lastFrame : FRAME_MS;
       lastFrame = time;
@@ -434,7 +453,7 @@ export function TerminalGridBackground() {
     if (playing || hovered || GRID_GAMES.length < 2) return;
 
     const id = window.setInterval(() => {
-      if (document.hidden) return;
+      if (document.hidden || overlaid()) return;
       setSlide((current) =>
         stepSlider(current.index, current.dir, GRID_GAMES.length),
       );
