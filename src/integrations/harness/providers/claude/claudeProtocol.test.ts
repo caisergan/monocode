@@ -11,6 +11,7 @@ import {
   buildClaudeUserMessage,
   claudeCommandsFromRecord,
   contextFromResult,
+  contextFromUsageReply,
   contextUsedFromAssistant,
   extractExitPlanModePlan,
   isClaudeInitMessage,
@@ -932,6 +933,30 @@ describe("contextFromResult", () => {
 
   it("has nothing to report for a turn that never called the API", () => {
     expect(contextFromResult({ type: "result", usage: {} })).toBeUndefined();
+  });
+});
+
+describe("contextFromUsageReply", () => {
+  it("reads the level and the window from a get_context_usage reply", () => {
+    expect(
+      contextFromUsageReply({
+        totalTokens: 15411,
+        maxTokens: 1000000,
+        rawMaxTokens: 1000000,
+        percentage: 2,
+      }),
+    ).toEqual({ used: 15411, window: 1000000 });
+  });
+
+  it("keeps the window when the level is missing", () => {
+    expect(contextFromUsageReply({ maxTokens: 200000 })).toEqual({
+      window: 200000,
+    });
+  });
+
+  it("has nothing to report without a window", () => {
+    expect(contextFromUsageReply({ totalTokens: 15411 })).toBeUndefined();
+    expect(contextFromUsageReply(null)).toBeUndefined();
   });
 });
 

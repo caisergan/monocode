@@ -1278,3 +1278,20 @@ export function contextFromResult(
   if (!used && !window) return undefined;
   return { used: used > 0 ? used : undefined, window };
 }
+
+/**
+ * Context level and window from a `get_context_usage` reply.
+ *
+ * Claude only puts the window on a turn `result`, so a new session would show
+ * no gauge for its whole first turn. Asking up front fills that gap, and it is
+ * still the CLI's own number: the same model can run a 200k or a 1M window
+ * depending on the account.
+ */
+export function contextFromUsageReply(
+  payload: Record<string, unknown> | null,
+): { used?: number; window: number } | undefined {
+  const window = numberField(payload, "maxTokens");
+  if (window <= 0) return undefined;
+  const used = numberField(payload, "totalTokens");
+  return used > 0 ? { used, window } : { window };
+}
