@@ -1,4 +1,4 @@
-import MonoDesign
+@testable import MonoDesign
 import Testing
 
 // The generated values against the ones 11 §11.2–11.6 and the desktop name.
@@ -39,5 +39,14 @@ import Testing
   @Test func projectColorsStartNeutral() {
     #expect(Tokens.projectColors.count == 9)
     #expect(Tokens.projectColors[1] == Tokens.dark.accent)
+  }
+}
+
+@Test func mascotsAndProjectColoursHashLikeTheDesktop() {
+  #expect(Mascots.all.count == 10)
+  #expect(Mascots.all.allSatisfy { $0.rest.count == 8 && $0.talk.count == 8 && $0.rest.allSatisfy { $0.count == 8 } })
+  for sample in Mascots.samples {
+    #expect(Mascots.forProject(sample.id).name == sample.mascot, "\(sample.id)")
+    #expect(Tokens.projectColorIndex(sample.id) == sample.colorIndex, "\(sample.id)")
   }
 }

@@ -18,7 +18,7 @@ struct SettingsView: View {
       Section("Debug") {
         NavigationLink("Transcript Lab", value: Destination.transcriptLab(nil))
         NavigationLink("Scroll edge control", value: Destination.scrollEdgeControl)
-        NavigationLink("Card fling (S19)", value: Destination.cardFling)
+        NavigationLink("Card fling (S19)", value: Destination.cardFling(run: false))
       }
       .listRowBackground(palette.fill.code.color)
       #endif

@@ -41,6 +41,7 @@ struct ShimmerText: View {
       Text(text).font(font).foregroundStyle(color.opacity(0.4)).lineLimit(1)
         .overlay {
           Text(text).font(font).foregroundStyle(color).lineLimit(1)
+            .accessibilityHidden(true)
             .mask {
               GeometryReader { proxy in
                 LinearGradient(

@@ -59,7 +59,7 @@ extension Destination {
     #if DEBUG
     case let .transcriptLab(run): TranscriptLabView(run: run)
     case .scrollEdgeControl: ScrollEdgeControlView()
-    case .cardFling: CardFlingView()
+    case let .cardFling(run): CardFlingView(autorun: run)
     #endif
     }
   }

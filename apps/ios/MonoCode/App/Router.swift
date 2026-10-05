@@ -12,7 +12,7 @@ enum Destination: Hashable {
   #if DEBUG
   case transcriptLab(LabRun?)
   case scrollEdgeControl
-  case cardFling
+  case cardFling(run: Bool)
   #endif
 }
 
@@ -55,7 +55,7 @@ final class Router {
     case "scroll-edge":
       open(.settings, [.scrollEdgeControl])
     case "fling-cards":
-      open(.settings, [.cardFling])
+      open(.settings, [.cardFling(run: url.query()?.contains("run=1") == true)])
     default:
       break
     }
