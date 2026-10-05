@@ -15,11 +15,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The session import sheet lists Codex conversations, and reads Claude conversations saved under a named provider account.
 - Claude Code sessions list Claude's own slash commands in the composer's `/` picker, next to MonoCode skills: `/advisor`, `/model`, `/context`, `/usage`, `/config` and whatever else the installed Claude Code reports, with their argument hints. A command is sent as typed and Claude's reply appears as the answer. `/model` and `/effort` also move the model picker to what Claude applied, so the next launch keeps it.
 - Settings → Chat → Usage limits adds **Resume after usage limit**. When on, a session that hits a provider usage limit is armed to continue on its own once the limit resets, without clicking **Resume at reset** first. The limit notice still cancels it for one session, and a limit whose reset has already passed is never armed.
+- The workspace picker's worktree flyout has a search field. Worktree searches in the flyout, the worktree picker and the sidebar switcher match every word of the query, so `orch 0c3` finds `mc/orch-0c347c6`.
 
 ### Fixed
 
+- The terminal grid background holds still while a menu or dialog is open, so stacked glass no longer flashes unblurred frames.
 - Claude Code sessions recognize "You've hit your session limit" (and weekly or model limits) when Claude refuses a turn again without a new rate limit event, so the session shows the limit notice and can resume at the reset instead of looking finished.
 - A turn stopped by a usage limit no longer counts as completed. An orchestration worker it stops stays in its task, marked **Usage limit** in the sidebar, and continues the same assignment when the limit resets; dismissing its limit notice hands the task back to the lead as failed. The lead is not sent worker results while it is usage-limited, and a lead turn stopped by a limit no longer pauses the run and stops its agents.
+
+## [0.7.1] - 2026-10-05
+
+### Added
+
+- The sidebar working-copy switcher can search by branch or path and select a checkout with the arrow keys and Enter. Entering a name with no matches offers to create a worktree from the selected checkout's `HEAD`, then switches to it, with progress and errors shown in the picker.
+- Folder rows in the Changes panel's tree view can stage or unstage all changes beneath that folder, including in remote projects. File and folder mutation actions are disabled while another change is in progress, and affected diffs refresh when it completes.
+- The question panel has a **Back** button to revisit and edit earlier answers before submitting, preserving selected options and free-text responses. In #688.
+- GitHub pull request and issue views in the Inbox have an activity timeline that interleaves comments, reviews, and commits chronologically, groups consecutive commits by author, and lets long comments expand on demand. Linked work item panels add expandable description summaries; pull request panels also list changed files with counts and links to each file's diff.
+- Settings → Appearance → **Diff colors** offers Default, Colorblind (blue/orange) and High contrast (blue/orange with stronger tints and text) palettes. They apply to the diff view, the editor's git gutter, tool-call previews, change counts and added/deleted file status in the file tree and changes panel. In #707 by @EricRasputin.
+- The README includes a contributors badge, a link to the full contributor list, and acknowledgments for contrib.rocks.
+
+### Changed
+
+- Workspace search and new-session actions live in the sidebar header in both expanded and compact layouts.
+- Quick Composer has a dedicated permissions picker beside the model selector, and its project picker is in the composer header.
+- Long title-bar and file-pane tab labels fade at their clipped edge. The fade appears only when text overflows and updates as tabs resize.
+- The session sidebar and transcripts above a docked composer fade at the bottom edge, with extra scroll space so the last session and latest reply can scroll fully into view.
+- Newly created sidebar sessions fade in and push existing rows down; session title updates have a sweep and particle effect. Opening a project or reordering existing sessions does not replay the insertion animation. Both effects respect reduced-motion preferences.
+- New split panes slide in from the edge where they were added, while linked work item panels slide in from the right and reveal their content together. These animations respect reduced-motion preferences.
+- Linked GitHub work items preload when hovering their sidebar links. GitHub Inbox details, discussions, and diffs reuse recent cached results and share in-flight requests, reducing repeat API calls and delays when opening a panel.
+- New agent output reveals at a steady pace from its first chunk, including replies that finish before their first paint. Incoming chunks no longer restart the reveal timing; saved replies and output received in a hidden tab appear immediately when opened.
+- Added and removed lines show a `+`/`-` marker in the diff view and in the editor's git gutter, so they no longer depend on red/green color alone. Diff colors are now theme tokens with separate light-theme values, which also improves the contrast of light-theme gutter line numbers. In #707 by @EricRasputin.
+- Regression coverage now includes worktree search and creation, folder staging, file-drop lifecycle handling, transcript scrolling and output pacing, Inbox timelines and cache freshness, and pane animations. Folder-action tests isolate delayed refreshes to avoid timer races.
+
+### Fixed
+
+- Transcript scrolling keeps the reader's place when earlier turns resize together or composer resizing temporarily changes the viewport. Layout changes and queued scroll events no longer resume paused following, and scrolling inside a code block no longer interrupts transcript following.
+- File and image drops work after the composer becomes ready or switches providers, with correct drop coordinates on Windows and Retina Macs. Sending waits for dropped attachments to finish reading; stale reads after a draft reset or unmount are discarded. Duplicate native/browser drop events attach a file once, browser image items are accepted even without a populated file list, and unreadable or missing files show an error.
+- Staging and unstaging treat file and folder paths literally, so names containing wildcard characters or Git pathspec syntax cannot affect unrelated paths, locally or on a remote host.
+- Markdown and SVG files opened for Git review default to source mode so their changes are visible in the editor. Review tabs remember their view mode separately from ordinary file tabs. In #660.
+- The model search receives focus after its flyout becomes visible, including both the Models submenu and the picker opened beside the current model. In #670 by @SachinD6.
+- The composer model picker keeps long model names on one line instead of truncating them.
+- Explorer file names no longer clip the bottoms of letters such as `g`. In #678 by @sambhavthakkar.
+- Sidebar diff statistics scale to the available width and refit when the sidebar is resized.
+- The provider usage chip, its tooltip, and usage cards update immediately when **Show remaining usage** changes. Remaining percentages are calculated from clamped usage values.
+- Session history shows live title and linked-work-item updates before the next save. Pending agent events are applied before submitting or steering a message, keeping received output before the new user message and checking the latest session state.
+- Pi's model catalog includes models registered by extensions. In #645 by @AdzeB.
+- Remote hosts detect the Pi coding agent installed via npm by resolving its launcher and checking the enclosing package manifest. In #687; fixes #673.
+- Merge request diffs load on older self-hosted GitLab instances by falling back to the legacy changes endpoint when the newer endpoint is unavailable. Permission and connection errors still surface normally, and incomplete diffs are marked as truncated. In #723.
 
 ## [0.7.0] - 2026-10-02
 
@@ -1225,7 +1267,8 @@ First public release. macOS (Apple Silicon) only.
 - Updater endpoint and minisign public key are injected at release time rather than committed, so forks do not inherit the maintainer's update channel.
 - macOS release builds sign with `APPLE_SIGNING_IDENTITY` via a config overlay; the committed default remains ad-hoc `-` for community builds.
 
-[Unreleased]: https://github.com/hardbeat920/monocode/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/hardbeat920/monocode/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/hardbeat920/monocode/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/hardbeat920/monocode/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/hardbeat920/monocode/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/hardbeat920/monocode/compare/v0.4.3...v0.5.0
