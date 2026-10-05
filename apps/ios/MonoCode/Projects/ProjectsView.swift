@@ -74,7 +74,9 @@ struct ProjectsView: View {
           }
         }
       } else if !rest.isEmpty {
-        LabelRow(title: "Projects")
+        // The large title already says Projects; the label only separates
+        // the rest from a Pinned section above it.
+        if !pinned.isEmpty { LabelRow(title: "Projects") }
         ForEach(rest) { ProjectRow(row: $0) }
       }
       if rows.isEmpty {
@@ -141,10 +143,12 @@ struct MachineRow: View {
   }
 }
 
-/// A project row (11 §11.13): 52 pt, the mascot in the project colour,
+/// A project row (11 §11.13): 60 pt, the 20 pt mascot in the project colour,
 /// hopping while a session runs, and the name, shimmering while busy.
 struct ProjectRow: View {
   var row: ProjectsView.Row
+  /// 17 / 22, a step above the row role (owner, 2026-10-06).
+  static let name = TypeRole(size: 17, line: 22)
   @Environment(Router.self) private var router
   @Environment(SyncEngine.self) private var engine
   @Environment(\.palette) private var palette
@@ -155,19 +159,19 @@ struct ProjectRow: View {
       router.push(.project(env: row.env, projectId: row.project.id))
     } label: {
       HStack(spacing: 12) {
-        MascotView(projectId: row.project.id, busy: busy)
+        MascotView(projectId: row.project.id, busy: busy, size: 20)
         if busy {
-          ShimmerText(text: row.project.name, font: .mono(Tokens.TypeScale.row, .medium), color: palette.content.color)
+          ShimmerText(text: row.project.name, font: .mono(Self.name, .medium), color: palette.content.color)
         } else {
           Text(row.project.name)
-            .font(.mono(Tokens.TypeScale.row, .medium))
+            .font(.mono(Self.name, .medium))
             .foregroundStyle(palette.content.color)
             .lineLimit(1)
         }
         Spacer()
       }
       .padding(.horizontal, 16)
-      .frame(height: 52)
+      .frame(height: 60)
       .contentShape(.rect)
     }
     .buttonStyle(ProjectPressStyle(busy: busy))

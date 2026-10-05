@@ -243,7 +243,7 @@ used only for:
 - **Row heights:**
   - menu and action-sheet rows 48;
   - settings rows 52 or more;
-  - project rows 52;
+  - project rows 60;
   - session cards about 88 (the desktop card's three rows at mobile type sizes);
   - compact session cards 64.
 - **Content width.** Fluid on phones. On tablets the transcript and composer column
@@ -534,15 +534,18 @@ The phone's version of the desktop project rail (`ProjectRail.tsx`).
 **Sections:**
 - **Pinned:** projects pinned on this phone. Pins are stored on the phone, as the
   desktop stores its own.
-- **Projects:** grouped by machine when two or more machines exist. Each group header
+- **Projects:** grouped by machine when two or more machines exist. With one machine
+  the group has no label under the large title, unless a Pinned section sits above it
+  (owner, 2026-10-06). Each group header
   is a `MachineRow`: the machine label, a status dot (emerald online, content α .35
   offline, amber connecting), and the transport glyph (none for direct, a relay glyph
   for relay). The header opens Machine details.
 
-**Project row** (52 pt), from the rail's project card:
-- The leading 16 pt slot holds the project mascot in its colour (logos are
+**Project row** (60 pt, raised from 52 by the owner on 2026-10-06), from the rail's
+project card:
+- The leading 20 pt slot holds the project mascot in its colour (logos are
   desktop-local, so the mascot is the default). It hops while any session runs.
-- The name is 15 pt 500 and shimmers while busy.
+- The name is 17 pt 500 and shimmers while busy.
 - At right: `+N` emerald and `−N` red (12 pt semibold, tabular) from `git.index` when
   cached.
 - Selected (iPad) is `sel.strong`; otherwise rows are at opacity .65 with full opacity
