@@ -39,14 +39,19 @@ The detail is in [16 §16.7](16-ios-native-design.md#167-milestones).
 | Milestone | Replaces the phone scope of | Status |
 |---|---|---|
 | R0 Skeleton and transcript | M0 (app skeleton, design foundation, performance harness), T (iOS), S11 | In progress: the simulator steps are built (As built, R0, below); the iPhone 13 run and S11 remain |
-| R1 Channel and pairing | M1 | |
-| R2 Read path | M2 | |
+| R1 Shell and read path (UI first, on the demo host) | M2's screens | In progress (As built, R1, below) |
+| R2 Channel, pairing and a real host | M1, and M2's cache and real host | |
 | R3 Write path | M3 | |
 | R4 Workspace and parity | M6. `apps/mobile` is deleted here | |
 | R5 Relay | M4 | |
 | R6 Push | M5 | |
 | R7 Hardening | M7 | |
 | R8 Official publication | M8 | |
+
+R1 and R2 were swapped on 2026-10-06 (owner decision, UI first): R1 builds the shell
+and the read-path screens on the demo host, and R2 brings the channel, pairing, the
+cache and a real host. [16 §16.7](16-ios-native-design.md#167-milestones) has the
+detail.
 
 ### Personal track checkpoints
 
@@ -170,6 +175,19 @@ The Swift app's R0, step by step. Screenshots from the iPhone 17 simulator are i
 | Simulator benchmark | iPhone 17 simulator (iOS 27.0, `iPhone18,3`), 1,000 turns (7,087 rows; 7,151 with the live turn), fling at 6,000 pt/s for 10 s. The display link runs at 60 Hz (16.7 ms frames). **Streaming at 90 chars/s with 5 tool events/s, three runs: 0 hitches in 601 frames each**, frame p99 and max 16.7 ms; cold layout first screen 7 to 11 ms, all rows 464 to 489 ms; measure p95 2.3 ms; **tail re-layout p50 1.3 to 1.4 ms, p95 2.0 to 2.2 ms** (about 620 updates); raster p95 3.1 to 3.9 ms; 0 or 1 synchronous draws; the Lab's main-thread work per streamed frame p95 0.03 ms. Idle fling: 0 hitches in 600 frames, raster p95 7.4 ms. A run straight after a cold simulator boot had 3 hitches (6.0 ms/s, max frame 43 ms, raster p95 28 ms) and is discarded as warm-up. These are not S11: the tail re-layout above the 1 ms budget, and the cold layout above 60 ms, are measured on the Mac's CPU and must be re-measured on the iPhone 13 |
 
 
+### As built, R1 (2026-10-06, branch `feat/ios-native-design`)
+
+UI first (16 §16.7): the shell and the read-path screens on the demo host. One commit
+per step. Deviations are in [16 "R1 deviations"](16-ios-native-design.md#r1-deviations).
+
+| Item | Status |
+|---|---|
+| Fixtures | `scripts/gen-fixtures.mjs` now also bundles `demoHost.ts` (Expo modules stubbed, its private instance exported at bundle time, nothing in `apps/mobile` edited), `@monocode/core/window` and `@monocode/core/transcript`, and writes: `MonoDemo/Resources/demo-state.json` (the demo's projects, worktrees, all 61 `HostSession`s, the model catalog and six seeded replies, 611 KB); MonoDemo's `demo-responses.json` (the demo's answers to 24 read calls: `inbox.list`, `projects.list`, `models.list`, every `sessions.page` page with cursors, `sessions.sync` snapshots and `unchanged`, the `sessions.blocks` chains, a truncated window, an anchor and a reset anchor); MonoWire's `wire-samples.json`, `sync-cases.json` (14 `applySessionSync` cases, five of them errors) and `grouping.json` (19 block lists: the three live demo sessions, a 60-turn fixture and 15 edge cases, with `groupTurns`, `groupTurnItems` settled and live, `foldableWork`, `workSummaryLine`, `turnCopyText` and per block `toolCallLabel`, `toolCallState`, `resolveToolCallDisplay`, `subagentName`, `proseSummary`); and MonoTranscript's `theme-light.json` |
+| MonoWire | `Packages/MonoWire` (iOS 26, macOS 26). Codable `Block`, `Session`, `HostSession`, `HostProject`, `ModelCatalog`, `InboxItem`/`InboxList`, `SessionListItem`/`SessionPage`, `SessionSync` (unchanged, snapshot, delta, chunked), `WindowMeta`, `WatchSet`, `OlderBlocks`, `Welcome` and the event payloads; unknown fields are ignored and wire enumerations stay open (R1-2). `applySessionSync`, the window helpers and truncation (`window.ts`), the summaries (`summary.ts`), and the desktop's grouping with its dependencies ported line for line: `transcriptActivity.ts`, the tool predicates and `composeToolTitle` from `preview.ts`, `shellIntent.ts`, the path helpers, `monocodeToolCall.ts`. Strings are counted and sliced in UTF-16 and matched with JavaScript-compatible regular expressions, so the output is the TypeScript's. 10 Swift Testing cases, one of them run over all 19 grouping cases; every fixture object re-encodes to the same JSON |
+| MonoSync | `Packages/MonoSync` (iOS 26, macOS 26). `Transport` and `FrameSocket` (12 §12.4), `HostConnState`, and `HostRuntime` as an actor: hello and welcome, request and response matching with timeouts, host errors as `ChannelError`, an ordered event stream, the 50 ms watch debounce, reconnect with backoff (R1-3). `WatchManager`: reference-counted inbox, project and session interest, the 30 s linger, at most 8 sessions (the most recently viewed). The `@Observable` main-actor stores: `HostsStore`, `InboxStore`, `ProjectsStore`, `SessionStore`, `CatalogStore`, `SeenStore`, `PinsStore`. `HostSync` per host: coalesced `inbox.list`, `projects.list`, `models.list`, first and next `sessions.page` pages, windows that decode and apply `session.sync` on a serial queue off the main thread, base-mismatch resync and older pages. `paging.ts` and `older.ts` ported; 17 cases, the paging ones from `paging.test.ts` one for one |
+| MonoDemo | `Packages/MonoDemo` (iOS 26, macOS 26). `DemoHost` actor and `DemoTransport`: in process, no Noise. Answers `inbox.list`, `projects.list`, `sessions.page`, `sessions.sync`, `sessions.blocks`, `watch.set` and `models.list`, refuses the rest with `method_not_found`, and advertises only those capabilities. Its history is moved so the fixture's clock is the launch time. Block revision stamps make real deltas; `session.sync` is coalesced to 100 ms per session and `inbox.changed` and `project.sessions` to 500 ms (06 §6.6). `startLiveTurns()` runs R1-1's two turns. 6 cases: all 24 golden answers match the TypeScript demo, and an end-to-end run through `SyncEngine` fills the inbox, both pages, a window and its older page, then streams a live turn into the window until it equals the host's |
+| `scripts/check.sh` | Unchanged: it already runs `swift test` for every package whose manifest lists macOS, now MonoDemo, MonoDesign, MonoSync and MonoWire |
+
 ## 14.3 Risks
 
 | Risk | Likelihood | Impact | Mitigation |
@@ -183,7 +201,7 @@ The Swift app's R0, step by step. Screenshots from the iPhone 17 simulator are i
 | Relay abuse or cost growth | Medium | Medium | Limits (§7.6); direct preferred; per-room push limits; alerts |
 | Workers can't reach APNs over HTTP/2 | Medium | Medium | Spike S22; a small APNs forwarder behind the gateway, with no change to hosts or phones |
 | Large transcripts on older iPhones | Medium | Medium | Windowing, truncation, the native transcript's exact layout and recycling ([15 §15.4](15-performance.md#154-the-native-transcript-monotranscriptview)) |
-| The custom transcript lags UIKit text conveniences (text selection, accessibility, find) | Medium | Medium | Specified up front in 15 §15.4; the accessibility checklist is an exit criterion of R2 |
+| The custom transcript lags UIKit text conveniences (text selection, accessibility, find) | Medium | Medium | Specified up front in 15 §15.4; the accessibility checklist is an exit criterion of R1 |
 | SwiftUI misses a budget (long lists, keyboard) | Medium | Medium | Spikes S19 and S20, each with a UIKit fallback named up front |
 | Smoothness regresses as features land | High | High | §15.3 coding rules; benchmark gates on PRs touching hot paths; the nightly device run |
 | App Store review rejection ("requires external server") | Medium | Medium | Demo host, review notes, video |

@@ -526,7 +526,7 @@ inside it for the title and an `xmark` close button. Each picker edits the compo
 - **Reduce Transparency.** Every glass surface has an opaque sibling: `t.base` with a
   `stroke` hairline. It is used when
   `@Environment(\.accessibilityReduceTransparency)` is on, or when the legibility check
-  in R2 finds glass over `#171717` too muddy for that surface.
+  in R1 finds glass over `#171717` too muddy for that surface.
 - **Motion.**
   - The `MOTION` tokens become `Animation.timingCurve(_:_:_:_:duration:)` with the
     desktop's bezier points.
@@ -567,14 +567,19 @@ is known.
 | Milestone | Scope | Exit criteria | Size |
 |---|---|---|---|
 | **R0 Skeleton and transcript** | The Xcode project with xcconfig tracks and package scaffolds. The token generator. MonoTranscript ported out of the Expo module. Debug → Transcript Lab with the fixtures. The fling benchmark writing `Documents/benchmarks/latest.json`. `scripts/check.sh` running `swift test` and `xcodebuild test` | Builds and runs on the iPhone 17 simulator (iOS 27) and the iPhone 13 (iOS 26). In the Lab, the hosted transcript scrolls under the glass navigation bar with the scroll-edge effect (§16.6.4). S11 is measured on the iPhone 13 (0 hitches flinging 1,000 turns while streaming; tail re-layout ≤ 1 ms), which answers the go/no-go the Expo app left open | M |
-| **R1 Channel and pairing** | MonoChannel with vectors and golden fixtures. Direct transport and race. `HostRuntime`. Keychain. Pairing screens and the scanner. The hosts table. Settings → Machines. MonoDemo, enough to show Agents | Pairs with a CLI-started host on the LAN, lists its projects and survives a host restart. Revoke closes the channel. The interop test passes | L |
-| **R2 Read path** | Agents, Projects, the Project screen and the session screen with the transcript fed by the row builder. The cache (S18), watch, windowed sync, older pages, tool and attachment sheets. The demo host's read path | Feature parity with the Expo app's M2. The list and navigation budgets in 15 §15.5 pass. The ported sync and paging tests pass | L |
+| **R1 Shell and read path** (UI first) | MonoWire (Codable read-path types, `applySessionSync`, windowing, summaries, turn and step grouping) checked against golden fixtures. MonoSync's read path: the `Transport` protocol, `HostRuntime`, `WatchManager` and the stores. MonoDemo answering the read path. The app shell (§16.6.1, §16.6.2), Agents, Projects, the Project screen and the session screen with the transcript fed by the Swift row builder, the tool sheet, and the composer as a layout placeholder. All of it on the demo host | Runs on the iPhone 17 simulator: Welcome → Try the demo → Agents, Projects, Project, and a session whose transcript comes from the Swift row builder, matching the TypeScript golden rows. S19 measured. Screenshots of every screen in dark and light. The ported paging tests pass | L |
+| **R2 Channel, pairing and a real host** | MonoChannel with vectors and golden fixtures. Direct transport and race (S23). Keychain. Pairing screens and the scanner. The hosts table. Settings → Machines. The cache (S18) and persistence. The read path against a real host | Pairs with a CLI-started host on the LAN, lists its projects and survives a host restart. Revoke closes the channel. The interop test passes. Feature parity with the Expo app's M2 against a real host; the list and navigation budgets in 15 §15.5 pass | L |
 | **R3 Write path** | The outbox, the composer, pickers, queue card and usage tab, approvals, the banner, the question form, New session with a worktree, drafts, the keyboard (S20) | Parity with the Expo app's M3. No lost or duplicated commands in fault runs. The keyboard budget passes | L |
 | **R4 Workspace and parity** | Explorer, Changes, commit and push, the file and diff viewers in document mode, highlighting (S21) | Parity with the Expo app's M6. **`apps/mobile` is deleted in this change**, and 14's "As built" records it | M |
 | **R5 Relay** | The client side of M4: the relay transport and the upgrade probe | 14 M4's exit criteria | M |
 | **R6 Push** | The client side of M5: APNs registration, the extension, categories and actions, the badge. The gateway's APNs provider (S22) | 14 M5's exit criteria | M |
 | **R7 Hardening** | M7: app lock, privacy overlay, iPad, accessibility, P1 motion, sounds, diagnostics, the QA matrix | 14 M7's exit criteria | L |
 | **R8 Official publication** | M8 | 14 M8's exit criteria | S |
+
+**Owner decision, 2026-10-06: UI first.** R1 and R2 swap, so the owner can see and
+steer the design before the channel work. R1 builds the app shell and the read-path
+screens on the demo host, with no channel, pairing or cache. R2 brings MonoChannel,
+pairing, the real transports, the cache and a real host behind the same screens.
 
 **Every milestone ends with:**
 - `swift test` for the packages and `xcodebuild test` for the app and MonoTranscript;
@@ -591,10 +596,22 @@ has the detail.
 | # | Deviation from this plan | Reason |
 |---|---|---|
 | R0-1 | MonoDesign carries the palette resolved at the default tint, for dark and light, not a Swift port of `palette()` for any hue, saturation and lightness. It has no spacing tokens | The custom tint is an Appearance setting that has no screen until R7; `@monocode/design` has no spacing tokens to generate |
-| R0-2 | `MonoTranscriptView` still takes ops and the theme as JSON strings in the Expo app's `spec.ts` shape (`apply(_:)`, `setTheme(_:)`), parsed with `JSONSerialization` on the layout queue. `RowSpec` is not yet the Swift type of [15 §15.4](15-performance.md#154-the-native-transcript-monotranscriptview), and ops are serialised (§16.4 says they are not) | The fixtures and the Lab feed it JSON until the Swift row builder exists (R2). The prototype's measurements also showed `JSONSerialization` faster than Codable for a 1,000-turn reset |
+| R0-2 | `MonoTranscriptView` still takes ops and the theme as JSON strings in the Expo app's `spec.ts` shape (`apply(_:)`, `setTheme(_:)`), parsed with `JSONSerialization` on the layout queue. `RowSpec` is not yet the Swift type of [15 §15.4](15-performance.md#154-the-native-transcript-monotranscriptview), and ops are serialised (§16.4 says they are not) | The fixtures and the Lab feed it JSON until the Swift row builder exists (R1, after the 2026-10-06 swap). The prototype's measurements also showed `JSONSerialization` faster than Codable for a 1,000-turn reset |
 | R0-3 | The transcript fixtures live in MonoTranscript's own resources (`Sources/MonoTranscript/Resources/Fixtures`), not test resources, so they ship in every build that links the package (about 6 MB). The recorded stream is 30 s long and bound to the 1,000-turn base: it inserts after that fixture's last turn | The Lab loads them at run time. They move to a debug-only bundle before the first TestFlight build. 30 s covers the Lab's benchmark run (stream from 2 s, fling from 3.5 s to 13.5 s) at a third of the size of a full replay |
-| R0-4 | The Lab cannot open folds or answer approvals, and its stream replays only on the 1,000-turn fixture. Scenarios run unattended through `<scheme>://lab?run=big\|huge\|huge-stream`, or the `-MCOpen <url>` launch argument, which skips the system's "open in" prompt | Without the Swift row builder (R2) there is nothing to rebuild rows from; the recording is bound to its base (R0-3). The launch argument lets `simctl` and UI tests drive the Lab |
+| R0-4 | The Lab cannot open folds or answer approvals, and its stream replays only on the 1,000-turn fixture. Scenarios run unattended through `<scheme>://lab?run=big\|huge\|huge-stream`, or the `-MCOpen <url>` launch argument, which skips the system's "open in" prompt | Without the Swift row builder (R1) there is nothing to rebuild rows from; the recording is bound to its base (R0-3). The launch argument lets `simctl` and UI tests drive the Lab |
 | R0-5 | The R0 benchmark numbers come from the iPhone 17 simulator. Its display link runs at 60 Hz, and the Mac's CPU does the layout. They are not S11, which still needs the iPhone 13 on iOS 26 | The owner runs the device; the coding agent may only use the simulator (decision 4) |
+
+### R1 deviations
+
+Recorded as R1 is built; [14 "As built, R1"](14-roadmap.md#as-built-r1-2026-10-06-branch-featios-native-design)
+has the detail.
+
+| # | Deviation from this plan | Reason |
+|---|---|---|
+| R1-1 | The demo host starts two turns of its own once the app connects: "Profile the transcript scroll" streams an answer, settles and starts again every few seconds, and "Add pagination to /sessions" stops at an `npm test -- auth` approval. The Expo demo is still at rest until the phone sends a command. The Swift demo also answers `sessions.sync` as a request, which the Expo demo only pushed from `watch.set`; it follows 06 §6.7's host algorithm | Without the write path (R3) nothing would ever run, so Working, Need approval, the spinner and shimmer could not be reviewed. The turns copy the Expo demo's own `beginTurn` steps and timing |
+| R1-2 | Wire enumerations (`BlockRole`, `SessionStatus`, `RuntimeMode`, attention kinds, preview kinds) are open string types (`Open<Tag>`) rather than Swift enums with an `unknown` case. An unknown value decodes, compares unequal to every known case, reports `isKnown == false` and re-encodes unchanged | Same tolerance as §16.5 asks for, and values a newer host sends round-trip instead of collapsing to one `unknown` |
+| R1-3 | `HostRuntime` implements connect, `request`, the event stream, the debounced watch, reconnects with backoff and the 15 s offline wait. `verify`, ping and pong, presence, `scenePhaseChanged` and `pathChanged` are not built. In R1 frames are plain JSON envelopes: the phone sends a hello, the host answers with its welcome | They belong to the channel (MonoChannel, R2). The demo transport skips Noise anyway (§16.5) |
+| R1-4 | The seen and project-pin stores live in memory, and there is no host registry: every launch starts at Welcome | Persistence is MonoStore's (R2) |
 
 ## 16.8 Spikes
 
@@ -604,11 +621,11 @@ These extend [14 §14.2](14-roadmap.md#142-m0-spikes).
 |---|---|---|---|
 | S11 | Carried over: 0 hitches flinging 1,000 turns while streaming on the iPhone 13; tail re-layout ≤ 1 ms; streaming equals final | R0, Transcript Lab on the device | As in 14 §14.2: reduce the animated row kinds, or move layout to a shared core |
 | S18 | Cache encryption: GRDB with SQLCipher through SwiftPM (build size, open time, migration speed), against plain SQLite under Data Protection `completeUntilFirstUserAuthentication` | R2, day one | Data Protection only. 03 §3.9 and 12 §12.6 are amended |
-| S19 | A SwiftUI `List` of MonoCode cards with swipe actions and context menus: 0 hitches flinging 500 cards on the iPhone 13 | R2 | A `UICollectionView` list layout in a representable, with the same cards hosted by `UIHostingConfiguration` |
+| S19 | A SwiftUI `List` of MonoCode cards with swipe actions and context menus: 0 hitches flinging 500 cards on the iPhone 13 | R1 | A `UICollectionView` list layout in a representable, with the same cards hosted by `UIHostingConfiguration` |
 | S20 | Keyboard: does the composer in `safeAreaBar` follow interactive dismissal frame by frame, with the UIKit transcript's bottom inset following, with no double offset? | R3, day one | A UIKit session controller: transcript plus a hosted composer pinned to `keyboardLayoutGuide` |
 | S21 | Highlighting: tree-sitter (SwiftTreeSitter with the language grammars) against highlight.js in JavaScriptCore. A 400-line TypeScript file within 50 ms on the iPhone 13, with the desktop's `github-dark` and `github-light` colours | R4, day one | highlight.js in JavaScriptCore, which matches the Expo app's output |
 | S22 | Can the Cloudflare Worker send to APNs directly (HTTP/2, ES256 token auth)? This replaces S5's Expo Push question | Before R6, with S5 | A small APNs forwarder outside Workers, called by the gateway |
-| S23 | `URLSessionWebSocketTask` to `ws://` LAN, Tailscale `100.x` and `*.ts.net` addresses with `NSAllowsLocalNetworking`. When does the local network prompt fire? This takes over S4 for Swift | R1 | Network.framework `NWConnection` with `NWProtocolWebSocket` |
+| S23 | `URLSessionWebSocketTask` to `ws://` LAN, Tailscale `100.x` and `*.ts.net` addresses with `NSAllowsLocalNetworking`. When does the local network prompt fire? This takes over S4 for Swift | R2 | Network.framework `NWConnection` with `NWProtocolWebSocket` |
 
 Spikes closed by D19: S1 (Hermes performance), S3 (Android background), S6 (Expo
 workspaces), S9 (Hugeicons in React Native), S10 (Android glass), S12 (React Native
@@ -622,7 +639,7 @@ chrome), S13 (JS thread budget). Rev 1's S14 to S17 are withdrawn.
 | The Swift client drifts from the TypeScript protocol | §16.5: vectors, golden fixtures regenerated in CI, the interop test, tolerant decoding |
 | Two implementations of the channel crypto | Standard primitives (CryptoKit). Both implementations pass the same vectors. The external security review before v1 covers both ([13 §13.9](13-testing-and-release.md#139-release-readiness-checklist-v1)) |
 | SwiftUI misses a budget (long lists, keyboard) | Spikes S19 and S20, each with a UIKit fallback named up front |
-| Liquid Glass reads as muddy over the dark base | The opaque sibling is one flag away (§16.6.10). Legibility is checked on R2 screenshots |
+| Liquid Glass reads as muddy over the dark base | The opaque sibling is one flag away (§16.6.10). Legibility is checked on R1 screenshots |
 | Only one physical device, and it needs iOS 26 | The iPhone 13 updates to iOS 26 before R0's device run. 120 Hz and small-screen checks wait for more devices ([13 §13.4](13-testing-and-release.md#134-manual-qa-matrix)) |
 | Upstream doesn't take a Swift app | Host, desktop and package changes stay upstream-shaped (D13). The app is self-contained in `apps/ios` and runs on the personal track meanwhile |
 | Two apps in one repository until R4 | `apps/mobile` is frozen and outside the root workspaces. Its CI job is removed at R4 |
