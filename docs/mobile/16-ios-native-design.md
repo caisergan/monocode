@@ -349,9 +349,12 @@ TabView(selection: $router.tab) {
 - **The preview** is a light card at a fixed 320 × 200 pt: the title, the last
   assistant line and the status. Building a live transcript for a peek would cost a
   sync; that stays a later option.
-- **Swipe actions.**
-  - Leading: Pin or Unpin, then Mark seen (`sel.strong` tint).
-  - Trailing: Archive (`status.danger` tint), hidden until the host supports it.
+- **Swipe actions**, per [11 §11.12](11-design-and-ux.md#1112-agents-home) and
+  [§11.14](11-design-and-ux.md#1114-project-screen-and-session-list):
+  - Leading (swipe right): Mark seen or unseen on Agents, Pin or Unpin on the
+    Project list (`sel.strong` tint).
+  - Trailing (swipe left): Archive (`status.danger` tint), hidden until the host
+    supports it.
 - **Project rows** get a context menu without a preview: Pin or Unpin, New session,
   Copy path.
 

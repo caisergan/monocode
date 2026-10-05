@@ -45,7 +45,8 @@ is closed. Nothing lets a person reach those agents from a phone.
 | Sharing a host with another person | Every paired device acts as the host's OS user. Roles beyond admin/member come later |
 | Web or desktop clients of the channel protocol | The desktop keeps HTTP RPC (D11) |
 | Voice push-to-talk | v1 relies on the keyboard's built-in dictation |
-| F-Droid / no-Google builds | Push depends on FCM. Revisit after v1 |
+| Android | v1 is a native iOS app in Swift (D19, [16](16-ios-native-design.md)). The protocol stays language-neutral, so an Android app can follow after v1 |
+| F-Droid / no-Google builds | Depends on an Android app first |
 
 ## 1.4 Users
 
@@ -92,8 +93,8 @@ Each journey has a target time measured from unlocking the phone.
 | Changes | Changed files, unified diff per file, commit and push | Stage hunks, discard, PR create |
 | Files | Browse and view text files with highlighting | Edit, search content |
 | Notifications | Approval, question, finished, failed, interrupted, usage limit; per-host and per-category settings; content previews optional; badge | Live Activities, widgets, host-offline alerts |
-| Security | Keychain/Keystore keys, encrypted cache, app lock, privacy screen, revocation | Hardware-bound keys, read-only devices |
-| Platforms | iPhone, iPad (split layout), Android phones and tablets | Apple Watch, Wear OS |
+| Security | Keychain keys, encrypted cache, app lock, privacy screen, revocation | Hardware-bound keys, read-only devices |
+| Platforms | iPhone and iPad (split layout) on iOS 26 or later | Android phones and tablets (deferred, D19), Apple Watch |
 
 ## 1.7 Feature parity matrix
 
@@ -128,8 +129,8 @@ The phone mirrors what remote host sessions support on the desktop today
 | Time from approval request to push shown (phone locked, online) | p50 < 3 s, p95 < 8 s | `push.test` and QA runs with timestamps |
 | Time from tapping Send to host receipt (Wi-Fi, relay) | p50 < 400 ms | Client timing in diagnostics |
 | Reconnect after foregrounding (host online) | p50 < 800 ms direct, < 1.5 s relay | Diagnostics |
-| Transcript open, cached session | Content ≤ 150 ms after tap (≤ 350 ms low-end) | Device benchmarks |
-| Transcript fling while streaming (1,000 turns) | 0 hitches on reference devices; ≤ 3 ms/s hitch ratio on low-end Android | Device benchmarks ([15 §15.5](15-performance.md#155-budgets)) |
+| Transcript open, cached session | Content ≤ 150 ms after tap | Device benchmarks |
+| Transcript fling while streaming (1,000 turns) | 0 hitches on the reference iPhones | Device benchmarks ([15 §15.5](15-performance.md#155-budgets)) |
 | Lists, sheets, keyboard, navigation | 0 dropped frames on reference devices | Same |
 | Crash-free sessions | ≥ 99.5 % | Store consoles |
 | Lost commands | 0 | Outbox property tests; QA chaos runs |

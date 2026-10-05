@@ -36,13 +36,13 @@ When the desktop changes, this document follows (§11.1).
 | LiveAgentsPreview "Working" card | **Agents** tab, the cross-machine home | "Working", "Need approval", "Done" vocabulary and colours |
 | Title tabs and split panes | One session per screen, a push stack | Harness status glyphs (braille spinner, teal done check) on list rows |
 | Hover-revealed actions | Visible buttons, swipe actions, long-press menus | Action sets and order |
-| Context menus (`ExplorerMenu`) | Action sheets | Item copy, order, separators, danger styling |
+| Context menus (`ExplorerMenu`) | Native context menus (M15); action sheets only for confirmations | Item copy, order, separators, danger styling |
 | Popovers, selects, pickers | Bottom sheets; anchored popovers only on iPad | Glass frame, row styles, entry curve |
 | Modals and confirm dialogs | Centred dialogs, the same two types | Backdrop, panel, entry motion, button styles |
 | Approval toasts | In-app approval banner, plus push | Dashed glass card, Allow/Deny buttons |
 | Settings rail + pages | Grouped list, then pages of `Group` cards | Primitives, group names, copy |
 | Quick composer | The model for the New session composer | 16/24 prompt, one-row chips, single Start |
-| Native window glass | The platform's own chrome: Liquid Glass bars, tab bar, sheets and `GlassView` surfaces on iOS 26; translucent system bars before iOS 26; Material 3 surfaces on Android. All are tinted with MonoCode tokens | MonoCode tint, accent and dark default |
+| Native window glass | The platform's own chrome: Liquid Glass bars, tab bar and sheets, and `.glassEffect` surfaces (iOS 26 is the minimum). All are tinted with MonoCode tokens | MonoCode tint, accent and dark default |
 | `cuelume` sounds | Pre-rendered cue files plus haptics | Cue names, volume, default on |
 
 **Recorded deviations**
@@ -59,7 +59,12 @@ When the desktop changes, this document follows (§11.1).
 | M8 | Gesture-driven transitions (back swipe, sheet drag) use the platform's spring physics; everything else uses the desktop's bezier timings | Velocity hand-off from a finger needs springs |
 | M9 | Reduced motion also gates shimmer, mascot hops and the approval banner entrance, which the desktop leaves ungated | Platform accessibility expectations |
 | M10 | An onboarding and pairing flow (the desktop has none) | A phone starts with no machines |
-| M11 | Navigation bars, tab bar, sheets, context menus and back gestures are the platform's native components (Liquid Glass on iOS 26, Material 3 on Android), styled with MonoCode tokens, instead of drawn copies of the desktop's glass | Smoothness (D18): native chrome costs no JS time and gets platform gestures and transitions for free ([15 §15.2](15-performance.md#152-architecture-by-surface)) |
+| M11 | Navigation bars, tab bar, sheets, context menus and back gestures are the platform's native components (Liquid Glass), styled with MonoCode tokens, instead of drawn copies of the desktop's glass | Smoothness (D18): native chrome runs in the system and gets platform gestures and transitions for free ([15 §15.2](15-performance.md#152-architecture-by-surface)) |
+| M12 | SF Symbols for all chrome and content glyphs, instead of Hugeicons (§11.7). Harness and brand marks and mascots stay MonoCode's | Tab items, toolbars and menus take SF Symbol names. Mixing two icon families would look wrong |
+| M13 | Native large titles on Agents, Projects and Settings, in the system's title font, instead of a 28/600 title | Large titles collapse on scroll and host the search field |
+| M14 | Pickers are native sheets with detents. The rows inside stay MonoCode's | Detents, drag to dismiss and Liquid Glass come from the system |
+| M15 | A long press on a session card opens a native context menu with a preview. Project and Changes rows get context menus without one. Action sheets remain only for confirmations | UIContextMenu is the iOS idiom for actions on a row |
+| M16 | Pushed screens keep the tab bar, except the session screen | The iOS default. The session screen needs the bottom edge for the composer |
 
 ## 11.2 Color
 
@@ -72,8 +77,10 @@ Exactly the desktop's (`index.css:25-116`, `appearance.ts`).
   - `base = hsl(hue, sat, L_bg)`, with `L_bg` = dark lightness (0-30 %, default 9 %) in
     dark and 97 % in light.
   - `content = hsl(hue, sat, L_c)`, with `L_c` = 92 % (dark) or 18 % (light).
-- **Everything else is `content` at an alpha.** React Native has no `color-mix`, so
-  `@monocode/design` computes rgba values from `content` and the alpha.
+- **Everything else is `content` at an alpha.** SwiftUI has no `color-mix`, so
+  `@monocode/design` computes rgba values from `content` and the alpha, and the
+  token generator writes them into MonoDesign
+  ([16 §16.3](16-ios-native-design.md#163-architecture)).
 - **Accent** is `hsl(211 92% 62%)` = `#459bf7` in both themes. It is used for focus,
   toggles, links in light mode, "working" status, the selected-session tint (15 %),
   drop targets and the caret.
@@ -146,13 +153,13 @@ Appearance repeats it for any machine paired from a desktop.
 
 ## 11.3 Typography
 
-**Families.** The system sans (SF Pro, Roboto) and the system mono (SF Mono/Menlo,
-`monospace` on Android). There are no webfonts, as on the desktop.
+**Families.** The system sans (SF Pro) and the system mono (SF Mono). There are no
+webfonts, as on the desktop.
 
 **Weights.** 400 body, 500 labels and buttons, 600 titles and headings.
 
 **Scale (M1).** Desktop ratios are kept, with sizes raised by 1 to 2 pt and nothing
-below 11 pt. All sizes scale with Dynamic Type or the Android font scale, clamped
+below 11 pt. All sizes scale with Dynamic Type through `UIFontMetrics`, clamped
 0.85 to 1.6.
 
 | Role | Desktop | Mobile (size / line height) | Examples |
@@ -198,19 +205,22 @@ below 11 pt. All sizes scale with Dynamic Type or the Android font scale, clampe
   - approval banner (α .20).
 - **Diff bars** are 2 pt.
 
-**Materials** (M11). On iOS 26, glass is system Liquid Glass (`expo-glass-effect`,
-native bars and sheets). Before iOS 26 it is `expo-blur` with the values below. Android
-and low-end devices get opaque token colours. Every surface falls back to opaque when
-the OS has Reduce Transparency on.
+**Materials** (M11). iOS 26 is the minimum, so there is one material: Liquid Glass.
+The system draws it on bars, the tab bar, sheets, menus and alerts. MonoCode's
+floating surfaces use `.glassEffect` ([16 §16.6.10](16-ios-native-design.md#16610-materials-motion-accessibility-haptics)).
+Every glass surface has an opaque fallback, used when Reduce Transparency is on.
 
-| Surface | Dark | Light |
+| Surface | Material | Opaque fallback |
 |---|---|---|
-| Tab bar, navigation bars | iOS 26: system Liquid Glass, tinted with `accent` for selection. Earlier iOS: system bars with "sidebar glass" colours (`base` mixed 90 % with black at 85 % opacity). Android: Material 3 surfaces with `bg.base` | iOS 26: system glass. Elsewhere: opaque `bg.base` with a `stroke` hairline |
-| Bottom sheets, dialogs | Native form sheets and alerts. iOS 26 Liquid Glass sheets; earlier: `bg.base` α .55 over blur 24, border content α .07 | Opaque `bg.base`, border content α .07 |
-| iPad popovers | Content α .02 over blur 24, border α .10 | Opaque `bg.base` |
-| Composer | MonoCode's box (`r.md`, border α .10, focus α .20). Material: `GlassView` on iOS 26, content α .03 over blur 8 earlier, opaque `fill.composer` on Android | Opaque `bg.base`, shadows `0 6 24 content α .09` + `0 2 6 content α .06` |
-| Approval banner | Content α .10 over blur 24, dashed border α .20 | Same |
-| Jump-to-latest | Content α .10 over blur 12, border α .15 | Same |
+| Tab bar, navigation bars, toolbars | System Liquid Glass with no custom background; `accent` for selection | System |
+| Sheets, menus, alerts, iPad popovers | System Liquid Glass | System |
+| Composer | MonoCode's box (`r.md`, border α .10, focus α .20) over `.glassEffect(.regular)`. The light theme adds the desktop's shadows `0 6 24 content α .09` + `0 2 6 content α .06` | `bg.base` with the same border |
+| Approval banner | `.glassEffect(.regular)`, dashed border α .20 | `bg.base`, dashed border α .20 |
+| Jump-to-latest | `.glassEffect(.regular.interactive())`, border α .15 | `bg.base`, border α .15 |
+| Toast | `.glassEffect(.regular)` capsule | `bg.base` capsule with a `stroke` hairline |
+
+Glass is never tinted on bars. Small interactive surfaces may take at most 20 %
+`accent`.
 
 **Elevation.** Borders and translucency, not shadows, as on the desktop. Shadows are
 used only for:
@@ -243,13 +253,15 @@ used only for:
 
 ## 11.6 Motion
 
-Motions outside the transcript run on the UI thread with Reanimated. Transcript
-motions run inside the native transcript with the same values
+Motions outside the transcript are SwiftUI animations, which Core Animation renders
+outside the app's main thread. Transcript motions run inside the transcript as Core
+Animation with the same values
 ([15 §15.4](15-performance.md#154-the-native-transcript-monotranscriptview)). No
-animation is driven by JavaScript timers.
+animation is driven by a main-thread timer.
 
 **Curves and durations.** These are the desktop's (`index.css:75-79` and component
-CSS), implemented with Reanimated `withTiming` and `Easing.bezier`.
+CSS), implemented as `Animation.timingCurve` with the same control points
+(`CAMediaTimingFunction` inside the transcript).
 
 | Token | Value | Use |
 |---|---|---|
@@ -271,21 +283,21 @@ with the screen that uses it; P1 by M7; P2 is optional polish.
 
 | Motion | Desktop source | Mobile implementation | Priority |
 |---|---|---|---|
-| Braille spinner `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` at 80 ms per frame | `TerminalSpinner.tsx` | Text frames on a JS interval shared by all spinners | P0 |
-| Shimmer text for live titles ("Working for 12s", "Thinking…", busy project names), periods 1-2 s | `Shimmer.tsx` | `MaskedView` + moving `LinearGradient` (base content α .40, band full content) | P0 |
-| Fold open/close, 340 ms | `zen-fold-*` | Height + opacity on the UI thread | P0 |
-| Step entrance: slot opens, spine grows, branch draws, row rises 10 pt and fades; pace 480 ms calm down to 160 ms under backlog | `useStepQueue`, `zen-step-*` | Reanimated sequence per row; same queue rules | P0 |
+| Braille spinner `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` at 80 ms per frame | `TerminalSpinner.tsx` | Text frames from one shared `TimelineView` ticker (a display link inside the transcript) | P0 |
+| Shimmer text for live titles ("Working for 12s", "Thinking…", busy project names), periods 1-2 s | `Shimmer.tsx` | A moving `LinearGradient` used as a `.mask` (base content α .40, band full content) | P0 |
+| Fold open/close, 340 ms | `zen-fold-*` | Height + opacity, in Core Animation | P0 |
+| Step entrance: slot opens, spine grows, branch draws, row rises 10 pt and fades; pace 480 ms calm down to 160 ms under backlog | `useStepQueue`, `zen-step-*` | Core Animation sequence per row in the transcript; same queue rules | P0 |
 | Thinking pulse: opacity .35 ↔ .9 over 1.8 s | `zen-thinking-pulse` | Repeating timing | P0 |
 | Word fade while streaming: each new word 0 → 1 over 320 ms, pacing max(90 chars/s, backlog / 0.22 s) | `wordFade.tsx` | Release text at the same pace. The newly released tail renders as a separate span whose colour alpha animates 0 → .78. At most one animated tail per message | P1 |
 | Session insertion: siblings slide down 380 ms, new card fades 220 ms, only for sessions created < 15 s ago | `Sidebar.tsx:3006-3074` | List item layout animation with `ease.insert` | P1 |
-| Title particle sweep: an 18 pt soft edge sweeps the new title in over 1,100 ms; the old title dissolves into 1.8 pt particles over about 850 ms | `ParticleText.tsx` | Skia canvas; crossfade fallback | P1 |
+| Title particle sweep: an 18 pt soft edge sweeps the new title in over 1,100 ms; the old title dissolves into 1.8 pt particles over about 850 ms | `ParticleText.tsx` | SwiftUI `Canvas` or a `.layerEffect` shader; crossfade fallback | P1 |
 | Mascot hop: 2-frame swap with a 1 pt lift every 460 ms while busy | `mascot-*` | Frame swap on the shared ticker | P0 |
 | Prompt rise after send (560 ms) and turn reveal (320 ms) | `AgentTranscript.tsx` | Same values; only for the turn just sent | P1 |
 | Composer dock on first send, 480 ms | `useComposerDockMotion.ts` | Shared-element style translate | P1 |
-| Plan burst on sending a Plan-mode message: 2-6 numbered dots rise and become checks, yellow `#fde047` | `PlanStepsBurst.tsx` | Reanimated views clipped to the bubble | P1 |
-| Copy icon → check morph, 260 ms | `index.css:1625-1657` | SVG stroke-dash animation | P1 |
-| Codex effort tile glow for Ultra and Max in the effort sheet (tones `#a855f7`, `#f4b942`) | `ModelPicker.css` | Skia grid, 16 × 3 tiles, static under reduced motion | P2 |
-| Composer runner mascot (patrols the composer edge while a turn runs; setting "Composer mascot") | `ComposerRunner.tsx` | Reanimated sprite; off by default on phones to save battery | P2 |
+| Plan burst on sending a Plan-mode message: 2-6 numbered dots rise and become checks, yellow `#fde047` | `PlanStepsBurst.tsx` | Core Animation layers clipped to the bubble | P1 |
+| Copy icon → check morph, 260 ms | `index.css:1625-1657` | `.contentTransition(.symbolEffect(.replace))` from `doc.on.doc` to `checkmark` | P1 |
+| Codex effort tile glow for Ultra and Max in the effort sheet (tones `#a855f7`, `#f4b942`) | `ModelPicker.css` | SwiftUI `Canvas` grid, 16 × 3 tiles, static under reduced motion | P2 |
+| Composer runner mascot (patrols the composer edge while a turn runs; setting "Composer mascot") | `ComposerRunner.tsx` | SwiftUI sprite on the shared ticker; off by default on phones to save battery | P2 |
 
 - **Not ported:** pane entry (no splits), tab open/close (no tab strip), the arcade grid
   game, the Astra and Opus model welcomes, `/operator` sparkles and orchestrator
@@ -296,16 +308,17 @@ with the screen that uses it; P1 by M7; P2 is optional polish.
 
 ## 11.7 Iconography, brand and mascots
 
-**Icons.** Hugeicons (`@hugeicons/core-free-icons`), the desktop's set, with stroke
-1.75 by default.
-- `@monocode/design` exports the desktop's alias table from `src/shared/ui/icons.tsx`.
-  For example `Check` = `Tick02Icon`, `X` = `Cancel01Icon`, `ChevronDown` =
-  `ArrowDown01Icon`, `GitBranch`, `Terminal`, `PenLine`, `Search`, `Bot`, `Wrench`,
-  `Lock`, `Shield`, `AiIdea`, `CircleDashed`. Both apps then name icons the same way.
-- Rendering uses Hugeicons' React Native package if it covers the free set, else a
-  small `react-native-svg` renderer over the same icon data **(spike S9)**.
-- Sizes: 16 pt inline (desktop 14), 18 pt in rows, 22 pt in bars. The custom
-  `FoldVertical`/`UnfoldVertical` paths are copied.
+**Icons (M12).** SF Symbols, at the weight matching the text beside them. The
+desktop uses Hugeicons; the phone keeps its names, not its glyphs.
+- `@monocode/design` exports the desktop's alias table from `src/shared/ui/icons.tsx`
+  (`Check`, `X`, `ChevronDown`, `GitBranch`, `Terminal`, `PenLine`, `Search`, `Bot`,
+  `Wrench`, `Lock`, `Shield`, `AiIdea`, `CircleDashed`, …). MonoDesign maps each alias
+  to one SF Symbol, for example `Check` → `checkmark`, `X` → `xmark`, `ChevronDown` →
+  `chevron.down`, `Search` → `magnifyingglass`. Both apps then name icons the same
+  way, and the mapping lives in one table.
+- A desktop glyph with no close SF Symbol, such as the custom
+  `FoldVertical`/`UnfoldVertical` paths, ships as a custom symbol in the asset catalog.
+- Sizes: 16 pt inline (desktop 14), 18 pt in rows, 22 pt in bars.
 
 **Activity kind icons.** Edit `PenLine`, research `Search`, run `Terminal`, agent
 `Bot`, other `Wrench`, note `Minus`, all at content α .45. They follow
@@ -320,9 +333,8 @@ with the screen that uses it; P1 by M7; P2 is optional polish.
 **File-type icons.** The desktop's full `react-material-icon-theme` set and its
 name/extension rules, so any file that gets an icon on the desktop gets the same icon
 on the phone.
-- A build step (`scripts/build-native-assets`) exports every icon as native vector
-  data (SVG path data in one compact bundle, rendered by the transcript and React
-  alike).
+- A build step (`apps/ios/scripts/build-native-assets.mjs`) exports every icon into
+  the asset catalog as vector image sets, used by the transcript and SwiftUI alike.
 - It is loaded lazily after first paint, as on the desktop.
 - Unknown names fall back to the generic file icon, as on the desktop.
 
@@ -349,12 +361,12 @@ colours.
 
 ## 11.8 Sound and haptics
 
-The desktop's `cuelume` cues (`sounds.ts`) synthesise audio with Web Audio, which
-React Native lacks.
-- A script (`apps/mobile/scripts/export-cues.mjs`) renders the six cues to short audio
+The desktop's `cuelume` cues (`sounds.ts`) synthesise audio with Web Audio, which a
+native app doesn't have.
+- A script (`apps/ios/scripts/export-cues.mjs`) renders the six cues to short audio
   files once, with `OfflineAudioContext` in a headless browser.
-- The app plays them with `expo-audio` at volume 0.55, in the ambient category so the
-  silent switch mutes them.
+- The app plays them with `AVAudioPlayer` at volume 0.55, in the `.ambient` audio
+  session category so the silent switch mutes them.
 - Sounds are on by default, as on the desktop.
 
 | Cue | Desktop trigger | Phone trigger | Haptic |
@@ -380,8 +392,8 @@ Settings → General has **Sounds** and **Haptics**, both on by default.
 A parity test parses `src/styles/index.css` and `appearance.ts` and compares every
 shared value. The desktop may later generate its CSS variables from the package.
 
-The mobile component library (`apps/mobile/src/ui`), each mirroring a desktop
-component:
+The phone's component library (SwiftUI views in `apps/ios/MonoCode` and
+MonoDesign), each mirroring a desktop component:
 
 | Component | Desktop counterpart | Notes |
 |---|---|---|
@@ -392,35 +404,34 @@ component:
 | `Button` (primary, secondary, ghost, danger, accent) | `bg-content` / `bg-content/10` / text / `bg-red-500/20 text-red-300` / `bg-accent text-white` (quick composer Start) | |
 | `Toggle`, `Segmented`, `Select`, `Slider`, `Group`, `Row` | Settings primitives (`SettingsView.tsx:3927-4383`) | Rows stack label over control below 560 pt, except switch rows, as on the desktop |
 | `SessionCard`, `ProjectRow`, `MachineRow`, `FolderHeader` | `SessionCard`, project card, Connections row | |
-| `FoldLine`, `ActivityRail`, `PhaseGroup`, `ToolRow`, `FileChip`, `ThinkingRow` | `WorkFoldLine`, zen rail, `ActivityPhaseGroup`, `ActivityToolRow` | Transcript-only: implemented as native row kinds in `MonoTranscriptView`, not React components. The same applies to `Markdown`, `CodeBlock`, `MarkdownTable`, `InlineCode`, `UserBubble`, `DraftBubble`, `DiffCard`, `UnifiedDiff`, `PlanCard`, `TaskList`, `SubagentRow`, `TurnFooter`, `HairlineDivider` and `ApprovalControls` |
+| `FoldLine`, `ActivityRail`, `PhaseGroup`, `ToolRow`, `FileChip`, `ThinkingRow` | `WorkFoldLine`, zen rail, `ActivityPhaseGroup`, `ActivityToolRow` | Transcript-only: implemented as row kinds in `MonoTranscriptView`, not SwiftUI views. The same applies to `Markdown`, `CodeBlock`, `MarkdownTable`, `InlineCode`, `UserBubble`, `DraftBubble`, `DiffCard`, `UnifiedDiff`, `PlanCard`, `TaskList`, `SubagentRow`, `TurnFooter`, `HairlineDivider` and `ApprovalControls` |
 | `Markdown`, `CodeBlock`, `MarkdownTable`, `InlineCode` | `AgentMarkdown` + Streamdown styles | |
 | `UserBubble`, `DraftBubble`, `AttachmentChip` | `UserMessageBlock`, `AttachmentChip` | |
 | `DiffCard`, `UnifiedDiff` | `FilePreview`, `UnifiedDiffView` | |
 | `PlanCard`, `TaskList`, `SubagentRow`, `TurnFooter`, `HairlineDivider` | `PlanPreview`, `TaskListPreview`, `SubagentRow`, `TurnDuration`, handoff/interjection dividers | |
 | `ApprovalControls`, `ApprovalBanner`, `QuestionForm` | `ApprovalControls`, `ApprovalToasts`, `QuestionForm` | |
 | `Composer`, `ModePill`, `QueueCard`, `UsageLimitTab`, `ContextRing` | `Composer`, mode pills, `MessageQueue`, `UsageLimitNotice`, `ContextMeter` | |
-| `Sheet`, `ContextMenu`, `Dialog`, `ConfirmDialog` | `Popover`, `ExplorerMenu`, `Modal`, confirm dialogs | Native form sheets with detents, native context menus (UIMenu / Android popup), native alerts and modal screens (M11). The contents use MonoCode rows and tokens |
+| `Sheet`, `ContextMenu`, `Dialog`, `ConfirmDialog` | `Popover`, `ExplorerMenu`, `Modal`, confirm dialogs | Native sheets with detents, native context menus, native alerts and modal screens (M11, M14, M15). The contents use MonoCode rows and tokens |
 | `NoticeBar`, `Banner` | `RemoteSession.tsx` notice bar | |
 | `EmptyState`, `DotGrid` | `SessionsEmpty`, `EmptySession` background | |
 
 ## 11.10 Navigation
 
-Expo Router, typed routes. `env` is the host `environmentId`.
+A SwiftUI `TabView` whose three tabs each own a `NavigationStack`. Destinations are
+typed values held by a `Router` ([16 §16.3](16-ios-native-design.md#163-architecture)).
+`env` is the host `environmentId`.
 
 ```
-/                                   → /onboarding if no machines, else /(tabs)/agents
-/onboarding, /pair                  first run and pairing (also handles pairing links)
-/(tabs)/agents                      Agents (home)
-/(tabs)/projects                    Projects
-/(tabs)/settings                    Settings
-/m/[env]                            Machine details
-/m/[env]/p/[projectId]              Project: Sessions | Explorer | Changes
-/m/[env]/s/[sessionId]              Session
-/m/[env]/s/[sessionId]/info         Session info sheet
-/m/[env]/file?path=&cwd=            File viewer
-/m/[env]/diff?path=&cwd=&staged=    Diff viewer
-/new?env=&projectId=                New session (empty session screen)
-/settings/*                         Settings pages
+Tab Agents     AgentsView (Welcome when there are no machines)
+Tab Projects   ProjectsView
+Tab Settings   SettingsView → Settings pages → Machine details (env)
+Pushed         .project(env, projectId)        Project: Sessions | Explorer | Changes
+               .session(env, sessionId)        Session (hides the tab bar, M16)
+               .explorer(env, cwd, path)       Explorer folder
+               .file(env, cwd, path)           File viewer
+               .diff(env, cwd, path, staged)   Diff viewer
+               .newSession(env?, projectId?)   New session (empty session screen)
+Sheets         pairing, session info, composer pickers, tool, attachment, question
 ```
 
 **Tab bar (M3).** Three items:
@@ -428,15 +439,15 @@ Expo Router, typed routes. `env` is the host `environmentId`.
 - **Projects**;
 - **Settings**.
 
-It is the native tab bar (Expo Router `NativeTabs`; M11):
-- On iOS 26 it is Liquid Glass, minimises while scrolling down, and carries a
-  **bottom accessory**: "＋ New session" on the left and "N working" with the accent
-  braille spinner on the right. That is the desktop's "New session (⌘T)" button and
-  its "Working" card in one control.
-- Before iOS 26 and on Android, the + lives in the navigation bar instead.
-- Tab icons are Hugeicons exported as native vector assets. The selection tint is
-  `accent`.
-- iPad uses the adaptable sidebar (`sidebarAdaptable`).
+It is the native tab bar (M11):
+- It is Liquid Glass, minimises while scrolling down
+  (`.tabBarMinimizeBehavior(.onScrollDown)`), and carries a **bottom accessory**:
+  "＋ New session" on the left and "N working" with the accent braille spinner on the
+  right. That is the desktop's "New session (⌘T)" button and its "Working" card in
+  one control. When the tab bar is minimised, the accessory shows only the spinner
+  and the count.
+- Tab icons are SF Symbols (M12). The selection tint is `accent`.
+- iPad uses the sidebar-adaptable tab view.
 
 **New session.** Agents and Projects have a **+** in the navigation bar, the desktop's
 "New session (⌘T)" button. The Project screen's + preselects that project.
@@ -446,7 +457,7 @@ shell. The sidebar column (320 pt) holds Agents or the Project screen; the sessi
 fills the rest.
 
 **Deep links** use `<scheme>://m/<env>/s/<sid>?focus=approval:<req>`, and pairing
-links go to `/pair`.
+links open the pairing sheet.
 
 ## 11.11 Onboarding and pairing
 
@@ -499,7 +510,7 @@ approval show the request ("Approve: Run npm test").
 **Gestures.**
 - Swipe left: Archive.
 - Swipe right: Mark as seen or Mark as unseen.
-- Long press: the session action sheet (§11.14).
+- Long press: the session context menu with a preview (§11.14, M15).
 - There is no swipe-to-approve. Approvals need their context.
 
 **Banners**, stacked at the top, each a `NoticeBar` with one action:
@@ -516,9 +527,9 @@ approval show the request ("Approve: Run npm test").
 
 The phone's version of the desktop project rail (`ProjectRail.tsx`).
 
-**Navigation bar.** Title "Projects", a **+** that opens an action sheet with "Open
-folder on a machine…" (the desktop's wording), and a Search field ("Search
-projects..."), matching the rail's search row.
+**Navigation bar.** Large title "Projects" (M13), a **+** that opens a menu with
+"Open folder on a machine…" (the desktop's wording), and the bar's search field
+("Search projects..."), matching the rail's search row.
 
 **Sections:**
 - **Pinned:** projects pinned on this phone. Pins are stored on the phone, as the
@@ -537,8 +548,8 @@ projects..."), matching the rail's search row.
 - Selected (iPad) is `sel.strong`; otherwise rows are at opacity .65 with full opacity
   when pressed, as on the desktop.
 
-**Long press** opens: Pin / Unpin, Open folder on machine (Explorer), New session,
-Copy path.
+**Long press** opens a context menu without a preview (M15): Pin / Unpin, Open folder
+on machine (Explorer), New session, Copy path.
 
 **Empty:** "No projects yet" with the "Open folder on a machine…" button.
 
@@ -565,8 +576,10 @@ The phone's version of the desktop session sidebar (`Sidebar.tsx`).
 tabs. Changes shows `+N −N` instead of the word when there are changes.
 
 **Sessions toolbar:**
-- A search field with the placeholder "Search conversations...".
-- A filter button that opens the desktop filter menu as a sheet:
+- The bar's search field with the placeholder "Search conversations...", shown while
+  the Sessions segment is active.
+- A filter button in the navigation bar that opens the desktop filter menu as a native
+  menu of toggles:
   - Archived;
   - Status: Working, Needs approval, Done;
   - Time: All time, Today, Last 7 days, Last 30 days;
@@ -605,7 +618,8 @@ reminders are desktop-local and not shown.
 - A **title change** plays the particle sweep (§11.6). A **new session** plays the
   insertion motion.
 - **Swipe left:** Archive. **Swipe right:** Pin / Unpin.
-- **Long press:** the desktop session menu, minus local-only items:
+- **Long press:** a context menu with a preview of the session (M15), holding the
+  desktop session menu minus local-only items:
   1. Pin / Unpin
   2. Rename
   3. Copy session ID ▸ Harness session ID, MonoCode session ID
@@ -762,16 +776,16 @@ token.
 centred 13 pt α .55 label.
 
 **Long press on a message:** Copy text; Copy turn (`turnCopyText`); Share; Select
-text. Selecting text opens a selectable text view, since React Native text selection
-inside virtualised lists is unreliable.
+text. Selecting text opens a selectable text view with that block's text, since the
+transcript paints text itself and has no live text selection.
 
 ## 11.17 Composer
 
 The desktop composer's anatomy (`Composer.tsx`), with the quick composer's type size.
 
 **Container.**
-- `r.md`, border α .10, focus α .20, `fill.composer` with blur 8, 8 pt side margins
-  over the safe area.
+- `r.md`, border α .10, focus α .20, over `.glassEffect(.regular)` (§11.4), 8 pt
+  side margins over the safe area.
 - Edit mode (not in v1) would use the dashed accent border.
 
 **Stacked above the box,** in the desktop's order, each attached as a tab (`r.block`
@@ -1028,9 +1042,10 @@ for new machines.
 
 ## 11.22 Voice and copy
 
-The desktop's voice is used as is. All user-facing strings live in
-`apps/mobile/src/strings.ts`. Strings that exist on the desktop are copied verbatim;
-the parity test lists them.
+The desktop's voice is used as is. All user-facing strings live in the app's
+`Localizable.xcstrings`. Strings that exist on the desktop are copied verbatim, and a
+check in `gen-fixtures.mjs` compares them with the desktop sources
+([12 §12.3](12-mobile-engineering.md#123-code-shared-with-the-desktop-and-host)).
 
 - **Sentence case** everywhere. Title Case appears only in OS-convention places.
 - **No emoji.** Status uses icons and the braille spinner.

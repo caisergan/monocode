@@ -2,11 +2,14 @@
 
 ## 14.1 Milestones
 
-Estimates are in engineer-weeks for one person familiar with the codebase. The
-hybrid architecture (D17) adds native work on both platforms. With three engineers in
-parallel (TypeScript, host and desktop; iOS native; Android native), the calendar time
-to a hardened MonoCode Dev (M7) is roughly 5 to 6 months. M8 depends on upstream
-review.
+**Since D19 (2026-10-05) the phone app is a native Swift iOS app.** The milestones
+below are the rev 3 plan. Their host, desktop, relay and gateway scope stands. Their
+phone scope (the Expo app, Android, the hybrid transcript bridge) is replaced by the
+Swift milestones R0 to R8 ([16 §16.7](16-ios-native-design.md#167-milestones)),
+summarised after the table.
+
+Estimates are in engineer-weeks for one person familiar with the codebase. M8
+depends on upstream review.
 
 ```
 M0 Foundations ──▶ M1 Channel + pairing ──▶ M2 Read path ──▶ M3 Write path ──▶ M6 Workspace ──▶ M7 Hardening ──▶ M8 Official
@@ -27,7 +30,23 @@ M0 Foundations ──▶ M1 Channel + pairing ──▶ M2 Read path ──▶ M
 | **M7 Hardening** | Performance pass against every §15.5 row on every reference device, app lock, privacy overlay, iPad split view, accessibility pass, P1 motion (word fade, particle titles, insertion, prompt rise, dock, plan burst), sounds and haptics, demo host polish, diagnostics, performance budgets, the QA matrix, user documentation (`docs/remote-access.md` updates and a phone guide) | MonoCode Dev passes the QA matrix and every §15.5 budget. Every [11 §11.1](11-design-and-ux.md#111-design-parity-rules) deviation is the recorded one; nothing else differs from the desktop | 5 |
 | **M8 Official publication** | Upstream PRs for host, desktop, packages and the app merged and released. The official publisher fills `publisher/official.ts`, deploys the official relay and gateway, sets up store records, compliance and store assets. Beta, then release | The [release checklist](13-testing-and-release.md#139-release-readiness-checklist-v1) is complete | 2, plus upstream review time |
 
-**Total: about 43 engineer-weeks** (34 before the hybrid decision, plus 8 for the native transcript and 2 for the performance harness and pass, minus 1 for the React transcript it replaces).
+**Total (rev 3 plan): about 43 engineer-weeks** (34 before the hybrid decision, plus 8 for the native transcript and 2 for the performance harness and pass, minus 1 for the React transcript it replaces). D19 drops the Android half of the transcript and every Android item, and adds the Swift rewrite of what the prototype built. New estimates are written here after R0.
+
+### Swift app milestones (D19)
+
+The detail is in [16 §16.7](16-ios-native-design.md#167-milestones).
+
+| Milestone | Replaces the phone scope of | Status |
+|---|---|---|
+| R0 Skeleton and transcript | M0 (app skeleton, design foundation, performance harness), T (iOS), S11 | Next |
+| R1 Channel and pairing | M1 | |
+| R2 Read path | M2 | |
+| R3 Write path | M3 | |
+| R4 Workspace and parity | M6. `apps/mobile` is deleted here | |
+| R5 Relay | M4 | |
+| R6 Push | M5 | |
+| R7 Hardening | M7 | |
+| R8 Official publication | M8 | |
 
 ### Personal track checkpoints
 
@@ -36,10 +55,10 @@ MonoCode Dev is usable for the maintainer's own work long before the official re
 
 | After | MonoCode Dev can… | Needs |
 |---|---|---|
-| M3 | Pair, read, reply, approve, start sessions over LAN or Tailscale | Fork-built host packages; EAS internal builds |
-| M4 | Do the same from anywhere | A personal `services/relay` deployment on the maintainer's Cloudflare account |
-| M5 | Notify on approvals, questions and finished turns | APNs key and FCM project in the maintainer's EAS project; the personal gateway with the maintainer's Expo access token |
-| M6 | Review changes, commit and push | none |
+| R3 | Pair, read, reply, approve, start sessions over LAN or Tailscale | Fork-built host packages; Xcode development builds on the iPhone |
+| R4 | Review changes, commit and push | none |
+| R5 | Do the same from anywhere | A personal `services/relay` deployment on the maintainer's Cloudflare account |
+| R6 | Notify on approvals, questions and finished turns | An APNs key from the maintainer's team in the personal gateway |
 
 ### Pull requests
 
@@ -57,21 +76,30 @@ section.
 
 | ID | Question | Pass condition | Fallback if it fails |
 |---|---|---|---|
-| S1 | Do `remark-parse` + `remark-gfm`, Shiki's JS regex engine, `@noble/*` and `fflate` run correctly and fast enough on Hermes? | Markdown of 50 KiB parses in < 30 ms; a 400-line TS block highlights in < 50 ms; ChaCha20-Poly1305 ≥ 20 MB/s on Pixel 7 | `highlight.js`; `react-native-quick-crypto` for AEAD and X25519 |
-| S2 | Can the iOS NSE (via `@bacons/apple-targets`) read a key written by the app into a shared keychain group, and decrypt a noble-sealed payload with CryptoKit? Where does Expo put `data` in the APNs payload? | An end-to-end push decrypts and displays on a device | A small custom Expo module writes the key to the group if `expo-secure-store` can't target it |
-| S3 | Do data-only Expo pushes start the Android background task when the app is swiped away, and under Doze? | A notification is shown within 10 s for high-priority messages on Pixel and Samsung | A native `FirebaseMessagingService` in a config plugin that decrypts in Kotlin |
-| S4 | Does `ws://` to LAN IPs, Tailscale `100.x` and `*.ts.net` work from iOS (ATS, Local Network permission) and Android (cleartext config)? When does the iOS permission prompt fire? | Connects on both platforms with the documented plist and config | Connect by IP only; advertise Tailscale IPs, not names |
-| S5 | Cloudflare Durable Objects: hibernation with control and data sockets, auto-response pings, forwarding latency, real cost; `fetch` to the Expo push API; HTTP/2 to APNs | Added latency < 30 ms in-region; costs within §7.9 | Run the gateway's direct-APNs provider in a small Node service; keep Expo as the default |
-| S6 | Expo with npm workspaces: a different React version from the desktop, Metro resolving `@monocode/*` through `exports`, and the root desktop build unaffected | Both apps build and test from a clean `npm ci` | Pin the desktop's React to Expo's version, or vendor packages into the app with a build step |
+| S1 | *(Closed by D19: Markdown, highlighting and crypto no longer run on Hermes. Highlighting is S21.)* | | |
+| S2 | Can the Notification Service Extension read the push key from the shared keychain group, and open a noble-sealed payload with MonoChannel's CryptoKit code? | An end-to-end push decrypts and displays on a device | Store the push key in the App Group container, encrypted with a key from the shared keychain group |
+| S3 | *(Deferred with Android, D19.)* | | |
+| S4 | *(Taken over by S23 for the Swift transports.)* | | |
+| S5 | Cloudflare Durable Objects: hibernation with control and data sockets, auto-response pings, forwarding latency, real cost. HTTP/2 to APNs is S22 | Added latency < 30 ms in-region; costs within §7.9 | Revisit the Durable Object layout; the relay protocol is unchanged |
+| S6 | *(Closed by D19: `apps/ios` is not an npm package.)* | | |
 | S7 | *(Replaced by S11. The transcript no longer uses FlashList.)* | | |
-| S8 | Can notification actions approve without opening the app (iOS background action handling, Android action intents) through Expo? | Approve dispatches within the OS's background window | Keep foreground actions in v1 (as specified in [08 §8.9](08-notifications.md#89-tapping-and-actions)) |
-| S9 | Can Hugeicons' free set render in React Native with the desktop's names and stroke 1.75 (an official RN package, or `react-native-svg` over `@hugeicons/core-free-icons` data)? | All icons in the desktop alias table render identically to the desktop at 16-22 pt | Generate RN components from the icon data at build time |
-| S11 | **Native transcript prototype**, the go/no-go for D17. On both platforms, a minimal `MonoTranscriptView` with markdown, code-block and trail rows, fed by fixtures through the JSI bridge, with streaming at 90 chars/s and a fling benchmark | 0 hitches flinging 1,000 turns while streaming on iPhone 13 and Pixel 7; tail re-layout ≤ 1 ms; streaming equals final | Reduce scope (fewer animated row kinds), or move layout to a shared Rust core as zeron does |
-| S12 | Native chrome with MonoCode tokens: `NativeTabs` with the iOS 26 bottom accessory and minimise behaviour, form sheets with detents, native context menus, `GlassView` composer, Android Material 3 equivalents | Looks like [11](11-design-and-ux.md) and passes the sheet, tab and back-swipe budgets | Custom chrome only where a native component can't be styled to match |
-| S13 | JS thread budget per streamed delta on low-end Android: quick-crypto decrypt, inflate, JSON, `applySessionSync`, row build, Shiki in idle slices or a worklet runtime | ≤ 5 ms p95 on a Galaxy A15 class device | Move the row builder and highlighting to a background worklet runtime; reduce coalescing granularity |
-| S10 | Glass and effects cost: `expo-blur` bars and sheets, MaskedView shimmer and Skia particles while a transcript streams on a low-end Android | ≤ 5 % dropped frames with glass on | Opaque fallbacks on low-end Android (still the desktop's light-mode treatment), shimmer as an opacity pulse |
+| S8 | Can notification actions approve without opening the app (a `UNNotificationAction` without `.foreground`, handled in the background)? | Approve dispatches within the OS's background window | Keep foreground actions in v1 (as specified in [08 §8.9](08-notifications.md#89-tapping-and-actions)) |
+| S9 | *(Closed by D19 and M12: SF Symbols replace Hugeicons on iOS.)* | | |
+| S11 | **Native transcript benchmark**, the go/no-go for the transcript design. `MonoTranscriptView` with markdown, code-block and trail rows, fed by fixtures in process, streaming at 90 chars/s, with a fling benchmark. The view exists from the prototype; R0 ports it and measures | 0 hitches flinging 1,000 turns while streaming on the iPhone 13; tail re-layout ≤ 1 ms; streaming equals final | Reduce scope (fewer animated row kinds), or move layout to a shared Rust core as zeron does |
+| S12 | *(Closed by D19: the chrome is SwiftUI's own.)* | | |
+| S13 | *(Closed by D19: there is no JS thread. The off-main budget per delta is in [15 §15.5](15-performance.md#155-budgets).)* | | |
+| S10 | *(Closed by D19: Android and pre-26 blur are out of scope.)* | | |
+| S18 | Cache encryption: GRDB with SQLCipher through SwiftPM (build size, open time, migration speed), against plain SQLite under Data Protection `completeUntilFirstUserAuthentication` | A decision recorded with numbers from the iPhone 13 | Data Protection only; 03 §3.9 and 12 §12.6 amended |
+| S19 | A SwiftUI `List` of MonoCode cards with swipe actions and context menus | 0 hitches flinging 500 cards on the iPhone 13 | A `UICollectionView` list layout with the cards in `UIHostingConfiguration` |
+| S20 | Keyboard: the composer in `safeAreaBar` follows interactive dismissal frame by frame, and the UIKit transcript's bottom inset follows with no double offset | The keyboard row of §15.5 passes | A UIKit session controller with a hosted composer pinned to `keyboardLayoutGuide` |
+| S21 | Highlighting: tree-sitter (SwiftTreeSitter and grammars) against highlight.js in JavaScriptCore, with the desktop's `github-dark` and `github-light` colours | A 400-line TypeScript file within 50 ms on the iPhone 13 | highlight.js in JavaScriptCore, matching the prototype's output |
+| S22 | Can the Cloudflare Worker send to APNs directly (HTTP/2, ES256 token auth)? | A test push from a deployed Worker arrives on a device | A small APNs forwarder outside Workers, called by the gateway |
+| S23 | `URLSessionWebSocketTask` to `ws://` LAN, Tailscale `100.x` and `*.ts.net` addresses with `NSAllowsLocalNetworking`. When does the local network prompt fire? | Connects on the iPhone with the documented plist | Network.framework `NWConnection` with `NWProtocolWebSocket`; advertise Tailscale IPs, not names |
 
 ### As built (2026-10-04, branch `feat/mobile-app`)
+
+**The app rows below describe the Expo prototype**, frozen at `b286412` as the
+reference for the Swift rewrite (D19). The host, desktop and package rows stand.
 
 The owner dropped the "small upstream PRs" constraint, so foundations and the first
 slice landed together. A second pass the same day added the host write path, the
@@ -115,7 +143,7 @@ Menlo's advance, not measured. Shiki has not run on Hermes: its JavaScript engin
 limit per line can drop multi-line state after a slow line. S1 is still to be measured
 on the iPhone 13.
 
-**Not started:** relay, push, Android and app lock.
+**Not started:** relay, push and app lock. Android is out of v1 (D19).
 
 **Follow-ups:**
 
@@ -132,24 +160,26 @@ on the iPhone 13.
 | The host dispatcher refactor breaks the desktop's remote features | Medium | High | M0 is a no-behaviour-change PR. The `server.test.ts` contract is unchanged. The cross-version compatibility test ([13 §13.7](13-testing-and-release.md#137-compatibility-matrix)) |
 | OS firewalls block the direct listener | High | Low | The relay fallback, `doctor`, and the desktop's firewall fix button |
 | iOS background limits make the app feel stale | Medium | Medium | Push plus the extension; fast foreground verify; cached paint |
-| A bug in the custom crypto implementation | Low | High | A standard Noise pattern; official vectors on both engines; an external security review of `@monocode/channel` before v1 |
+| A bug in the custom crypto implementation | Low | High | A standard Noise pattern; official vectors on both implementations (noble and CryptoKit); an external security review of `@monocode/channel` and MonoChannel before v1 |
+| The rewrite repeats built work and slips | Medium | Medium | Only the client is rewritten; the prototype's tests are the acceptance list; R0 starts with the transcript, the riskiest piece that carries over ([16 §16.9](16-ios-native-design.md#169-risks)) |
+| The Swift client drifts from the TypeScript protocol | Medium | High | Vectors, golden fixtures regenerated in CI, the interop test against a real host, tolerant decoding ([16 §16.5](16-ios-native-design.md#165-keeping-the-swift-client-compatible-with-the-host)) |
 | Relay abuse or cost growth | Medium | Medium | Limits (§7.6); direct preferred; per-room push limits; alerts |
-| Dependency on Expo Push | Low | Medium | Tickets carry raw device tokens, so the provider can be switched (§7.5) |
-| Large transcripts on low-end phones | Medium | Medium | Windowing, truncation, the native transcript's exact layout and recycling ([15 §15.4](15-performance.md#154-the-native-transcript-monotranscriptview)) |
-| The two native transcript implementations drift apart | Medium | Medium | One `RowSpec` contract; shared fixtures; golden and screenshot tests on both platforms; one owner reviews both |
-| Native transcript features lag React conveniences (text selection, accessibility, find) | Medium | Medium | Specified up front in §15.4; accessibility checklist is an exit criterion of T |
+| Workers can't reach APNs over HTTP/2 | Medium | Medium | Spike S22; a small APNs forwarder behind the gateway, with no change to hosts or phones |
+| Large transcripts on older iPhones | Medium | Medium | Windowing, truncation, the native transcript's exact layout and recycling ([15 §15.4](15-performance.md#154-the-native-transcript-monotranscriptview)) |
+| The custom transcript lags UIKit text conveniences (text selection, accessibility, find) | Medium | Medium | Specified up front in 15 §15.4; the accessibility checklist is an exit criterion of R2 |
+| SwiftUI misses a budget (long lists, keyboard) | Medium | Medium | Spikes S19 and S20, each with a UIKit fallback named up front |
 | Smoothness regresses as features land | High | High | §15.3 coding rules; benchmark gates on PRs touching hot paths; the nightly device run |
 | App Store review rejection ("requires external server") | Medium | Medium | Demo host, review notes, video |
 | Upstream doesn't accept part of the work, or changes the host underneath it | Medium | High | Build on upstream's shipped host (D13); small PRs; language-neutral channel; the personal track runs on fork builds meanwhile |
 | The phone drifts from the desktop's design | High | Medium | `@monocode/design` single-sources tokens; the parity test; parity reviews in M2, M3 and M7; the deviations list in [11 §11.1](11-design-and-ux.md#111-design-parity-rules) |
-| Personal-account limits (iOS ad-hoc device cap, Expo build quotas) | Low | Low | TestFlight internal testing; local builds with `eas build --local` |
+| Personal-account limits (registered device cap, TestFlight review for external testers) | Low | Low | TestFlight internal testing; local Xcode builds |
 | Scope creep into desktop parity | High | Medium | [01 §1.3](01-product.md#13-non-goals-for-v1) non-goals; a later list (§14.5) |
 
 ## 14.4 Decisions and open questions
 
 **Decided on 2026-10-04** (recorded as D12-D16 in the [README](README.md#decisions)):
 
-1. **Accounts.** The maintainer owns the Apple Developer and Expo accounts for now
+1. **Accounts.** The maintainer owns the Apple Developer account (and, until D19, the Expo account) for now
    and builds MonoCode Dev for local workflows. The app is planned as MonoCode's
    official agent app, and an official publisher can take over through the publisher
    config ([13 §13.5](13-testing-and-release.md#135-publishers-and-build-tracks)).
@@ -159,6 +189,17 @@ on the iPhone 13.
 4. **Full access from the phone.** Allowed, with a confirmation.
 5. **App names.** "MonoCode" (official) and "MonoCode Dev" (personal track).
 
+**Decided on 2026-10-05** (recorded as D19):
+
+1. **Native iOS app in Swift.** SwiftUI, with UIKit where a budget needs it. It
+   supersedes D1 (Expo, iOS and Android) and D17 (the hybrid architecture).
+2. **Minimum iOS 26.** One material tier, Liquid Glass.
+3. **Android is out of v1.** Android sections stay in the spec, marked deferred.
+4. **The Expo app is frozen** as the reference and deleted when the Swift app
+   reaches parity (R4).
+5. **The coding agent may build and run the app on the iOS simulator** for this
+   work. Installs on the physical iPhone stay with the owner.
+
 **Still open:**
 
 1. **Telemetry.** This spec ships none. Confirm that diagnostics stay local and
@@ -166,8 +207,8 @@ on the iPhone 13.
 2. **Official publisher.** Who publishes the official app and runs `usemono.dev`
    services: upstream's maintainers, or the maintainer with upstream's blessing?
    *Before M8.*
-3. **Android distribution for the personal track.** EAS internal APKs need no Play
-   account. Decide whether a Play internal-testing track is wanted. *Before M3.*
+3. ~~**Android distribution for the personal track.**~~ Moot until an Android app
+   exists (D19).
 4. **After v1.** Is a phone terminal wanted? It needs host PTY support first. Is
    merging local and host sessions into one desktop project entry a priority?
 
@@ -194,4 +235,7 @@ on the iPhone 13.
 - Merging a folder's local and host sessions into one desktop project entry.
 - A Node adapter for self-hosting the relay outside Cloudflare.
 - Windows power assertions while turns run.
-- F-Droid / no-Google builds with UnifiedPush.
+- An Android app (Kotlin), implementing the same channel protocol, with FCM tickets
+  ([03 §3.8](03-identity-and-crypto.md#38-push-tickets)) and the delivery design in
+  [08 §8.8](08-notifications.md#88-android-delivery-deferred).
+- F-Droid / no-Google builds with UnifiedPush, once an Android app exists.

@@ -43,23 +43,23 @@ its own host packages ([13 §13.5](13-testing-and-release.md#135-publishers-and-
                          │  • Durable Object per room: rendezvous,      │
                          │    forwards ciphertext frames                │
                          │  • /v1/push: verifies host signature,        │
-                         │    opens push ticket, forwards to Expo/APNs/ │
-                         │    FCM                                       │
+                         │    opens push ticket, forwards to APNs       │
+                         │    (HTTP/2, token auth)                      │
                          └───────▲───────────────────────▲──────────────┘
               wss (ciphertext)   │                       │ wss, dialled out by host
                                  │                       │ + HTTPS push requests
 ┌────────────────────────┐       │        ┌──────────────┴─────────────────────────────┐
-│ Phone (Expo app)       │───────┘        │ monocode-host (one per OS user per machine) │
+│ Phone (iOS, Swift)     │───────┘        │ monocode-host (one per OS user per machine) │
 │  • HostRuntime per     │                │  • existing: engine, store, adapters,      │
 │    host: candidates,   │  ws (Noise)    │    HTTP /rpc on 127.0.0.1:3774             │
 │    racing, channel     │───────────────▶│  • new: channel server on private          │
 │  • sync, cache, outbox │  direct: LAN / │    interfaces :3775, relay client,         │
 │  • UI                  │  Tailscale/VPN │    pairing, watch/events, attention,       │
-│  • NSE / bg task       │                │    push sender, presence                   │
+│  • NSE (push decrypt)  │                │    push sender, presence                   │
 └──────────▲─────────────┘                └──────────────▲─────────────────────────────┘
-           │ push (APNs / FCM)                           │ HTTP /rpc (loopback or ssh -L)
+           │ push (APNs)                                 │ HTTP /rpc (loopback or ssh -L)
            │                                ┌────────────┴─────────────┐
-     Apple / Google ◀── Expo Push ◀── gateway│ Desktop app (Tauri)      │
+     Apple APNs ◀──────────────────── gateway│ Desktop app (Tauri)      │
                                             │  • Settings → Mobile:    │
                                             │    local host install,   │
                                             │    pairing QR, devices   │
@@ -85,9 +85,9 @@ its own host packages ([13 §13.5](13-testing-and-release.md#135-publishers-and-
 | Phone ↔ relay | Nobody | Relay sees only Noise ciphertext and connection metadata |
 | Host ↔ relay | Relay trusts the room owner key; host trusts nothing | Ed25519 room claim ([07](07-relay-and-push-service.md)) |
 | Host ↔ push gateway | Gateway trusts signed requests for tickets bound to the room | Ed25519 request signature + sealed push ticket |
-| Gateway ↔ Expo/APNs/FCM ↔ phone | Nobody, for content | Payload sealed to the phone's push key |
+| Gateway ↔ APNs ↔ phone | Nobody, for content | Payload sealed to the phone's push key |
 | Desktop ↔ host | Desktop holds an admin device token | Existing bearer token over loopback or SSH forward |
-| Phone storage | The phone's OS | Keychain/Keystore for keys; SQLCipher cache keyed from Keychain |
+| Phone storage | The phone's OS | Keychain for keys; an encrypted cache ([12 §12.6](12-mobile-engineering.md#126-persistence), spike S18) |
 
 Every paired device can run agents as the host's OS user. Pairing is therefore
 equivalent to granting shell access, and the UI says so.
@@ -116,8 +116,9 @@ equivalent to granting shell access, and the UI says so.
 | `host/` | Keys, device v2 table, pairing, channel server, relay client, watch/events, windowed sync, inbox, queue, atomic create, mutation idempotency, attention + push, presence, config, CLI | [09](09-host-changes.md) |
 | `services/relay` (new) | Worker + Durable Objects: relay rooms and push gateway | [07](07-relay-and-push-service.md) |
 | `src-tauri/`, `src/` | Local host install, Settings → Mobile, pairing dialog, device list, presence calls, allow-list additions | [10](10-desktop-changes.md) |
-| `apps/mobile` (new) | The Expo app; the native transcript module `MonoTranscriptView` (Swift and Kotlin); an iOS Notification Service Extension target; config plugins | [11](11-design-and-ux.md), [12](12-mobile-engineering.md), [15](15-performance.md) |
-| `.github/workflows` | Package builds, relay deploy, EAS triggers | [13](13-testing-and-release.md) |
+| `apps/ios` (new) | The Swift app: Xcode project, app and Notification Service Extension targets, local Swift packages (MonoChannel, MonoWire, MonoStore, MonoSync, MonoDesign, MonoTranscript, MonoHighlight, MonoDemo) | [11](11-design-and-ux.md), [12](12-mobile-engineering.md), [15](15-performance.md), [16](16-ios-native-design.md) |
+| `apps/mobile` (prototype) | The Expo app built on `feat/mobile-app`. Frozen as the reference for the Swift rewrite and deleted at parity (D19) | [14 "As built"](14-roadmap.md#as-built-2026-10-04-branch-featmobile-app) |
+| `.github/workflows` | Package builds, relay deploy, iOS build and test jobs | [13](13-testing-and-release.md) |
 
 ## 2.6 Repository layout and shared code
 
@@ -128,23 +129,25 @@ monocode/
   package.json            # root stays the desktop app; adds "workspaces"
   src/  src-tauri/  host/ # unchanged locations
   packages/
-    core/                 # @monocode/core: pure TS shared by desktop, host, mobile
+    core/                 # @monocode/core: pure TS shared by desktop and host
     channel/              # @monocode/channel: secure channel + wire types
     design/               # @monocode/design: tokens, motion, icon aliases (parity-tested)
     brand/                # provider logos, app icon, mascots, sound cues
   apps/
-    mobile/               # Expo app (@monocode/mobile)
+    ios/                  # the Swift app (Xcode project + local Swift packages), 16 §16.3
+    mobile/               # the Expo prototype, frozen; deleted at parity (D19)
   services/
     relay/                # Cloudflare Worker (@monocode/relay)
 ```
 
-- The root `package.json` gains `"workspaces": ["packages/*", "apps/*", "services/*"]`.
+- The root `package.json` gains `"workspaces": ["packages/*", "services/*"]`.
   The desktop remains the root package, so `npm run tauri dev`, the release
   workflow and the pre-push hook keep working.
-- npm workspaces have no `nohoist`. The Expo app pins the React version embedded in
-  its React Native release. If that differs from the desktop's React 19.1, npm
-  installs a nested copy under `apps/mobile/node_modules`. Metro must resolve React
-  from the app first **(spike S6)**.
+- `apps/ios` is not an npm package. Its scripts (`gen-design-tokens.mjs`,
+  `gen-fixtures.mjs`) run with the root's Node and import the workspace packages
+  ([16 §16.5](16-ios-native-design.md#165-keeping-the-swift-client-compatible-with-the-host)).
+- `apps/mobile` stays its own npm project, outside the workspaces, until it is
+  deleted.
 - The host bundle (`host/build.mjs`) already bundles whatever it imports, so moving
   modules into packages changes import paths only.
 
@@ -178,12 +181,12 @@ or React DOM, directly or transitively.
 | Module | Offender | Fix |
 |---|---|---|
 | `sessions/model/session.ts` | Runtime import of `models.ts` and `projectProviders.ts` (circular); type-only imports of inbox, notes and orchestration types | Move the card and meta types into core; replace the `loadProjectProviderSettings` call with an injected lookup |
-| `sessions/model/models.ts` | `localStorage` for favourites, recents, defaults | Inject a `KeyValueStore` interface (desktop: `localStorage`; mobile: SQLite KV; host: in-memory). The static catalog and `resolveModel` move unchanged |
+| `sessions/model/models.ts` | `localStorage` for favourites, recents, defaults | Inject a `KeyValueStore` interface (desktop: `localStorage`; host: in-memory). The static catalog and `resolveModel` move unchanged |
 | `sessions/model/attachments.ts` | Tauri `invoke`, `pickFiles`, `URL`/`File` | Extract `MAX_ATTACHMENTS`, `isVisionImage`, `normalizeImageMime`, `mergeAttachments`. This also removes a Tauri import from the host bundle |
 | `connections/model/remoteModels.ts` | Imports `claudeCatalog.ts`, which imports Tauri `homeDir` | Move the static `CLAUDE_MODEL_CATALOG` constant to its own file. Move `findRemoteModel` and `carryModelSettings` into core |
 | `connections/model/remoteSessionState.ts`, `remoteProjects.ts` | `localStorage`, `window` events | Split pure path helpers (`remotePath`, `parseRemotePath`) from storage |
 | `source-control/model/worktrees.ts` | Tauri and workspace layout | Extract `namedWorktreeBranch` (the host's only use) |
-| `source-control/model/unifiedDiff.ts`, `lineDiff.ts` | Import `@codemirror/merge` and `@codemirror/state` | Write a small pure unified-diff parser in core for mobile. Desktop keeps its CodeMirror-based views |
+| `source-control/model/unifiedDiff.ts`, `lineDiff.ts` | Import `@codemirror/merge` and `@codemirror/state` | Write a small pure unified-diff parser in core. Desktop keeps its CodeMirror-based views |
 | `platform/tauri/fs.ts` | Holds wire types (`GitDiffIndex`, `GitFileDiff`, `FsEntry`, …) used by the host | Move the types to `core/wire/workspace.ts`; the Tauri file re-exports them |
 | `shared/lib/paths.ts` | `IS_WIN` from the client platform | Add host-platform-aware variants that take `HostDescriptor.platform` |
 
@@ -202,21 +205,24 @@ terminal, editor, notifications, quick composer, automations, `connections.ts`.
    which includes DOM today.
 4. Root `vitest.config.ts` adds `packages/**/*.test.ts`.
 5. `packages/core` exports subpaths (`@monocode/core/protocol`,
-   `@monocode/core/sessions/session`, …). Metro supports `package.json`
-   `exports` (enabled by default in current Expo SDKs).
+   `@monocode/core/sessions/session`, …).
+6. The Swift app does not import these packages. It ports the parts it needs into
+   MonoWire, and golden fixtures generated from this code keep the port honest
+   ([16 §16.4](16-ios-native-design.md#164-porting-map)).
 
 ### `@monocode/channel`
 
-New code, shared by host and phone, also no DOM:
+New code, used by the host, host tests and a debug CLI, also no DOM. The Swift app's
+MonoChannel is a port of it, held to the same vectors and to fixtures generated from
+it ([16 §16.5](16-ios-native-design.md#165-keeping-the-swift-client-compatible-with-the-host)):
 
 - `noise/`: `Noise_IK_25519_ChaChaPoly_SHA256` handshake state, cipher state,
-  transport. Built on `@noble/curves`, `@noble/ciphers`, `@noble/hashes` so Node and
-  Hermes run identical code.
+  transport. Built on `@noble/curves`, `@noble/ciphers`, `@noble/hashes`.
 - `record.ts`: fragmentation, reassembly, compression flags ([03 §3.5](03-identity-and-crypto.md#35-record-layer)).
 - `envelope.ts`: message types, request ids, error codes ([06](06-channel-protocol.md)).
 - `offer.ts`: offer encode/decode and validation ([04](04-pairing.md)).
 - `push.ts`: push payload seal/open ([03 §3.7](03-identity-and-crypto.md#37-push-payload-encryption)).
-- `client.ts`: a transport-agnostic channel client (used by the phone, host tests
-  and a debug CLI).
+- `client.ts`: a transport-agnostic channel client (used by host tests, the debug CLI
+  and the fixture generator).
 - `vectors/`: Noise test vectors (the cacophony vectors for this pattern) and
   cross-implementation push vectors.

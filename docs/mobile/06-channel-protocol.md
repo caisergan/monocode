@@ -649,12 +649,15 @@ unaffected. Existing thrown messages map to codes:
   - Unknown error codes are treated as `internal`.
 - **Compatibility shims** carry `// COMPAT(<name>): added host vX.Y, remove after
   YYYY-MM` so they can be found and removed.
-- **Shared types.** Wire types live in `@monocode/core` (session, blocks, protocol)
-  and `@monocode/channel` (envelope, handshake, new methods). Host and phone are
-  type-checked against the same definitions. Runtime validation on the phone uses
-  small hand-written guards on hot paths. `session.sync` payloads are trusted after
-  structural checks, since they come from an authenticated host. That avoids
-  Zod-on-Hermes costs.
+- **Shared types, two languages.** Wire types live in `@monocode/core` (session,
+  blocks, protocol) and `@monocode/channel` (envelope, handshake, new methods), and
+  the host is type-checked against them. The Swift app mirrors them as Codable types
+  in MonoWire and MonoChannel. Golden fixtures generated from the TypeScript code and
+  an interop test against a real host keep the two in step
+  ([16 §16.5](16-ios-native-design.md#165-keeping-the-swift-client-compatible-with-the-host)).
+  The phone decodes tolerantly: unknown fields are ignored and unknown enum cases
+  decode to `unknown`. `session.sync` payloads are trusted after structural checks,
+  since they come from an authenticated host.
 
 ## 6.13 Example exchange
 

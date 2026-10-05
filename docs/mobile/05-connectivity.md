@@ -113,12 +113,12 @@ a pairing dialog or the CLI).
 The phone runs a race when it first connects, reconnects, or foregrounds a host that
 didn't answer the verify ping.
 
-**1. Eligible candidates** depend on the current network (`@react-native-community/netinfo`):
+**1. Eligible candidates** depend on the current network (Network.framework `NWPathMonitor`):
 
 | Phone network | Eligible |
 |---|---|
 | Wi-Fi or Ethernet | all `lan`, `tailscale`, `manual`, `relay` |
-| Cellular | `tailscale`, `manual`, `relay`. `lan` is skipped unless NetInfo reports a VPN |
+| Cellular | `tailscale`, `manual`, `relay`. `lan` is skipped unless the current path has a VPN interface |
 | None | none; go to `offline` immediately |
 
 **2. Order:**
@@ -246,14 +246,17 @@ uses it for anything the host timestamps:
 
 ## 5.10 App lifecycle
 
-| Event | iOS | Android |
-|---|---|---|
-| Moves to background | Send `presence{visible:false}`. Flush the outbox under a background task (`beginBackgroundTask`, via a small Expo module; ≤ 25 s). Close channels with `bye{code:"background"}` after the flush or after 30 s | The same, with channels closed after 60 s. No foreground service |
-| Suspended or killed | Nothing runs. Pushes arrive through APNs. The Notification Service Extension decrypts them | Data messages wake the headless task, which decrypts and posts the notification |
-| Returns to foreground | Verify pings for hosts that are still open. Race the rest without backoff. Send `presence{visible:true}` and `watch.set` | Same |
-| Network change | Verify active channels (2 s ping). Probe direct if on the relay. Race hosts that are offline | Same |
-| Low Data Mode / Data Saver | Fewer turns per session window (8 instead of 20). Attachment previews load on tap only. Compression stays on | Same |
-| Notification tapped while killed | Cold start goes straight to the session route. The cached transcript paints first, then a channel is raced for that host before any others | Same |
+| Event | Behaviour |
+|---|---|
+| Moves to background (`scenePhase` becomes `.background`) | Send `presence{visible:false}`. Flush the outbox under `UIApplication.beginBackgroundTask` (≤ 25 s). Close channels with `bye{code:"background"}` after the flush or after 30 s. A running Commit and push continues as a `BGContinuedProcessingTask` ([16 §16.6.6](16-ios-native-design.md#1666-project-screen-explorer-changes)) |
+| Suspended or killed | Nothing runs. Pushes arrive through APNs. The Notification Service Extension decrypts them. A `BGAppRefreshTask` flushes outbox entries left behind, when iOS grants one |
+| Returns to foreground | Verify pings for hosts that are still open. Race the rest without backoff. Send `presence{visible:true}` and `watch.set` |
+| Network change (`NWPathMonitor`) | Verify active channels (2 s ping). Probe direct if on the relay. Race hosts that are offline |
+| Low Data Mode (`NWPath.isConstrained`) | Fewer turns per session window (8 instead of 20). Attachment previews load on tap only. Compression stays on |
+| Notification tapped while killed | Cold start goes straight to the session route. The cached transcript paints first, then a channel is raced for that host before any others |
+
+Android is out of v1 (D19). A later Android app follows the same rules, with channels
+closed 60 s after backgrounding and no foreground service.
 
 The app never keeps a socket open in the background. Pushes cover the background.
 

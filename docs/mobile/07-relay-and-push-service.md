@@ -30,8 +30,8 @@ plaintext, and it can be self-hosted.
 | Package | `services/relay` (`@monocode/relay`), TypeScript, `wrangler.toml` |
 | Durable Object classes | `Room` (one per `roomId`, `idFromName("room:" + roomId)`) |
 | Routes | Official: `relay.usemono.dev/v1/*` and `/health`. Personal: the maintainer's domain or `*.workers.dev` |
-| Environments | `staging` (`relay-staging.usemono.dev`) and `production` for the official track; `personal` for the maintainer's own deployment ([13 §13.5](13-testing-and-release.md#135-publishers-and-build-tracks)). Each environment is a separate gateway with its own keys and Expo token, matching one app build |
-| Secrets | `GATEWAY_KEYS` (JSON list of `{id, private}`), `EXPO_ACCESS_TOKEN`, optional `APNS_KEY_P8`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `FCM_SERVICE_ACCOUNT` |
+| Environments | `staging` (`relay-staging.usemono.dev`) and `production` for the official track; `personal` for the maintainer's own deployment ([13 §13.5](13-testing-and-release.md#135-publishers-and-build-tracks)). Each environment is a separate gateway with its own keys and APNs key, matching one app build |
+| Secrets | `GATEWAY_KEYS` (JSON list of `{id, private}`), `APNS_KEY_P8`, `APNS_KEY_ID`, `APNS_TEAM_ID`, `APNS_TOPICS` (the bundle ids this gateway serves) |
 | Deploy | Official: GitHub Actions on tags `relay-v*` (`wrangler deploy --env production`); staging on merge to `dev`. Personal: `wrangler deploy --env personal` by hand |
 | Tests | `@cloudflare/vitest-pool-workers` (workerd), [13 §13.2](13-testing-and-release.md#132-automated-tests) |
 
@@ -208,46 +208,50 @@ Body (≤ 256 KiB):
 | `rate_limited` | Keep. The host drops `finished` pushes for this window and retries approvals once after `Retry-After` |
 | `provider_error` | Keep; retry once after 30 s |
 
-### Delivery providers
+### Delivery provider: APNs
 
-**v1: Expo Push Service.** `POST https://exp.host/--/api/v2/push/send` with
-`Authorization: Bearer EXPO_ACCESS_TOKEN`. The project enables "enhanced push
-security", so tokens alone can't be used to send.
+The gateway sends straight to APNs. There is no third-party push service in between,
+and only the gateway holds the APNs signing key.
 
-- **iOS message:**
+- **Endpoint.** `POST https://api.push.apple.com/3/device/<deviceToken>` over HTTP/2,
+  or `api.sandbox.push.apple.com` when the ticket's `apnsEnv` is `development`.
+- **Authentication.** A provider JWT (ES256) signed with `APNS_KEY_P8`, with
+  `kid = APNS_KEY_ID` and `iss = APNS_TEAM_ID`. It is cached and refreshed every 50
+  min. APNs rejects tokens older than an hour, and refreshing more often than every
+  20 min is throttled.
+- **Topic.** `apns-topic` is the ticket's `topic`. It must be one of `APNS_TOPICS`,
+  the bundle ids this gateway serves, or the message gets `invalid_ticket`. A ticket
+  therefore can't make a gateway send to another app.
+- **Headers.** `apns-push-type: alert`; `apns-priority: 10` for `high`, `5` for
+  `normal`; `apns-expiration` = now + `ttlSeconds`.
+- **Body:**
   ```json
-  { "to": "<expoToken>", "title": "MonoCode", "body": "New activity",
-    "mutableContent": true, "sound": "default", "priority": "high",
-    "categoryId": "approval", "data": { "e": "1.<payload>", "t": "<thread>", "k": "approval" },
-    "ttl": 3600 }
+  { "aps": { "alert": { "title": "MonoCode", "body": "New activity" },
+             "mutable-content": 1, "sound": "default",
+             "category": "approval", "thread-id": "<thread>" },
+    "e": "1.<payload>", "k": "approval" }
   ```
   - The Notification Service Extension replaces the placeholder title and body with
-    the decrypted content.
+    the decrypted content ([08 §8.7](08-notifications.md#87-ios-delivery)).
   - If decryption fails, the placeholder is what shows. It contains nothing private.
-- **Android message:** data-only, so the app's background task builds the
-  notification after decrypting.
-  ```json
-  { "to": "<expoToken>", "data": { "e": "1.<payload>", "t": "<thread>", "k": "approval" },
-    "priority": "high", "ttl": 3600 }
-  ```
-- **Errors.**
-  - Expo push tickets can return `DeviceNotRegistered` at once. That maps to
-    `unregistered`.
-  - Receipt-level errors only appear in a later receipts call. The `Room` schedules
-    a Durable Object alarm 15 min after a send to fetch receipts for that batch.
-    Tokens that come back `DeviceNotRegistered` are stored, hashed, in the room's
-    unregistered list for 30 days. The next push with that ticket returns
-    `unregistered`.
+- **Errors.** APNs answers each send at once, so there is no receipts step.
 
-**Alternative: direct APNs and FCM.** The ticket already carries the raw device
-token. A provider module can send:
-- to APNs over HTTP/2 with a `.p8` JWT, using `apns-push-type: alert`,
-  `apns-collapse-id`, `mutable-content: 1`;
-- to FCM HTTP v1 with a service account.
+  | APNs response | Status |
+  |---|---|
+  | 200 | `ok` |
+  | 410 `Unregistered`, 400 `BadDeviceToken` | `unregistered`. The token is stored, hashed, in the room's unregistered list for 30 days |
+  | 400 `DeviceTokenNotForTopic`, `TopicDisallowed` | `invalid_ticket` |
+  | 403 `ExpiredProviderToken` | Refresh the JWT and retry once, then `provider_error` |
+  | 429, 5xx | `provider_error` |
 
-APNs requires HTTP/2, and Workers' outbound `fetch` support for it must be verified
-**(spike S5)**. If it is missing, this provider runs as a small Node service instead.
-Either way the host protocol and the phone are unchanged.
+APNs requires HTTP/2. Whether Workers' outbound `fetch` can speak it to APNs is
+**spike S22**. If it can't, this provider runs as a small forwarder service that the
+gateway calls with the same message. Either way the host protocol and the phone are
+unchanged.
+
+**Later: FCM.** A future Android app registers tickets with `provider: "fcm"`
+([03 §3.8](03-identity-and-crypto.md#38-push-tickets)). The gateway would add an FCM
+HTTP v1 provider with a service account. Hosts need no change.
 
 ## 7.6 Limits and abuse controls
 
@@ -276,7 +280,6 @@ Per `Room`, in Durable Object storage:
   lastHostSeenAt: number;
   recentNonces: string[];       // push replay protection, ≤ 2,000, 10-min window
   unregistered: { tokenHash: string; at: number }[];   // ≤ 500, 30 days
-  pendingReceipts: { expoTicketId: string; tokenHash: string; at: number }[];
 }
 ```
 
@@ -295,7 +298,7 @@ byte counts, durations. Never frame contents, tickets, payloads, signatures or t
   - active rooms, phone connections and data bytes;
   - close codes;
   - push requests and results by status;
-  - Expo error rates.
+  - APNs responses by reason.
 - **Alerts:**
   - health failing for 3 min;
   - push `provider_error` above 5 % for 10 min;
@@ -319,7 +322,7 @@ Workers Paid ($5/month) includes allowances.
 |---|---|---|
 | Relay frames | 10 min with the app open on the relay while a session streams: about 5,000 frames | ≈ 150 M frames. Billed as WebSocket messages at 20:1 → ≈ 7.5 M requests |
 | Durable Object duration | Awake only while frames flow (hibernation otherwise) ≈ 10 min | ≈ 2.3 M GB-s |
-| Push | 20 pushes | 600 k Expo sends (free) and ≈ 600 k Worker requests |
+| Push | 20 pushes | 600 k APNs sends (free) and ≈ 600 k Worker requests |
 
 The estimate is roughly **$30 to $60 per month per 1,000 daily active users** on the
 relay path. Users who connect directly cost nothing.

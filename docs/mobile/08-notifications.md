@@ -9,8 +9,8 @@ sequenceDiagram
   participant A as Attention engine (host)
   participant C as Phone channel (if open)
   participant G as Push gateway
-  participant X as Expo → APNs/FCM
-  participant N as Phone NSE / bg task
+  participant X as APNs
+  participant N as Phone NSE
   E->>A: saved(prev, next, event)
   A->>A: detect transition → AttentionEvent
   A->>A: policy per mobile device (presence, prefs, coalescing)
@@ -45,8 +45,8 @@ attention engine (`host/attention.ts`) compares the two snapshots:
 | `usage_limit` | `next.session.usageLimit` is set and `previous.session.usageLimit` was not | `sid:usage:<runId>` |
 
 - Dedupe ids are kept for 24 h in memory, so a re-save never notifies twice.
-- **Resolution signals** clear in-app banners and, on Android, delivered
-  notifications:
+- **Resolution signals** clear in-app banners, and delivered notifications on a later
+  Android app (§8.8):
   - `approval.resolved`: the approval became decided.
   - `question.resolved`: `pendingQuestion` cleared.
   - `turn.started`: a new run started on that session.
@@ -108,10 +108,10 @@ For each attention event, and for each **mobile** device with an active push tar
    gateway request. The batch is flushed within 250 ms, with at most 50 messages per
    request.
 
-**Android cleanup.** When a resolution signal arrives (§8.2), the host also sends a
-`resolved` push, at normal priority, to Android targets that were sent the original.
-The background task then cancels the stale notification. iOS cleanup is done by the
-app on foreground (§8.8).
+**Android cleanup (deferred with §8.8).** When a resolution signal arrives (§8.2), the
+host also sends a `resolved` push, at normal priority, to Android targets that were
+sent the original. The background task then cancels the stale notification. iOS
+cleanup is done by the app on foreground (§8.7).
 
 ## 8.5 Payload
 
@@ -149,8 +149,7 @@ type PushPlaintext = {
 
 **Composition on the phone.** It follows the desktop's notification formats
 (`notifications.ts:159-224`), which use title "MonoCode", subtitle = session title,
-and the body below. iOS and Android already show the app name above every
-notification, so the phone uses the session title as the title and moves the project
+and the body below. iOS already shows the app name above every notification, so the phone uses the session title as the title and moves the project
 and machine into the subtitle. The body wording is the desktop's.
 
 | Kind | Title | Subtitle | Body (full) | Body (minimal) |
@@ -198,7 +197,7 @@ read.
   can still get one.
 - **Turning off.** Turning notifications off for a host calls `push.unregister`.
 - **OS permission revoked.** The phone notices on foreground
-  (`Notifications.getPermissionsAsync`). It unregisters every host and shows the
+  (`UNUserNotificationCenter.notificationSettings()`). It unregisters every host and shows the
   "Notifications are off in Settings" state.
 - **Push key rotation** is phone-initiated. A new key is registered on every host,
   and the old private key is kept 7 days.
@@ -206,16 +205,17 @@ read.
 ## 8.7 iOS delivery
 
 - **Notification Service Extension.**
-  - A `MonoCodeNotificationService` target, written in Swift and added at prebuild by
-    the `@bacons/apple-targets` config plugin **(spike S2)**.
+  - The `NotificationService` target in `apps/ios`
+    ([16 §16.3](16-ios-native-design.md#163-architecture)). It links MonoChannel for
+    the CryptoKit open, and MonoStore's Keychain wrapper.
   - It reads the push private key from the shared keychain access group, for example
     `$(AppIdentifierPrefix)com.monocode.mobile.shared` on the official track.
   - It reads the host label map and per-host badge counts from the App Group, for
     example `group.com.monocode.mobile`. Both names come from the publisher config
     ([13 §13.5](13-testing-and-release.md#135-publishers-and-build-tracks)).
 - **Steps:**
-  1. Read `e`, `t` and `k` from the Expo data in the APNs payload. Expo nests `data`
-     inside the payload; the exact key is confirmed in S2.
+  1. Read `e` and `k` from the APNs payload's top level, and the thread from
+     `aps.thread-id` ([07 §7.5](07-relay-and-push-service.md#75-push-gateway)).
   2. Decrypt with CryptoKit ([03 §3.7](03-identity-and-crypto.md#37-push-payload-encryption)).
      On any failure, keep the placeholder ("MonoCode" / "New activity") and stop.
   3. Compose title, subtitle and body (§8.5).
@@ -240,15 +240,15 @@ read.
   is resolved according to the current inbox: approval decided, question gone, or a
   newer turn running.
 
-## 8.8 Android delivery
+## 8.8 Android delivery (deferred)
 
-- **Background task.** Data-only FCM messages wake the app's background task,
-  defined with `expo-task-manager` and registered with
-  `Notifications.registerTaskAsync` **(spike S3)**. It:
+Android is out of v1 (D19). This section keeps the design for a later Android app, so
+the host and gateway need no change when it comes.
+
+- **Background task.** Data-only FCM messages wake the app's background task **(spike S3)**. It:
   1. Reads the push private key from secure storage.
-  2. Decrypts with `@monocode/channel/push`.
-  3. Composes the notification.
-  4. Calls `Notifications.scheduleNotificationAsync({content, trigger: null})`.
+  2. Decrypts the payload ([03 §3.7](03-identity-and-crypto.md#37-push-payload-encryption)).
+  3. Composes and posts the notification.
 - **Channels**, created at first launch:
 
   | Channel id | Name | Importance | Kinds |
@@ -278,7 +278,8 @@ read.
 - **Tap.** It opens `route`: the session screen.
   - `focus=approval:<req>` scrolls to the tool block and opens the approval sheet.
   - `focus=question:<req>` opens the question sheet.
-  - Cold starts read `Notifications.getLastNotificationResponseAsync()`. The cached
+  - Cold starts get the response through `UNUserNotificationCenterDelegate`
+    `userNotificationCenter(_:didReceive:)` before the first screen. The cached
     transcript paints first, and that host's channel is connected before the others.
 - **Allow / Deny actions** (v1):
   - Both open the app. iOS asks for Face ID or the passcode first for Allow.
@@ -293,9 +294,8 @@ read.
 
 ## 8.10 In-app notifications
 
-- `Notifications.setNotificationHandler` returns
-  `shouldShowBanner: false, shouldShowList: true` while the app is active. The OS
-  doesn't double up with in-app banners.
+- `userNotificationCenter(_:willPresent:)` returns `[.list]` while the app is
+  active, without `.banner`. The OS doesn't double up with in-app banners.
 - **`evt attention` handling.** If the person is on that session, the app does
   nothing beyond a light haptic for approvals and questions. Otherwise it shows an
   in-app banner at the top:
@@ -315,16 +315,14 @@ read.
   `mutedSessions` for this device).
 - **Global** (Settings → Notifications):
   - The system permission status, with a link to the OS settings.
-  - "Show content on lock screen" (Android; on iOS it points to the system setting).
+  - "Show content on lock screen", which points to the system's preview setting.
   - Sounds.
   - **Send test notification**, which picks a host and calls `push.test`.
   - **Troubleshooting**: per-host registration state, last push received (time and
-    kind), and the background-restriction hints from §8.8.
+    kind), and whether Background App Refresh is on.
 
 ## 8.12 Badge
 
 - **iOS.** The badge is the sum of `n` across hosts. The extension keeps it current
   from pushes. On foreground the app recomputes it from `inbox.list` results and
-  calls `Notifications.setBadgeCountAsync`.
-- **Android.** The launcher shows its own count of active notifications. The app
-  doesn't set a number.
+  calls `UNUserNotificationCenter.setBadgeCount(_:)`.

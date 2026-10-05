@@ -83,8 +83,9 @@ the offer ("Turn on direct connections or the relay first").
   `monocode-dev://pair` on the personal track
   ([13 §13.5](13-testing-and-release.md#135-publishers-and-build-tracks)).
   - The offer sits in the URL **fragment**, which browsers never send to a server.
-  - The path is a universal link (iOS `apple-app-site-association`) and an Android
-    App Link (`assetlinks.json`). When the app is installed, scanning with the OS
+  - The path is a universal link (iOS `apple-app-site-association`; an Android App
+    Link through `assetlinks.json` once an Android app exists). When the app is
+    installed, scanning with the OS
     camera opens it directly. When it isn't, the web page shows store links and
     explains that the code must be scanned again from the app.
 - **Custom schemes.** `monocode://pair#o=…` and `monocode-dev://pair#o=…`. Each app
@@ -170,9 +171,9 @@ Scan this code with the MonoCode app, or open the link on your phone.
   Reachable through: local network (192.168.1.20), Tailscale (100.101.12.7), relay
   Expires in 10:00. Press Ctrl+C to cancel.
 
-"Pixel 9" (Android 16) wants to pair. Code on the phone: 482 913
+"iPhone 17" (iOS 27) wants to pair. Code on the phone: 482 913
 Allow? [y/N] y
-Paired "Pixel 9" (device 1f3a9c…). Manage devices with: monocode-host devices
+Paired "iPhone 17" (device 1f3a9c…). Manage devices with: monocode-host devices
 ```
 
 - **Requires a running host.** Otherwise it fails with "The host is not running.
@@ -248,7 +249,7 @@ device:  (none) ──claim──▶ pending ──allow──▶ active ──r
 See [11 §11.3](11-design-and-ux.md#1111-onboarding-and-pairing) for layouts. The logic:
 
 1. **Entry.** One of:
-   - Onboarding "Scan QR code" (`expo-camera`, QR only).
+   - Onboarding "Scan QR code" (VisionKit `DataScannerViewController`, QR only).
    - "Paste link" (explicit paste button; no clipboard snooping).
    - An incoming universal link or custom-scheme link while the app is running or
      cold-starting.

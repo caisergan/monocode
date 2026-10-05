@@ -1,193 +1,215 @@
-# 12. Mobile engineering
+# 12. iOS engineering
+
+How the phone app is built: a native iOS app in Swift (D19). This document describes
+the Swift app. The Expo prototype on `feat/mobile-app` implemented the same behaviour
+in TypeScript. It is frozen as the reference and deleted at parity
+([16](16-ios-native-design.md)). The plan, porting map and milestones are in 16. This
+document is the engineering reference the app is built against.
 
 ## 12.1 Stack
 
 | Layer | Choice | Notes |
 |---|---|---|
-| Framework | Expo SDK 57 (current when this was written; pin the exact SDK in M0), React Native New Architecture, Hermes | Upgrade once per release cycle |
-| Architecture | **Hybrid** (D17): Expo app plus the native transcript module `MonoTranscriptView` (Swift and Kotlin, Expo Modules API) | [15](15-performance.md) |
-| Language | TypeScript `strict`, React Compiler on | Shares `@monocode/core` and `@monocode/channel` |
-| Navigation | Expo Router (typed routes) on the `react-native-screens` native stack; `NativeTabs` (`expo-router/unstable-native-tabs`) for the tab bar and its iOS 26 bottom accessory; native form sheets with detents | [11 §11.10](11-design-and-ux.md#1110-navigation), [15 §15.2](15-performance.md#152-architecture-by-surface) |
-| State | Zustand stores, plus one runtime object per host that lives outside React | §12.4, §12.5 |
-| Storage | `expo-sqlite` with SQLCipher; `expo-secure-store`; `expo-sqlite/kv-store` for small preferences | §12.6 |
-| Lists | `@shopify/flash-list` v2 for every list except the transcript, with deterministic row heights | §12.9 |
-| Transcript, diff viewer, file viewer | `MonoTranscriptView` (native) | [15 §15.4](15-performance.md#154-the-native-transcript-monotranscriptview) |
-| Animation and gestures | `react-native-reanimated` 4, `react-native-gesture-handler`, `react-native-keyboard-controller` | Bezier timings from `@monocode/design` (desktop parity); springs only for gesture hand-off ([11 §11.1](11-design-and-ux.md#111-design-parity-rules) M8) |
-| Materials and effects | `expo-glass-effect` (`GlassView`, `GlassContainer`: Liquid Glass on iOS 26), `expo-blur` (before iOS 26), `@react-native-masked-view/masked-view` + `expo-linear-gradient` (shimmer), `@shopify/react-native-skia` (title particles, effort tiles, pixel ring) | [11 §11.4](11-design-and-ux.md#114-shape-materials-and-elevation), [§11.6](11-design-and-ux.md#116-motion) |
-| Sound | `expo-audio` playing the exported `cuelume` cues | [11 §11.8](11-design-and-ux.md#118-sound-and-haptics) |
-| Icons | Hugeicons: `@hugeicons/react-native` with `@hugeicons/core-free-icons` in React; build-time native vector assets for the transcript and tab bar | The desktop's icon family and stroke 1.75 |
-| Context menus | Native context menus (UIMenu / Android popup), via a maintained library or Expo UI (spike S12) | [15 §15.2](15-performance.md#152-architecture-by-surface) |
-| Crypto | `react-native-quick-crypto` (JSI, native) for X25519 and ChaCha20-Poly1305 on the hot path; `@noble/*` for the Noise state machine glue, tests and vectors; `expo-crypto` `getRandomValues` | Keeps per-frame JS work in budget ([15 §15.5](15-performance.md#155-budgets)) |
-| Compression | `fflate` (deflate-raw) | |
-| Markdown | `unified` + `remark-parse` + `remark-gfm` → transcript `RowSpec`s (incremental tail parse) | §12.9 |
-| Code highlighting | Shiki core with the JavaScript regex engine, producing styled runs for the native transcript, computed in idle slices or a worklet runtime; fallback `highlight.js` | Spikes S1, S13 |
-| Images | `expo-image`, `expo-image-picker`, `expo-image-manipulator`, `expo-document-picker` | |
-| Camera / QR | `expo-camera` (barcode scanning) | |
-| Notifications | `expo-notifications`, `expo-task-manager`; iOS Notification Service Extension via `@bacons/apple-targets` | [08](08-notifications.md) |
-| Device features | `expo-haptics`, `expo-local-authentication`, `expo-clipboard`, `expo-sharing`, `expo-linking`, `@react-native-community/netinfo` | |
-| SVG | `react-native-svg` + `react-native-svg-transformer` (provider logos, file-type icons, mascots) | |
-| Testing | Jest (`jest-expo`) for the app, Vitest for shared packages, React Native Testing Library, Maestro for end-to-end; XCTest and Jetpack Macrobenchmark for performance | [13](13-testing-and-release.md), [15 §15.6](15-performance.md#156-measurement-and-gates) |
+| Platform | iOS 26.0 minimum; Xcode 27, iOS 27 SDK | [16 §16.2](16-ios-native-design.md#162-platform-baseline) |
+| Language | Swift 6 language mode, complete strict concurrency | Main-actor UI; actors for connections |
+| UI | SwiftUI for screens, navigation, sheets, menus and glass. UIKit for the transcript and viewers (`MonoTranscriptView`) and wherever spikes S19 and S20 call for it | [16 §16.6](16-ios-native-design.md#166-design-by-surface) |
+| Navigation | `TabView` with a `NavigationStack` per tab; typed destinations in a `Router` | [11 §11.10](11-design-and-ux.md#1110-navigation) |
+| State | `@Observable` stores on the main actor, plus one `HostRuntime` actor per host | §12.4, §12.5 |
+| Storage | SQLite through GRDB, encrypted per spike S18; Keychain Services for secrets; `UserDefaults` for small preferences | §12.6 |
+| Lists | SwiftUI `List` with MonoCode card rows (spike S19; fallback `UICollectionView`) | §12.9 |
+| Transcript, diff viewer, file viewer | `MonoTranscriptView` (UIKit, CoreText) | [15 §15.4](15-performance.md#154-the-native-transcript-monotranscriptview) |
+| Animation and gestures | SwiftUI animations with the token curves; Core Animation inside the transcript; system gestures | Bezier timings from `@monocode/design`; springs only for gesture hand-off ([11 §11.1](11-design-and-ux.md#111-design-parity-rules) M8) |
+| Materials | Liquid Glass: system chrome, `.glassEffect` for MonoCode's floating surfaces; `UIGlassEffect` inside UIKit | [11 §11.4](11-design-and-ux.md#114-shape-materials-and-elevation) |
+| Sound | AVFoundation (`AVAudioPlayer`) playing the exported `cuelume` cues | [11 §11.8](11-design-and-ux.md#118-sound-and-haptics) |
+| Icons | SF Symbols (M12); harness marks, file-type icons and mascots in the asset catalog | [11 §11.7](11-design-and-ux.md#117-iconography-brand-and-mascots) |
+| Context menus | SwiftUI `.contextMenu(menuItems:preview:)`; `UIContextMenuInteraction` inside the transcript | |
+| Crypto | CryptoKit (X25519, ChaCha20-Poly1305, SHA-256, HMAC, HKDF); `SecRandomCopyBytes` | [03](03-identity-and-crypto.md) |
+| Compression | Apple `Compression` (raw deflate) with bounded output | [03 §3.5](03-identity-and-crypto.md#35-record-layer) |
+| Networking | `URLSessionWebSocketTask` (spike S23; fallback `NWConnection` with `NWProtocolWebSocket`); `NWPathMonitor` | [05](05-connectivity.md) |
+| Markdown | A Swift port of the prototype's block and inline parser → transcript rows (incremental tail parse) | §12.9 |
+| Code highlighting | MonoHighlight, engine chosen by spike S21 | §12.9 |
+| Images | ImageIO for decode and downsampling off the main thread; PhotosUI `PhotosPicker`; `UIImagePickerController` for the camera; `UIDocumentPickerViewController` for files | §12.10 |
+| QR | VisionKit `DataScannerViewController` (QR only) | [04 §4.7](04-pairing.md#47-phone-screens) |
+| Notifications | UserNotifications; a Notification Service Extension target | [08](08-notifications.md) |
+| Background | `UIApplication.beginBackgroundTask`, BackgroundTasks (`BGAppRefreshTask`, `BGContinuedProcessingTask`) | [05 §5.10](05-connectivity.md#510-app-lifecycle) |
+| Device features | `.sensoryFeedback` haptics, LocalAuthentication, `UIPasteboard`, `ShareLink` | |
+| Testing | Swift Testing for the packages (`swift test` on the Mac); XCTest and XCUITest for the app, the transcript and performance | [13](13-testing-and-release.md), [15 §15.6](15-performance.md#156-measurement-and-gates) |
 
-No analytics or crash-reporting SDK ships in v1 ([12.16](#1216-logging-and-diagnostics)).
+Third-party packages are limited to GRDB (with SQLCipher if S18 keeps it) and the
+highlighter S21 chooses. No analytics or crash-reporting SDK ships in v1
+([12.16](#1216-logging-and-diagnostics)).
 
-## 12.2 Project layout (`apps/mobile`)
+## 12.2 Project layout (`apps/ios`)
 
 ```
-apps/mobile/
-  app.config.ts              # identifiers, permissions, plugins (12.14)
-  eas.json                   # build profiles (13.5)
-  app/                       # Expo Router routes (11.2)
-  src/
-    channel/                 # transports (direct, relay, memory) + FrameSocket adapters
-    hosts/                   # HostRuntime, registry, candidates, race, upgrade probe
-    sync/                    # WatchManager, session windows, inbox merge, apply pipeline
-    outbox/                  # outbox engine and persistence
-    storage/                 # sqlite (schema, migrations), secure store, kv
-    push/                    # registration, handlers, categories, background task
-    pairing/                 # offer parsing, pairing state machine
-    transcript/              # row model, renderers per block kind, markdown, code, diff
-    composer/                # input, chips, pickers, attachments, queue view
-    approvals/               # approval card, sticky bar, question sheet
-    workspace/               # changes, diff viewer, files, file viewer
-    settings/                # settings screens
-    ui/                      # design system: tokens, primitives, sheets, toasts
-    security/                # app lock, privacy overlay
-    demo/                    # demo host
-    log/                     # ring-buffer logger and diagnostics export
-    strings.ts               # all user-facing text
-  modules/
-    background-task/         # Expo module: begin/end background task (iOS)
-    transcript/              # MonoTranscriptView: src/ (TS spec + bridge), ios/ (Swift, TextKit 2/CoreText),
-                             #   android/ (Kotlin, StaticLayout); fixtures shared with tests (15.4)
+apps/ios/
+  MonoCode.xcodeproj         # targets: MonoCode (app), NotificationService (extension),
+                             #   MonoCodeUITests; folders are synchronized groups
+  Config/                    # Shared.xcconfig, Personal.xcconfig, Official.xcconfig (13.5)
+  MonoCode/
+    App/                     # MonoCodeApp, RootView (TabView), Router, deep links, scene phase,
+                             #   app lock and privacy overlay
+    Agents/                  # Agents tab, bottom accessory
+    Projects/                # Projects tab, Project screen, open-folder flow
+    Session/                 # session screen, transcript host, approval banner, question form,
+                             #   tool and attachment sheets, session info
+    Compose/                 # composer, chips, pickers, queue card, usage tab, New session
+    Workspace/               # Explorer, Changes, file and diff viewers
+    Settings/                # Settings pages, Machine details, notifications settings
+    Pairing/                 # pairing sheet and stages, scanner
+    Debug/                   # Transcript Lab, fling benchmark, hitch meter (debug builds)
+    Resources/               # Assets.xcassets, cue sounds, Localizable.xcstrings, Info.plist
+  NotificationService/       # the extension (8.7)
+  Packages/
+    MonoChannel/             # Noise IK, records, envelope, offer and links, proof and code,
+                             #   push open and ticket seal
+    MonoWire/                # Codable wire and session types; applySessionSync; turn and step
+                             #   grouping; question replies; summaries; windowing
+    MonoStore/               # GRDB database, schema and migrations; Keychain wrapper
+    MonoSync/                # transports, race, HostRuntime, registry, watch, session windows,
+                             #   paging, attachments, outbox, pairing state machine, workspace API
+    MonoDesign/              # generated tokens; theme; motion; type scale; SF Symbol alias map
+    MonoTranscript/          # engine, layout, models, view; row builder; Markdown; document mode
+    MonoHighlight/           # highlighting (S21)
+    MonoDemo/                # demo host and its fixtures
   scripts/
-    build-native-assets      # Hugeicons, brand SVGs, mascots → iOS asset catalog + Android VectorDrawables
-  targets/
-    notification-service/    # Swift NSE (8.7) + expo-target.config.js
-  plugins/                   # config plugins (12.14)
+    gen-design-tokens.mjs    # @monocode/design → MonoDesign/Sources/MonoDesign/Generated/Tokens.swift
+    gen-fixtures.mjs         # TypeScript → golden JSON fixtures for the packages' tests
+    build-native-assets.mjs  # harness marks, file-type icons, mascots → Assets.xcassets
+    export-cues.mjs          # cuelume cues → audio files (11 §11.8)
+    check.sh                 # swift test for every package, then xcodebuild test
 ```
 
 ## 12.3 Code shared with the desktop and host
 
-The app imports these from `@monocode/core` ([02 §2.6](02-architecture.md#26-repository-layout-and-shared-code)):
+The Swift app does not import TypeScript. It **ports** what it needs, and the port is
+held to the TypeScript behaviour by vectors, golden fixtures and an interop test
+([16 §16.5](16-ios-native-design.md#165-keeping-the-swift-client-compatible-with-the-host)).
 
-- **Types:** `Session`, `Block`, `HostSession`, `HostSessionSummary`, `HostCommand`,
-  `SessionSync`, `RemoteAttachment`, `AgentModel`, `ModelSetting`, `RuntimeMode`,
-  `UserQuestionPrompt`, `ToolPreview`, `ContextUsage`.
-- **Logic:**
-  - `applySessionSync`, `groupTurns`, `groupTurnItems`, `buildActivityPhases`,
-    `workSummaryLine`;
-  - `toolCallState`, `resolveToolCallDisplay`, `isHiddenTool`;
-  - `buildQuestionReply`, `questionIsComplete`;
-  - `planTitle`, `buildPlanPrompt`;
-  - `sessionNeedsInput`, `compareSessionSummaries`;
-  - `findRemoteModel`, `carryModelSettings`, `isEffortSettingId`;
-  - `contextPercent`, `formatTokens`, `relativeTime`, `fuzzy`, `truncateBlock`,
-    `plainTextPreview`;
-  - a pure unified-diff parser.
-- **Constants:** `REMOTE_PROVIDERS`, `HARNESS_LABEL`/`HARNESS_TITLE`, runtime-mode
-  labels and hints, attachment limits.
+- **Into MonoWire, from `@monocode/core`** and the desktop model code it re-exports:
+  - **Types:** `Session`, `Block`, `HostSession`, `HostSessionSummary`, `HostCommand`,
+    `SessionSync`, `RemoteAttachment`, `AgentModel`, `ModelSetting`, `RuntimeMode`,
+    `UserQuestionPrompt`, `ToolPreview`, `ContextUsage`, and the workspace wire types.
+  - **Logic:**
+    - `applySessionSync`, `groupTurns`, `groupTurnItems`, `buildActivityPhases`,
+      `workSummaryLine`;
+    - `toolCallState`, `resolveToolCallDisplay`, `isHiddenTool`;
+    - `buildQuestionReply`, `questionIsComplete`;
+    - `planTitle`, `buildPlanPrompt`;
+    - `sessionNeedsInput`, `hasPendingApproval`, `compareSessionSummaries`;
+    - `findRemoteModel`, `carryModelSettings`, `isEffortSettingId`;
+    - `contextPercent`, `formatTokens`, `relativeTime`, `fuzzy`, `truncateBlock`,
+      `plainTextPreview`.
+  - **Constants:** `REMOTE_PROVIDERS`, `HARNESS_LABEL`/`HARNESS_TITLE`, runtime-mode
+    labels and hints, attachment limits.
+- **Into MonoChannel, from `@monocode/channel`:** the Noise initiator, the record
+  layer, the envelope types, the offer and link codec, the pairing proof and
+  confirmation code, push `open`, and ticket `seal`.
+- **Into MonoDesign, generated:** everything `@monocode/design` exports (§12.11).
 
-From `@monocode/channel`: the Noise initiator, the record layer, the envelope types,
-the offer codec and push crypto (`open`).
+Strings that the desktop's sources must match verbatim live in
+`Localizable.xcstrings`. A check in `gen-fixtures.mjs` compares them with the desktop
+sources, as the TypeScript parity test does for tokens.
 
 ## 12.4 Host runtime
 
-One `HostRuntime` per paired host (`src/hosts/HostRuntime.ts`). It is a plain class,
-created at startup from the host registry, outside React.
+One `HostRuntime` actor per paired host (MonoSync), created at launch from the host
+registry.
 
-```ts
-type HostConnState =
-  | { kind: "idle" } | { kind: "connecting" }
-  | { kind: "online"; transport: "direct" | "relay"; endpoint: string; rttMs: number; since: number }
-  | { kind: "reconnecting"; since: number }
-  | { kind: "offline"; reason: "no_network" | "host_unreachable" | "timeout"; retryAt: number; lastOnlineAt?: number }
-  | { kind: "blocked"; reason: "device_revoked" | "unknown_device" | "host_identity_changed"
-                            | "protocol_incompatible" | "app_too_old" };
+```swift
+enum HostConnState: Sendable, Equatable {
+  case idle, connecting
+  case online(transport: TransportKind, endpoint: String, rttMs: Int, since: Date)
+  case reconnecting(since: Date)
+  case offline(reason: OfflineReason, retryAt: Date, lastOnlineAt: Date?)   // noNetwork, hostUnreachable, timeout
+  case blocked(BlockReason)  // deviceRevoked, unknownDevice, hostIdentityChanged, protocolIncompatible, appTooOld
+}
 
-class HostRuntime {
-  readonly env: string;
-  state: HostConnState;
-  welcome?: Welcome;
-  clockOffsetMs: number;                 // hostNow - localNow
-  connect(reason: ConnectReason): void;  // no-op when online; bypasses backoff for user/OS reasons
-  verify(timeoutMs?: number): Promise<boolean>;
-  request<T>(method: string, params?: object,
-             opts?: { key?: string; timeoutMs?: number; signal?: AbortSignal }): Promise<T>;
-  setWatch(watch: WatchSet): void;       // debounced 50 ms; resent after every (re)connect
-  subscribe(listener: (e: RuntimeEvent) => void): () => void;   // state | evt | welcome
-  onAppState(state: "active" | "background"): void;
-  onNetwork(info: NetInfoState): void;
-  dispose(): void;
+actor HostRuntime {
+  let env: String
+  private(set) var state: HostConnState
+  private(set) var welcome: Welcome?
+  private(set) var clockOffset: Duration                 // hostNow − localNow
+  func connect(_ reason: ConnectReason)                  // no-op when online; bypasses backoff for user/OS reasons
+  func verify(timeout: Duration) async -> Bool
+  func request<R: Decodable & Sendable>(_ method: String, _ params: some Encodable & Sendable,
+                                        key: String?, timeout: Duration) async throws -> R
+  func setWatch(_ watch: WatchSet)                       // debounced 50 ms; resent after every (re)connect
+  nonisolated var events: AsyncStream<RuntimeEvent> { get }  // state | evt | welcome
+  func scenePhaseChanged(_ phase: ScenePhase)
+  func pathChanged(_ path: NWPath)
 }
 ```
 
-**Transports** (`src/channel/`):
+**Transports** (MonoSync):
 
-```ts
-interface Transport {
-  kind: "direct" | "relay" | "memory";
-  key: string;                           // candidate key "lan|192.168.1.20|3775"
-  open(signal: AbortSignal): Promise<FrameSocket>;
+```swift
+protocol Transport: Sendable {
+  var kind: TransportKind { get }        // .direct, .relay, .demo
+  var key: String { get }                // candidate key "lan|192.168.1.20|3775"
+  func open() async throws -> FrameSocket          // cancelled through task cancellation
 }
-interface FrameSocket {
-  send(frame: Uint8Array): void;
-  onFrame(cb: (frame: Uint8Array) => void): void;
-  onClose(cb: (code: number, reason: string) => void): void;
-  close(code?: number, reason?: string): void;
-  readonly bufferedAmount: number;
+protocol FrameSocket: Sendable {
+  func send(_ frame: Data) async throws
+  var frames: AsyncThrowingStream<Data, Error> { get }
+  func close(code: Int, reason: String) async
 }
 ```
 
-- **Direct and relay** both use the React Native `WebSocket`, with `binaryType =
-  "arraybuffer"`:
+- **Direct and relay** both use `URLSessionWebSocketTask` with binary messages:
   - Direct: `ws://<addr>:<port>/v1/channel`, with IPv6 literals bracketed.
   - Relay: `wss://…/v1/client?room=…&v=1`.
-- **Memory** connects the demo host (§12.13) and tests.
+- **Demo** connects the demo host (§12.13) and tests in process.
 
-**The race** (`src/hosts/race.ts`) implements [05 §5.5](05-connectivity.md#55-transport-racing).
-- Each attempt is `open` → `ChannelClient.handshake(hello)` → welcome.
-- Losers are aborted through their `AbortSignal`.
-- The winner's `FrameSocket` and cipher states become the runtime's `Channel`.
+**The race** implements [05 §5.5](05-connectivity.md#55-transport-racing) with a task
+group.
+- Each child task runs `open` → Noise handshake (hello) → welcome.
+- The first child to finish wins. The others are cancelled.
+- The winner's socket and cipher states become the runtime's `Channel`.
 
-**`Channel`** (`@monocode/channel/client`):
+**`Channel`** (MonoChannel):
 - request and response matching with timeouts;
-- an event emitter;
+- an event stream;
 - `ping` every 15 s with presence;
 - priority send queues;
 - reassembly limits.
 
-It knows nothing about React or storage.
+It knows nothing about SwiftUI or storage.
 
 **Request queue.**
-- While the runtime isn't `online`, `request()` waits up to 15 s for a channel, then
-  rejects with `offline`.
-- Commands never go through `request()` directly. They go through the outbox (§12.8).
+- While the runtime isn't `online`, `request` waits up to 15 s for a channel, then
+  throws `offline`.
+- Commands never go through `request` directly. They go through the outbox (§12.8).
 
 ## 12.5 Stores
 
-Zustand stores hold UI-facing state. Runtimes and engines write to them, and
-components read with selectors.
+`@Observable` classes on the main actor hold UI-facing state. Runtimes and engines
+write to them by hopping to the main actor, at most once per display frame for
+streaming data. Views read the properties they show, so Observation re-renders only
+the views whose properties changed.
 
 | Store | Contents | Written by |
 |---|---|---|
-| `hosts` | `HostRecord[]` (registry) and each runtime's `HostConnState` | Registry, runtimes |
-| `inbox` | Per host `{boot, revision, items, fetchedAt}`; merged and sectioned with memoised selectors | Inbox sync |
-| `projects` | Per host `HostProject[]`, plus per project `SessionListItem[]` pages and cursor | Project sync |
-| `sessions` | Per open session: `HostSession` window, `window` meta, `revision`, `freshness: "cached" | "live"`, and ids of loading older pages | WatchManager apply pipeline |
-| `outbox` | Entries by host and session, as a view of the SQLite table | Outbox engine |
-| `catalogs` | Model catalogs per host and project | Composer |
-| `ui` | Composer drafts (debounced to KV), sheet state, toasts, app lock state | Components |
+| `HostsStore` | `HostRecord`s (registry) and each runtime's `HostConnState` | Registry, runtimes |
+| `InboxStore` | Per host `{boot, revision, items, fetchedAt}`; merged and sectioned on demand | Inbox sync |
+| `ProjectsStore` | Per host `HostProject`s, plus per project `SessionListItem` pages and cursor | Project sync |
+| `SessionStore` (one per open session) | `HostSession` window, window meta, `revision`, `freshness` (`cached` or `live`), ids of loading older pages | Watch apply pipeline |
+| `OutboxStore` | Entries by host and session, as a view of the outbox table | Outbox engine |
+| `CatalogStore` | Model catalogs per host and project | Composer |
+| `UIState` | Composer drafts (debounced to the drafts table), the presented sheet, toasts, app lock state | Views |
 
-Selectors are narrow, for example `useSession(env, id, s => s.status)`. Streaming
-deltas never re-render React: the transcript is fed by the row builder through the
-native bridge, so the header and composer re-render only when their own fields change.
+Streaming deltas never re-render SwiftUI. The transcript is fed by the row builder
+directly (§12.9), so the header and composer re-render only when their own fields
+change.
 
 ## 12.6 Persistence
 
-**SQLite** (`monocode.db` in the app's documents directory, excluded from backups):
-- encrypted with SQLCipher (`expo-sqlite` `useSQLCipher` config option);
-- the key is 32 random bytes in secure storage (`mc.cache.dbKey`);
-- WAL mode.
+**SQLite** (`monocode.sqlite` in Application Support, excluded from backups with
+`isExcludedFromBackup`), through GRDB:
+- a `DatabasePool` in WAL mode; reads run concurrently off the main thread;
+- encrypted per **spike S18**: either SQLCipher with a 32-byte random key in the
+  Keychain (`mc.cache.dbKey`), or plain SQLite with the file protection class
+  `completeUntilFirstUserAuthentication`.
 
 ```sql
 CREATE TABLE schema (version INTEGER NOT NULL);
@@ -209,274 +231,284 @@ CREATE TABLE seen (env TEXT, session_id TEXT, seen_at INTEGER NOT NULL, PRIMARY 
 CREATE TABLE catalogs (env TEXT, project_id TEXT, json TEXT NOT NULL, fetched_at INTEGER,
                        PRIMARY KEY (env, project_id));
 CREATE TABLE candidates (env TEXT, key TEXT, stats TEXT NOT NULL, PRIMARY KEY (env, key));
+CREATE TABLE drafts (env TEXT, session_id TEXT, json TEXT NOT NULL, updated_at INTEGER NOT NULL,
+                     PRIMARY KEY (env, session_id));
 ```
 
-```ts
-type HostRecord = {
-  env: string; label: string; color: string;
-  hostName: string; platform: string; fingerprint: string;
-  hostKey: string;                       // public, pinned
-  deviceId: string; role: "admin" | "member";
-  endpoints: Endpoint[];
-  relay: { url: string; room: string } | null;
-  pushEnabled: boolean;                  // host side; the gateway comes from the publisher config
-  pairedAt: number; lastOnlineAt?: number;
-  lastWelcome?: Pick<Welcome, "host" | "capabilities" | "providers" | "limits">;
-  notifications: { enabled: boolean; categories: PushRegistration["categories"];
-                   preview: "full" | "minimal"; mutedProjects: string[]; mutedSessions: string[] };
-};
+These are the prototype's tables at its schema version 2. The Swift app starts them
+as its version 1, since it is a new install.
+
+```swift
+struct HostRecord: Codable, Sendable {
+  var env: String; var label: String; var color: String
+  var hostName: String; var platform: String; var fingerprint: String
+  var hostKey: String                      // public, pinned
+  var deviceId: String; var role: Role     // .admin, .member
+  var endpoints: [Endpoint]
+  var relay: RelayInfo?                    // url, room
+  var pushEnabled: Bool                    // host side; the gateway comes from the publisher config
+  var pairedAt: Date; var lastOnlineAt: Date?
+  var lastWelcome: WelcomeSummary?         // host, capabilities, providers, limits
+  var notifications: NotificationPrefs     // enabled, categories, preview, mutedProjects, mutedSessions
+}
 ```
 
-**Secure storage keys:**
+**Keychain items** (generic passwords, service `mc`,
+`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`):
 
-| Key | Value |
-|---|---|
-| `mc.host.<env>.deviceKey` | X25519 private key |
-| `mc.host.<env>.counter` | Handshake counter, written before every attempt |
-| `mc.push.key`, `mc.push.key.prev` | Push private keys, in the shared keychain group on iOS |
-| `mc.cache.dbKey` | SQLCipher key |
-| `mc.pending.pairing` | The pending pairing record ([04 §4.7](04-pairing.md#47-phone-screens)) |
-| `mc.applock` | App lock settings |
+| Account | Value | Access group |
+|---|---|---|
+| `mc.host.<env>.deviceKey` | X25519 private key | App |
+| `mc.host.<env>.counter` | Handshake counter, written before every attempt | App |
+| `mc.push.key`, `mc.push.key.prev` | Push private keys | Shared with the extension |
+| `mc.cache.dbKey` | Cache key, if S18 keeps SQLCipher | App |
+| `mc.pending.pairing` | The pending pairing record ([04 §4.7](04-pairing.md#47-phone-screens)) | App |
+| `mc.applock` | App lock settings | App |
 
 **Budgets and eviction:**
 - `session_windows` is capped at 64 MiB in total. Windows are evicted by oldest
   `opened_at`. A window with outbox entries pending is never evicted.
 - A single window over 4 MiB is kept in memory only.
-- The image cache (`expo-image` disk cache) is capped at 200 MiB.
+- The image cache (decoded thumbnails in memory, files in `Caches/`) is capped at
+  200 MiB on disk.
 - Summaries and inbox data are small and never evicted while the host is paired.
 
-**Migrations.** A `schema.version` integer with forward-only migration functions. A
-failed migration drops the cache tables, but never `outbox` or `hosts`, and refetches.
+**Migrations.** GRDB's `DatabaseMigrator`, forward only. A failed migration drops the
+cache tables, but never `outbox`, `hosts` or `drafts`, and refetches.
 
 ## 12.7 Sync engine
 
-- **WatchManager** (`src/sync/watch.ts`) turns UI interest into one `WatchSet` per
-  host. Hooks register interest with reference counts:
-  - `useInboxWatch()` (mounted by the Agents tab, and by the app shell while the app is
-    active);
-  - `useProjectWatch(env, projectId)`;
-  - `useSessionWatch(env, sessionId)`.
+- **WatchManager** (MonoSync) turns view interest into one `WatchSet` per host. Views
+  register interest with reference counts through modifiers:
+  - `.watchInbox()` (on the Agents tab, and on the root while the app is active);
+  - `.watchProject(env, projectId)`;
+  - `.watchSession(env, sessionId)`.
 
-  A session leaves the watch 30 s after its last subscriber unmounts. At most 8
-  sessions per host are watched; beyond that, the least recently viewed is dropped.
-- **Apply pipeline** for `session.sync`:
-  1. Run `applySessionSync(window, sync)` from core. On a base mismatch, request a
+  A session leaves the watch 30 s after its last view disappears. At most 8 sessions
+  per host are watched; beyond that, the least recently viewed is dropped.
+- **Apply pipeline** for `session.sync`, off the main actor:
+  1. Run `applySessionSync(window, sync)` (MonoWire). On a base mismatch, request a
      snapshot (no revision, same anchor).
   2. Update the window meta.
-  3. Write the store, and pass the changed blocks to the row builder, which sends ops
-     to `MonoTranscriptView` once per frame (§12.9).
+  3. Pass the changed blocks to the row builder, which hands ops to the transcript on
+     the main thread once per frame (§12.9). Then publish the window to its
+     `SessionStore`.
   4. Persist, debounced: 1 s while running, immediately on settle.
-- **Agents (inbox data):** on `inbox.changed`, or a host coming online, call `inbox.list` if `(boot,
-  revision)` differs. Merge across hosts in a selector.
-- **Projects:** on `project.sessions`, refetch the first page of `sessions.page`
-  for that project. Further pages load on scroll.
+- **Agents (inbox data):** on `inbox.changed`, or a host coming online, call
+  `inbox.list` if `(boot, revision)` differs. Merge across hosts in `InboxStore`.
+- **Projects:** on `project.sessions`, refetch the first page of `sessions.page` for
+  that project. Further pages load as the list nears its end.
 - **Freshness.** A session window is `cached` until the first `session.sync` (or
-  `unchanged`) after the current watch was sent. Then it is `live`. A reconnect
-  resets it to `cached`.
+  `unchanged`) after the current watch was sent. Then it is `live`. A reconnect resets
+  it to `cached`.
 
 ## 12.8 Outbox engine
 
 Implements [06 §6.8](06-channel-protocol.md#68-idempotency-and-retries).
 
-- `enqueue(env, command, opts)` writes to SQLite, then wakes the sender. A host with a
-  new entry is connected immediately.
-- **Sender, per host:**
+- `enqueue(env, command, options)` writes to SQLite, then wakes the sender. A host
+  with a new entry is connected immediately.
+- **Sender, one task per host:**
   - Runs while the host is `online`.
   - Takes entries in `created_at` order, skipping those whose `dependsOn` isn't acked.
   - Sends through `runtime.request("commands.dispatch", command)`.
+- **Other mutating methods** (Git writes, config) go through `mutate`, keyed, and are
+  retried for 60 s when the host lists `mutations.idempotent`. Git writes run one at a
+  time.
 - **Ids for commands that follow a `create`.** They carry a local session id. When the
   create's receipt arrives, the engine rewrites their `sessionId` in SQLite before
   sending.
 - **Optimistic UI.** The transcript shows user blocks from `send`, `queue` and
   `create.initial` entries until a block with the same id arrives. Approval cards show
   "Sending…" while an `approve` entry is pending.
-- **Background flush.** When the app backgrounds, it calls `BackgroundTask.begin()`,
-  flushes, then calls `end()` ([05 §5.10](05-connectivity.md#510-app-lifecycle)).
+- **Background flush.** When the scene goes to the background, the engine flushes
+  inside `UIApplication.beginBackgroundTask`, then ends the task
+  ([05 §5.10](05-connectivity.md#510-app-lifecycle)). Entries still pending are
+  retried in a `BGAppRefreshTask` when iOS grants one.
 
 ## 12.9 Rendering
 
 ### Transcript
 
-The transcript is the native `MonoTranscriptView`
-([15 §15.4](15-performance.md#154-the-native-transcript-monotranscriptview)).
+The transcript is `MonoTranscriptView`
+([15 §15.4](15-performance.md#154-the-native-transcript-monotranscriptview)), a UIKit
+view hosted in SwiftUI by a `UIViewControllerRepresentable`.
 
-- **What JavaScript does.** It builds `RowSpec`s from the session window with the
-  shared grouping code and the markdown and code pipelines below. Changes go out as
-  ops, batched once per frame.
-- **What native code does.** It measures rows with the platform text engine off the
-  main thread, keeps exact prefix-sum offsets, recycles row views, paints, and runs
-  the transcript animations.
-- **No React rendering.** No React component renders transcript content. The
-  session screen's React tree contains the native view, the navigation bar, the
-  jump-to-latest button and the composer.
+- **The row builder** (MonoTranscript) builds `RowSpec`s from the session window with
+  MonoWire's grouping and the Markdown and code pipelines below. It runs off the main
+  thread. Changes go to the view as ops, applied once per display frame.
+- **The view** measures rows with CoreText off the main thread, keeps exact
+  prefix-sum offsets, recycles row layers, paints, and runs the transcript
+  animations.
+- **SwiftUI never renders transcript content.** The session screen's SwiftUI tree
+  holds the hosted transcript, the navigation bar, the jump-to-latest button and the
+  composer.
 - **Diff and file viewers.** The same view in document mode serves them, with rows of
   diff lines or source lines.
 
 ### Markdown
 
-- **Parse:** `unified().use(remarkParse).use(remarkGfm).use(remarkWorkspaceFileLinks)`.
-  `remarkWorkspaceFileLinks` is shared from core. The hard-break behaviour matches the
-  desktop's `hardBreaks.ts`, applied at the mdast level.
-- **Render:** a row builder maps mdast nodes to `RowSpec`s for the native transcript.
-  One top-level block is one row:
+- **Parse:** a Swift port of the prototype's block and inline parser
+  (`apps/mobile/src/transcript/markdown.ts`): GFM tables, fenced code, lists,
+  blockquotes, emphasis, links and workspace file links. Its fixtures port with it.
+  The hard-break behaviour matches the desktop's `hardBreaks.ts`.
+- **Render:** the row builder maps blocks to `RowSpec`s. One top-level block is one
+  row:
   - paragraphs, headings and list items become `markdown` rows of styled runs (bold,
     italic, inline code, links, file refs);
   - blockquotes and thematic breaks become `markdown` rows with box decorations;
   - tables become `table` rows (native horizontal scroller);
-  - code becomes `codeBlock` rows with Shiki token runs;
+  - code becomes `codeBlock` rows with highlighted runs;
   - images become placeholders, or image specs for `data:` images.
 - **Streaming.** The text is split at top-level block boundaries (blank lines outside
   fenced code). Blocks before the last boundary are parsed once and memoised by
   content hash. Only the trailing block is re-parsed on each delta, which keeps cost
   proportional to the newest paragraph.
-- **Sanitising.** Raw HTML nodes render as literal text. Links with `javascript:`,
-  `data:` or `file:` schemes are inert. External links need confirmation
-  ([11 §11.8](11-design-and-ux.md#1116-transcript-rendering-rules)).
+- **Sanitising.** Raw HTML renders as literal text. Links with `javascript:`, `data:`
+  or `file:` schemes are inert. External links need confirmation
+  ([11 §11.16](11-design-and-ux.md#1116-transcript-rendering-rules)).
 
 ### Code
 
-- **Highlighter:**
-  - Shiki core, `createJavaScriptRegexEngine`, themes `github-dark` and
-    `github-light` (the desktop's).
-  - Languages load lazily: ts, tsx, js, jsx, json, bash/sh, python, rust, go, swift,
-    kotlin, java, c, cpp, csharp, css, scss, html, xml, markdown, yaml, toml, sql,
-    diff, dockerfile, ruby, php.
-- **Output** is styled runs inside the `codeBlock` row. The row is first shown plain,
-  then updated with tokens when highlighting finishes (one `update` op). Native code
-  re-measures nothing, because monospace runs keep their widths.
-- **Limits.** Highlight the first 400 lines of a block; the rest stays plain.
-- **Scheduling.** Highlight in idle slices, or in a background worklet runtime if
-  spike S13 shows idle slices miss the JS budget. Cache by `(lang, theme, sha1(code))`.
-- **Fallback.** If S1 shows Shiki's regexes failing or too slow on Hermes, switch to
-  `highlight.js` with the same languages.
+- **Highlighter** (MonoHighlight): the engine from spike S21, with the desktop's
+  `github-dark` and `github-light` colours. Languages: ts, tsx, js, jsx, json,
+  bash/sh, python, rust, go, swift, kotlin, java, c, cpp, csharp, css, scss, html,
+  xml, markdown, yaml, toml, sql, diff, dockerfile, ruby, php.
+- **Output** is styled runs. A row is first shown plain, then updated with tokens when
+  highlighting finishes (one `update` op). Monospace runs keep their widths, so
+  nothing is re-measured.
+- **Limits.** Highlight the first 400 lines of a code block, and files up to 64 KiB or
+  1,000 lines; the rest stays plain.
+- **Scheduling.** Highlighting runs on a background task with utility priority. Results
+  are cached by `(language, theme, SHA-256 of the code)`.
 
 ### Diffs and files
 
-- The diff viewer parses unified diff text (`git.fileDiff`, `git.diff`) with the core
-  parser. It sends one row per line (gutter numbers, tint, token runs) plus hunk and
-  fold rows to `MonoTranscriptView` in document mode.
+- The diff viewer computes the unified diff on the phone from `git.fileDiff`'s two
+  sides (Myers, as the desktop's `buildUnifiedFile` and the prototype do), in hunks
+  with 3 lines of context. It sends one row per line (gutter numbers, tint, token
+  runs) plus hunk rows to `MonoTranscriptView` in document mode.
 - The file viewer sends source lines the same way. Long files fling like transcripts.
 - Word-level highlight within changed lines is a later item.
 
 ### Images
 
-- `expo-image` with a memory and disk cache.
+- ImageIO decodes and downsamples to the display size on a background queue. Memory
+  and disk caches are bounded (§12.6).
 - Attachment images come from `attachments.read`, chunked, as on the desktop
-  (`remoteAttachmentPreviews.ts`). They are written to the cache directory as files
-  and shown by URI.
+  (`remoteAttachmentPreviews.ts`). They are written to `Caches/` as files and shown
+  from there.
 
 ## 12.10 Attachment pipeline
 
 1. **Pick:**
-   - camera: `ImagePicker.launchCameraAsync`;
-   - photos: `launchImageLibraryAsync`, multiple selection, PHPicker on iOS so no
-     full-library permission;
-   - files: `DocumentPicker.getDocumentAsync`, multiple, copied to cache.
-2. **Normalise images** unless "Send original" is on: `ImageManipulator`, resize to
-   2,048 px on the long edge, JPEG 0.85, EXIF stripped (location removed).
-3. **Validate:** at most 20 attachments and 20 MiB each. Get the MIME type from the
-   picker or the extension. `kind` is `image`, `audio` or `file`.
+   - camera: `UIImagePickerController` with `.camera`;
+   - photos: `PhotosPicker`, multiple selection, so no library permission is needed;
+   - files: `UIDocumentPickerViewController`, multiple, copied to `Caches/`.
+2. **Normalise images** unless "Send original" is on: ImageIO resizes to 2,048 px on
+   the long edge and writes JPEG at quality 0.85 without metadata, so EXIF and
+   location are stripped.
+3. **Validate:** at most 20 attachments and 20 MiB each. Get the type from the picker
+   or the extension (`UTType`). `kind` is `image`, `audio` or `file`.
 4. **Upload at once**, in the background of the composer: generate a UUID `id`, read
-   512 KiB chunks with `expo-file-system`, base64-encode, and call `attachments.upload
-   {id, offset, size, data}`. Resume from the last acknowledged offset after a
-   reconnect. The host's offset check makes repeats safe.
+   512 KiB chunks with `FileHandle`, base64-encode, and call `attachments.upload {id,
+   offset, size, data}`. Resume from the last acknowledged offset after a reconnect.
+   The host's offset check makes repeats safe.
 5. **Reference** the `RemoteAttachment {id, name, mimeType, kind, size}` in `send`,
    `queue`, `draft` or `create.initial`.
 
 ## 12.11 Design system
 
-The design language is specified in [11 §11.1 to §11.9](11-design-and-ux.md#111-design-parity-rules).
-Its implementation:
+The design language is specified in
+[11 §11.1 to §11.9](11-design-and-ux.md#111-design-parity-rules). Its implementation:
 
-- **`packages/design` (`@monocode/design`).** Pure TypeScript with no React:
-  - `palette({hue, saturation, darkLightness, scheme, userAccent})` returns every
-    resolved colour token.
-  - It exports radii, spacing, type roles, durations and easing tuples.
-  - It exports the accent presets, project colours (`tabGroups.ts`), mode, status and
-    diff colours.
-  - It holds the Hugeicons alias table (from `src/shared/ui/icons.tsx`) and harness
-    metadata.
-- **Parity test.** `packages/design/parity.test.ts` parses `src/styles/index.css`
-  (`@theme`, `:root`, `html.theme-light`), `appearance.ts` and `tabGroups.ts`, and
-  asserts that every shared value matches. A desktop token change without a matching
-  package change fails CI, so the phone can't drift. The same test checks the strings
-  listed as verbatim in `apps/mobile/src/strings.ts` against the desktop sources.
-- **`packages/brand`.** Provider SVGs, the app icon, mascot sprite data (from
-  `projectMascots.ts`), the pixel terminal illustration, and the exported `cuelume`
-  cue files.
-- **Theme provider** (`apps/mobile/src/ui/theme.tsx`). It holds the appearance
-  settings and recomputes `palette()` when they change, the system scheme changes,
-  or Reduce Transparency toggles. Components read tokens through `useTokens()`, never
-  literals; a lint rule forbids colour literals in `src/` outside `packages/design`.
-- **Motion helpers** (`src/ui/motion.ts`) wrap Reanimated `withTiming` with the token
-  curves, and read the reduced-motion flag once per change.
+- **`packages/design` (`@monocode/design`) stays the source.** It is pure TypeScript:
+  `palette({hue, saturation, darkLightness, scheme, userAccent})`, radii, spacing, type
+  roles, durations and easing tuples, accent presets, project colours, mode, status
+  and diff colours, the icon alias table and harness metadata. Its parity test against
+  the desktop's `index.css`, `appearance.ts` and `tabGroups.ts` stays where it is.
+- **`gen-design-tokens.mjs`** evaluates the package and writes
+  `MonoDesign/Sources/MonoDesign/Generated/Tokens.swift`:
+  - the static tokens (radii, spacing, type roles, motion curves, presets);
+  - a Swift port of `palette()`, checked against palette outputs that the script
+    generates for a grid of inputs;
+  - the SF Symbol map for the desktop's icon aliases (M12).
+
+  CI regenerates the file and fails on a diff, so a desktop token change reaches the
+  phone or breaks the build.
+- **`Theme`** (MonoDesign, `@Observable`) holds the appearance settings and recomputes
+  the palette when they change, when the colour scheme changes, or when Reduce
+  Transparency toggles. Views read tokens through `@Environment(\.tokens)`, never
+  literals. `check.sh` fails on colour literals outside MonoDesign.
+- **Motion helpers** turn the token curves into `Animation.timingCurve` values and read
+  `accessibilityReduceMotion`.
+- **`packages/brand`** keeps the provider SVGs, the app icon, the mascot sprite data
+  and the cue sources. `build-native-assets.mjs` and `export-cues.mjs` turn them into
+  the asset catalog and audio files.
 
 ## 12.12 Device security
 
-- **App lock** (`expo-local-authentication`):
+- **App lock** (LocalAuthentication):
   - When enabled, a lock screen covers the app at cold start and after the configured
     time in the background.
-  - Biometrics fall back to the device passcode.
+  - `deviceOwnerAuthentication` uses biometrics and falls back to the passcode.
   - Notification taps still route, but behind the lock.
-- **Privacy overlay.** On `AppState` `inactive`/`background`, cover the UI with a
-  blurred brand view, so app-switcher snapshots don't show code. This is the default.
-- **Android `FLAG_SECURE`** is optional, under Settings → Security → "Block
-  screenshots". It is off by default, since screenshots are useful.
+- **Privacy overlay.** When `scenePhase` leaves `.active`, a blurred brand view covers
+  the UI, so app-switcher snapshots don't show code. This is the default.
 - **Secrets:** see [03 §3.9](03-identity-and-crypto.md#39-where-secrets-live). There
-  is no root or jailbreak detection; it adds friction without real protection.
-- **Clipboard.** Copying code is explicit. The app never reads the clipboard except
-  when the person presses Paste in the pairing flow.
+  is no jailbreak detection; it adds friction without real protection.
+- **Clipboard.** Copying code is explicit. The app never reads the pasteboard except
+  through the system `PasteButton` in the pairing flow, which needs no permission
+  prompt.
 
 ## 12.13 Demo host
 
-`src/demo/` implements a `memory` transport and a `DemoHost` that answers this subset
-of the protocol:
+MonoDemo implements the `demo` transport and a `DemoHost` actor that answers this
+subset of the protocol:
 
 - `inbox.list`, `projects.list`, `sessions.page`;
 - `sessions.sync`, `sessions.blocks`, `watch.set`;
 - `models.list`;
 - `commands.dispatch`, with simulated turns: streaming text, a tool call that asks
   for approval, a question, a plan;
-- `git.index`, `git.fileDiff`, `files.list`, `files.read`.
+- `git.index`, `git.fileDiff`, `git.action`, `files.list`, `files.read`, with
+  in-memory repositories.
 
-The responses come from fixtures in `src/demo/fixtures/*.json`. The demo bypasses
-Noise, since the memory transport is in-process, but otherwise uses the real runtime,
-stores, outbox and UI. Uses:
+The responses come from JSON fixtures that `gen-fixtures.mjs` produces from the
+prototype's `demoHost.ts` and `demoRepo.ts`. The demo skips Noise, since the transport
+is in process, but otherwise uses the real runtime, stores, outbox and screens. Uses:
 
 - App Review and first-run curiosity;
-- Maestro end-to-end tests in CI without a real host;
-- screenshot generation for store listings.
+- XCUITest flows in CI without a real host;
+- the transcript benchmark scenarios ([15 §15.6](15-performance.md#156-measurement-and-gates));
+- screenshots for store listings.
 
 ## 12.14 App configuration
 
 | Item | Value |
 |---|---|
-| Identifiers, team, EAS project, scheme, link domains, gateway | From the publisher config `apps/mobile/publisher/<track>.ts`, selected by `MONOCODE_PUBLISHER` ([13 §13.5](13-testing-and-release.md#135-publishers-and-build-tracks)). Personal track: `com.monocode.mobile.dev`, scheme `monocode-dev`, app name "MonoCode Dev". Official track: `com.monocode.mobile`, scheme `monocode`, `usemono.dev` links |
-| Minimum OS | iOS 16.0, Android 9 (API 28) |
-| Associated domains / App Links | One `applinks:<domain>` entry and one Android `autoVerify` intent filter for `https://<domain>/pair` per `linkDomains` entry. None on the personal track by default |
-| iOS Info.plist | `NSCameraUsageDescription` ("Scan pairing codes and take photos to send to agents"), `NSLocalNetworkUsageDescription` ("Connect directly to your computers on this network"), `NSFaceIDUsageDescription` ("Unlock MonoCode and confirm approvals"), `NSPhotoLibraryAddUsageDescription` (saving images), `NSAppTransportSecurity: {NSAllowsLocalNetworking: true}` plus an exception domain for `ts.net` (spike S4), `ITSAppUsesNonExemptEncryption` per [13 §13.7](13-testing-and-release.md#138-compliance) |
-| iOS entitlements | `aps-environment`, `com.apple.security.application-groups: [<appGroup>]`, `keychain-access-groups: [<keychainGroup>]` (from the publisher config), `com.apple.developer.usernotifications.time-sensitive`, `com.apple.developer.associated-domains` |
-| iOS extension | `MonoCodeNotificationService` (bundle `<nseBundleId>`), sharing the app group and keychain group |
-| Android permissions | `INTERNET`, `ACCESS_NETWORK_STATE`, `POST_NOTIFICATIONS`, `CAMERA`, `USE_BIOMETRIC`, `VIBRATE` |
-| Android network security | Config plugin `plugins/withNetworkSecurity.ts`: `cleartextTrafficPermitted="true"` in the base config, needed for `ws://` to LAN and tailnet addresses. Traffic is Noise-encrypted |
-| Config plugins | `@bacons/apple-targets`, `expo-build-properties`, `plugins/withNetworkSecurity`, `plugins/withAppGroupAndKeychain`, `expo-notifications` (icon, colour, default channel) |
-| Custom Expo modules | `modules/background-task` (iOS `beginBackgroundTask`/`endBackgroundTask`; no-op on Android) |
+| Identifiers, team, scheme, link domains, gateway | From the track's xcconfig (`Config/Personal.xcconfig`, `Config/Official.xcconfig`), selected by the build configuration ([13 §13.5](13-testing-and-release.md#135-publishers-and-build-tracks)). Personal track: `com.monocode.mobile.dev`, scheme `monocode-dev`, app name "MonoCode Dev". Official track: `com.monocode.mobile`, scheme `monocode`, `usemono.dev` links |
+| Minimum OS | iOS 26.0 |
+| Associated domains | One `applinks:<domain>` entry per link domain, for `https://<domain>/pair`. None on the personal track by default |
+| Info.plist | `NSCameraUsageDescription` ("Scan pairing codes and take photos to send to agents"), `NSLocalNetworkUsageDescription` ("Connect directly to your computers on this network"), `NSFaceIDUsageDescription` ("Unlock MonoCode and confirm approvals"), `NSAppTransportSecurity: {NSAllowsLocalNetworking: true}` plus an exception domain for `ts.net` (spike S23), `ITSAppUsesNonExemptEncryption` per [13 §13.8](13-testing-and-release.md#138-compliance), `BGTaskSchedulerPermittedIdentifiers`, `CADisableMinimumFrameDurationOnPhone = YES`, and the publisher keys (gateway URL and keys, link domains) |
+| Entitlements | `aps-environment`, `com.apple.security.application-groups: [<appGroup>]`, `keychain-access-groups: [<keychainGroup>]`, `com.apple.developer.usernotifications.time-sensitive`, `com.apple.developer.associated-domains` |
+| Extension | `NotificationService` (bundle `<bundleId>.NotificationService`), sharing the app group and keychain group |
+| Background modes | `fetch` (for `BGAppRefreshTask`) and `remote-notification` |
 
 ## 12.15 Performance budgets
 
-Budgets, rules and gates are in [15](15-performance.md), which supersedes the earlier
-table that was here.
+Budgets, rules and gates are in [15](15-performance.md).
 
 ## 12.16 Logging and diagnostics
 
-- **Logger:** `src/log` keeps a ring buffer of 2,000 entries in memory, plus a
-  rotating file (1 MiB × 3) in the cache directory.
-- **Levels:** debug (development only), info, warn, error.
-- **Redaction.** No message bodies, payloads, keys, tokens, tickets or file
-  contents. Host ids and session ids are logged as their first 6 characters.
+- **Logger:** `os.Logger` with one subsystem per package, plus an in-memory ring
+  buffer of 2,000 entries for the diagnostics export.
+- **Levels:** debug (debug builds only), info, notice, error.
+- **Redaction.** No message bodies, payloads, keys, tokens, tickets or file contents.
+  Interpolations are `.private` by default. Host ids and session ids are logged as
+  their first 6 characters.
 - **Diagnostics export** ([05 §5.12](05-connectivity.md#512-diagnostics)): the app
   version and build, OS, device model, network type, host versions and capabilities,
   connection events, and the last 200 log lines.
-- **No crash reporter in v1.** Native crash reports come from App Store Connect and
-  Google Play Console. Opt-in crash reporting can be evaluated after v1, with explicit
-  consent.
+- **No crash reporter in v1.** Crash reports come from App Store Connect and Xcode
+  Organizer. Opt-in crash reporting can be evaluated after v1, with explicit consent.

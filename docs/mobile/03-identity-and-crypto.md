@@ -54,10 +54,9 @@ not the host key.
   before the first handshake.
 - Separate keys per host mean revocation on one host, or a compromise of one host's
   device table, says nothing about the others.
-- Storage: `expo-secure-store` with `keychainAccessible:
-  AFTER_FIRST_UNLOCK_THIS_DEVICE_ONLY`. That keeps keys out of iCloud and device
-  backups and lets the app reconnect while the phone is locked. On Android it is
-  encrypted with an Android Keystore key.
+- Storage: the Keychain, as generic passwords with
+  `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`. That keeps keys out of iCloud
+  and device backups and lets the app reconnect while the phone is locked.
 - Deleting a host from the phone deletes its device key.
 - A per-host **handshake counter** (`uint53`) is stored next to the key. It
   increases before every connection attempt ([§3.4](#34-the-noise-channel)).
@@ -81,15 +80,21 @@ IK:
   forward secrecy for everything after message 2, and one round trip to a usable
   channel. The hello rides in message 1 and the welcome in message 2.
 - **Why not TLS.** A direct connection reaches a LAN IP or a tailnet address with no
-  public certificate. Pinned self-signed TLS needs native certificate pinning in
-  React Native, and it would differ from the relay path. Noise gives one
-  implementation for both paths.
+  public certificate. Pinned self-signed TLS needs certificate pinning in every
+  client, and it would differ from the relay path. Noise gives one implementation
+  for both paths.
 - **Prologue.** `"monocode/channel/1" || 0x00 || environmentId` (UTF-8). Both sides
   know the `environmentId` (from the offer or the saved host), so a phone can't
   complete a handshake with the wrong host, even one holding a copied key file.
-- **Implementation.** `@monocode/channel/noise`, on `@noble/curves` (`x25519`),
-  `@noble/ciphers` (`chacha20poly1305`) and `@noble/hashes` (`sha256`, `hmac`,
-  `hkdf`). It is validated against the published cacophony test vectors for this
+- **Implementation.** Two, one per language:
+  - the host's `@monocode/channel/noise`, on `@noble/curves` (`x25519`),
+    `@noble/ciphers` (`chacha20poly1305`) and `@noble/hashes` (`sha256`, `hmac`,
+    `hkdf`);
+  - the phone's MonoChannel, on CryptoKit (`Curve25519.KeyAgreement`, `ChaChaPoly`,
+    `SHA256`, `HMAC`, `HKDF`). Noise's 64-bit nonce becomes CryptoKit's 12-byte
+    nonce as 4 zero bytes followed by the counter, little-endian.
+
+  Both are validated against the published cacophony test vectors for this
   exact protocol name, and against the snow (Rust) vectors as a second source.
 - **Maximum Noise message** is 65,535 bytes, as the spec requires. Larger
   application messages use the record layer ([§3.5](#35-record-layer)).
@@ -231,12 +236,13 @@ envelope = "1." || base64url(keyId || eph.public || ct)
   - `sharedSecretFromKeyAgreement(with:)`
   - `hkdfDerivedSymmetricKey(using: SHA256.self, salt:, sharedInfo:, outputByteCount: 32)`
   - `ChaChaPoly.open`
-- The same code runs in `@monocode/channel/push` (noble) on the host and the Android
-  background task.
-- Cross-implementation vectors (Node noble ↔ Hermes noble ↔ CryptoKit) are part of
-  `packages/channel/vectors` **(spike S2)**.
-- The plaintext budget is 1,800 bytes. That keeps the APNs and FCM payload under
-  4 KiB after base64 and the outer fields. The host truncates the body to fit.
+- The host seals with `@monocode/channel/push` (noble). The extension opens with
+  MonoChannel's CryptoKit code, which the app also uses to seal push tickets (§3.8).
+- Cross-implementation vectors (noble seals, CryptoKit opens, and the reverse) are
+  part of `packages/channel/vectors` and the golden fixtures
+  ([16 §16.5](16-ios-native-design.md#165-keeping-the-swift-client-compatible-with-the-host)).
+- The plaintext budget is 1,800 bytes. That keeps the APNs payload under 4 KiB
+  after base64 and the outer fields. The host truncates the body to fit.
 - `keyId` lets the phone rotate its push key: it keeps the previous private key for
   7 days after registering a new one.
 
@@ -248,8 +254,8 @@ host an opaque **push ticket**:
 
 ```
 ticket = seal(gatewayPublic, JSON{
-  v: 1, provider: "expo", expoToken: "ExponentPushToken[...]",
-  deviceToken: "<raw APNs/FCM token>", platform: "ios" | "android",
+  v: 1, provider: "apns", deviceToken: "<APNs device token, hex>",
+  apnsEnv: "production" | "development", topic: "<app bundle id>",
   roomId: "<host roomId>", deviceId: "<device id on that host>",
   issuedAt: <unix ms>
 })
@@ -266,8 +272,10 @@ ticket = seal(gatewayPublic, JSON{
   there ([08 §8.6](08-notifications.md#86-push-targets-and-registration)). A
   MonoCode Dev phone and a MonoCode phone paired with the same host therefore use
   different gateways, each holding credentials for its own app.
-- Both tokens are inside the ticket. The gateway can therefore switch delivery
-  provider (Expo or direct APNs/FCM) without an app update.
+- `provider` names the delivery service. v1 has only `apns`. A later Android app
+  adds `fcm` tickets without changing the host, which stores tickets opaquely.
+- `apnsEnv` tells the gateway which APNs endpoint to use. Debug builds register
+  with the development environment.
 
 ## 3.9 Where secrets live
 
@@ -277,10 +285,10 @@ ticket = seal(gatewayPublic, JSON{
 | Host `host.db` `devices` | Admin token hashes; device public keys; push public keys; sealed tickets | 0600 data directory; no plaintext tokens |
 | Host process memory | Open pairing offers and their secrets | Never written to disk; lost on restart; at most 8 open |
 | Desktop `remote-machines.json` | Admin tokens, including the local host's | Existing: 0600, never sent to the renderer |
-| Phone secure storage | Device keys, push key, cache DB key, app-lock settings | Keychain `AfterFirstUnlockThisDeviceOnly` / Android Keystore |
+| Phone secure storage | Device keys, push key, cache DB key, app-lock settings | Keychain `AfterFirstUnlockThisDeviceOnly` |
 | Phone iOS keychain access group | Push private key only | Shared with the Notification Service Extension |
-| Phone SQLite cache | Transcripts, summaries, outbox | SQLCipher, key in secure storage; excluded from backups |
-| Gateway | Gateway private key, Expo access token | Worker secrets |
+| Phone SQLite cache | Transcripts, summaries, outbox | Encrypted per spike S18 (SQLCipher with the key in the Keychain, or Data Protection); excluded from backups |
+| Gateway | Gateway private key, APNs signing key (`.p8`) | Worker secrets |
 | Relay Durable Object storage | Room → relay public key | Public data only |
 
 **Never logged, on any component:** private keys, pairing secrets, proofs, admin
@@ -305,4 +313,4 @@ offer ids only.
 | A malicious or impostor host | Can show fake transcripts; receives what you type and attach | The phone pins hosts at pairing. Markdown renders without HTML; links open only after confirmation; remote images in markdown are not loaded automatically |
 | Downgrade to an older channel version | None | Version negotiation is inside the encrypted, authenticated handshake payloads |
 | Compression length side channel | Partial content inference under narrow conditions | §3.5 conditions; a setting to disable |
-| Lock-screen shoulder surfing | Notification text | Previews default to "when unlocked" on iOS; Android uses private visibility with a public generic version |
+| Lock-screen shoulder surfing | Notification text | Previews default to "when unlocked" |
