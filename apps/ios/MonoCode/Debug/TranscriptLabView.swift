@@ -15,6 +15,7 @@ struct TranscriptLabView: View {
       .ignoresSafeArea()
       .navigationTitle("Transcript Lab")
       .toolbarTitleDisplayMode(.inline)
+      .toolbarVisibility(.hidden, for: .tabBar)
       .safeAreaBar(edge: .bottom) {
         Text(lab.summary)
           .font(.caption2.monospaced())

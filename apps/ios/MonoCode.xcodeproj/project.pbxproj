@@ -9,6 +9,9 @@
 /* Begin PBXBuildFile section */
 		5A0000020000000000000003 /* MonoDesign in Frameworks */ = {isa = PBXBuildFile; productRef = 5A0000020000000000000002 /* MonoDesign */; };
 		5A0000020000000000000006 /* MonoTranscript in Frameworks */ = {isa = PBXBuildFile; productRef = 5A0000020000000000000005 /* MonoTranscript */; };
+		5A0000020000000000000009 /* MonoWire in Frameworks */ = {isa = PBXBuildFile; productRef = 5A0000020000000000000008 /* MonoWire */; };
+		5A000002000000000000000C /* MonoSync in Frameworks */ = {isa = PBXBuildFile; productRef = 5A000002000000000000000B /* MonoSync */; };
+		5A000002000000000000000F /* MonoDemo in Frameworks */ = {isa = PBXBuildFile; productRef = 5A000002000000000000000E /* MonoDemo */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -60,6 +63,9 @@
 			files = (
 				5A0000020000000000000003 /* MonoDesign in Frameworks */,
 				5A0000020000000000000006 /* MonoTranscript in Frameworks */,
+				5A0000020000000000000009 /* MonoWire in Frameworks */,
+				5A000002000000000000000C /* MonoSync in Frameworks */,
+				5A000002000000000000000F /* MonoDemo in Frameworks */,
 			);
 		};
 		59786ECC3074531D000C3680 /* Frameworks */ = {
@@ -118,6 +124,9 @@
 			packageProductDependencies = (
 				5A0000020000000000000002 /* MonoDesign */,
 				5A0000020000000000000005 /* MonoTranscript */,
+				5A0000020000000000000008 /* MonoWire */,
+				5A000002000000000000000B /* MonoSync */,
+				5A000002000000000000000E /* MonoDemo */,
 			);
 			productName = MonoCode;
 			productReference = 59786EBD30744DAD000C3680 /* MonoCode.app */;
@@ -175,6 +184,9 @@
 			packageReferences = (
 				5A0000020000000000000001 /* XCLocalSwiftPackageReference "Packages/MonoDesign" */,
 				5A0000020000000000000004 /* XCLocalSwiftPackageReference "Packages/MonoTranscript" */,
+				5A0000020000000000000007 /* XCLocalSwiftPackageReference "Packages/MonoWire" */,
+				5A000002000000000000000A /* XCLocalSwiftPackageReference "Packages/MonoSync" */,
+				5A000002000000000000000D /* XCLocalSwiftPackageReference "Packages/MonoDemo" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 59786EBE30744DAD000C3680 /* Products */;
@@ -457,6 +469,18 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = Packages/MonoTranscript;
 		};
+		5A0000020000000000000007 /* XCLocalSwiftPackageReference "Packages/MonoWire" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/MonoWire;
+		};
+		5A000002000000000000000A /* XCLocalSwiftPackageReference "Packages/MonoSync" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/MonoSync;
+		};
+		5A000002000000000000000D /* XCLocalSwiftPackageReference "Packages/MonoDemo" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/MonoDemo;
+		};
 /* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -467,6 +491,18 @@
 		5A0000020000000000000005 /* MonoTranscript */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = MonoTranscript;
+		};
+		5A0000020000000000000008 /* MonoWire */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MonoWire;
+		};
+		5A000002000000000000000B /* MonoSync */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MonoSync;
+		};
+		5A000002000000000000000E /* MonoDemo */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MonoDemo;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

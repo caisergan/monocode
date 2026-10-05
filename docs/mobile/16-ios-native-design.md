@@ -612,6 +612,9 @@ has the detail.
 | R1-2 | Wire enumerations (`BlockRole`, `SessionStatus`, `RuntimeMode`, attention kinds, preview kinds) are open string types (`Open<Tag>`) rather than Swift enums with an `unknown` case. An unknown value decodes, compares unequal to every known case, reports `isKnown == false` and re-encodes unchanged | Same tolerance as §16.5 asks for, and values a newer host sends round-trip instead of collapsing to one `unknown` |
 | R1-3 | `HostRuntime` implements connect, `request`, the event stream, the debounced watch, reconnects with backoff and the 15 s offline wait. `verify`, ping and pong, presence, `scenePhaseChanged` and `pathChanged` are not built. In R1 frames are plain JSON envelopes: the phone sends a hello, the host answers with its welcome | They belong to the channel (MonoChannel, R2). The demo transport skips Noise anyway (§16.5) |
 | R1-4 | The seen and project-pin stores live in memory, and there is no host registry: every launch starts at Welcome | Persistence is MonoStore's (R2) |
+| R1-5 | Welcome shows "Pair with a computer" disabled. "New session" (the accessory, the bars' `plus`) pushes a placeholder page with the empty-session heading | Pairing is R2 and the composer R3; the entry points stay where the design puts them |
+| R1-6 | The theme has no Appearance page: it is Dark, the default, unless the `-MCTheme light\|dark\|system` launch argument says otherwise. Type sizes are fixed at the 11 §11.3 scale, without Dynamic Type | Appearance settings and the Dynamic Type pass belong to R7 |
+| R1-7 | The bottom accessory is hidden until a machine exists, with `tabViewBottomAccessory(isEnabled:)`, which needs iOS 26.1; on 26.0 it shows on Welcome too | Nothing to start or count before a machine is paired |
 
 ## 16.8 Spikes
 

@@ -1,80 +1,125 @@
 import MonoDesign
+import MonoSync
+import MonoWire
 import SwiftUI
 
-/// The app's root. R0 has no tabs yet; the TabView arrives with R2 (16 §16.6.1).
+/// The app's root (16 §16.6.1): three tabs, each with its own stack, and the
+/// bottom accessory.
 struct RootView: View {
-  @State private var path: [DebugRoute] = []
+  @Environment(AppModel.self) private var model
+  @Environment(SyncEngine.self) private var engine
+  @Environment(Router.self) private var router
 
   var body: some View {
-    NavigationStack(path: $path) {
-      List {
-        #if DEBUG
-        Section("Debug") {
-          NavigationLink("Transcript Lab", value: DebugRoute.transcriptLab(nil))
-          NavigationLink("Scroll edge control", value: DebugRoute.scrollEdgeControl)
-        }
-        #endif
+    @Bindable var router = router
+    TabView(selection: $router.tab) {
+      Tab("Agents", systemImage: "bubble.left.and.text.bubble.right", value: AppTab.agents) {
+        TabStack(path: $router.agents) { AgentsView() }
       }
-      .navigationTitle("MonoCode")
-      #if DEBUG
-      .navigationDestination(for: DebugRoute.self) { route in
-        route.destination
+      .badge(engine.inbox.needsInput)
+      Tab("Projects", systemImage: "folder", value: AppTab.projects) {
+        TabStack(path: $router.projects) { ProjectsView() }
       }
-      #endif
+      Tab("Settings", systemImage: "gearshape", value: AppTab.settings) {
+        TabStack(path: $router.settings) { SettingsView() }
+      }
     }
-    .tint(Tokens.dark.accent.color)
-    .preferredColorScheme(.dark)
-    .onOpenURL { url in
-      if let route = DebugRoute(url: url) { path = [route] }
-    }
+    .tabBarMinimizeBehavior(.onScrollDown)
+    .modifier(BottomAccessory(enabled: model.hasMachines))
+    .modifier(MonoTheme())
+    .onOpenURL { router.open($0) }
     #if DEBUG
     .task {
       // `simctl launch <device> com.monocode.mobile.dev -MCOpen <url>` opens a
       // debug link without the system's open-URL prompt.
-      if let route = UserDefaults.standard.string(forKey: "MCOpen").flatMap(URL.init(string:)).flatMap(DebugRoute.init(url:)) {
-        path = [route]
-      }
+      if let url = UserDefaults.standard.string(forKey: "MCOpen").flatMap(URL.init(string:)) { router.open(url) }
     }
     #endif
   }
 }
 
-/// Debug screens. `<scheme>://lab?run=huge-stream` opens the Lab and runs a
-/// scenario unattended, as the Expo app's `lab` route did.
-/// `<scheme>://scroll-edge` opens the scroll-edge control.
-enum DebugRoute: Hashable {
-  #if DEBUG
-  case transcriptLab(LabRun?)
-  case scrollEdgeControl
-  #endif
+/// One tab's `NavigationStack` and its typed destinations (16 §16.6.2).
+struct TabStack<Root: View>: View {
+  @Binding var path: [Destination]
+  @ViewBuilder var root: Root
 
-  init?(url: URL) {
-    #if DEBUG
-    switch url.host() {
-    case "lab":
-      let run = URLComponents(url: url, resolvingAgainstBaseURL: false)?
-        .queryItems?.first { $0.name == "run" }?.value
-      self = .transcriptLab(run.flatMap(LabRun.init(rawValue:)))
-    case "scroll-edge":
-      self = .scrollEdgeControl
-    default:
-      return nil
+  var body: some View {
+    NavigationStack(path: $path) {
+      root.navigationDestination(for: Destination.self) { $0.view }
     }
-    #else
-    return nil
-    #endif
   }
+}
 
-  @ViewBuilder var destination: some View {
-    #if DEBUG
+extension Destination {
+  @ViewBuilder var view: some View {
     switch self {
+    case let .project(env, projectId): ProjectView(env: env, projectId: projectId)
+    case let .session(env, sessionId): SessionView(env: env, sessionId: sessionId)
+    case let .newSession(env, projectId): NewSessionView(env: env, projectId: projectId)
+    #if DEBUG
     case let .transcriptLab(run): TranscriptLabView(run: run)
     case .scrollEdgeControl: ScrollEdgeControlView()
-    }
+    case .cardFling: CardFlingView()
     #endif
+    }
   }
 }
 
-#Preview {
-  RootView()
+/// The accessory only once a machine exists; iOS 26.0 cannot hide it.
+private struct BottomAccessory: ViewModifier {
+  var enabled: Bool
+
+  func body(content: Content) -> some View {
+    if #available(iOS 26.1, *) {
+      content.tabViewBottomAccessory(isEnabled: enabled) { NewSessionAccessory() }
+    } else {
+      content.tabViewBottomAccessory { NewSessionAccessory() }
+    }
+  }
+}
+
+/// "＋ New session" and "N working" in one control (16 §16.6.1): the desktop's
+/// New session button and its Working card. Minimised, only the count.
+struct NewSessionAccessory: View {
+  @Environment(\.tabViewBottomAccessoryPlacement) private var placement
+  @Environment(\.palette) private var palette
+  @Environment(SyncEngine.self) private var engine
+  @Environment(Router.self) private var router
+
+  var body: some View {
+    let working = engine.inbox.working
+    HStack(spacing: 10) {
+      if placement != .inline {
+        Button {
+          router.push(.newSession(env: nil, projectId: nil))
+        } label: {
+          Label("New session", systemImage: "plus")
+            .font(.system(size: 15, weight: .medium))
+            .foregroundStyle(palette.content.color)
+        }
+        .buttonStyle(.plain)
+        Spacer(minLength: 8)
+      }
+      Button {
+        router.open(.agents, [])
+      } label: {
+        HStack(spacing: 6) {
+          if working > 0 {
+            BrailleSpinner(color: palette.accent.color, size: 13)
+            Text("\(working) working")
+              .font(.system(size: 13))
+              .monospacedDigit()
+              .foregroundStyle(palette.content.color)
+          } else {
+            Text("Nothing running")
+              .font(.system(size: 13))
+              .foregroundStyle(palette.content.color.opacity(0.45))
+          }
+        }
+      }
+      .buttonStyle(.plain)
+      .accessibilityLabel(working > 0 ? "\(working) working. Show agents" : "Nothing running")
+    }
+    .padding(.horizontal, 16)
+  }
 }
