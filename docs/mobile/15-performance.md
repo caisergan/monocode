@@ -217,8 +217,10 @@ rest land with the screens that need them.
   Icon Theme set, resolved by the same name and extension rules as the desktop's
   `FileTypeIcon`.
 - **Hosting.** The session screen hosts the view through a
-  `UIViewControllerRepresentable`, so its scroll view is the screen's content scroll
-  view: it scrolls under the glass bar and gets the scroll-edge effect.
+  `UIViewControllerRepresentable`. Its scroll view should be picked up as the screen's
+  content scroll view, so it scrolls under the glass bar and gets the scroll-edge
+  effect. R0 checks this ([16 §16.7](16-ios-native-design.md#167-milestones)); the
+  fallback is a UIKit session controller.
 
 ### Testing the transcript
 

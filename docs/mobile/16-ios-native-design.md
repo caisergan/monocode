@@ -376,8 +376,10 @@ TabView(selection: $router.tab) {
 
   Items the host can't perform are hidden.
 - **Transcript.** `MonoTranscriptView` is wrapped in a `UIViewControllerRepresentable`.
-  Its scroll view is the screen's content scroll view, so it scrolls under the glass
-  navigation bar and gets the system's scroll-edge effect.
+  The intent is that UIKit picks its scroll view up as the screen's content scroll
+  view, so it scrolls under the glass navigation bar and gets the system's scroll-edge
+  effect. That is unverified and is checked in R0 (§16.7). If it fails, the session
+  screen becomes a UIKit controller, as in S20's fallback.
 - **Composer.** It sits in `.safeAreaBar(edge: .bottom)`, so the transcript scrolls
   under it. The box is
   `.glassEffect(.regular, in: .rect(cornerRadius: tokens.radius.md))`, with
@@ -552,7 +554,7 @@ is known.
 
 | Milestone | Scope | Exit criteria | Size |
 |---|---|---|---|
-| **R0 Skeleton and transcript** | The Xcode project with xcconfig tracks and package scaffolds. The token generator. MonoTranscript ported out of the Expo module. Debug → Transcript Lab with the fixtures. The fling benchmark writing `Documents/benchmarks/latest.json`. `scripts/check.sh` running `swift test` and `xcodebuild test` | Builds and runs on the iPhone 17 simulator (iOS 27) and the iPhone 13 (iOS 26). S11 is measured on the iPhone 13 (0 hitches flinging 1,000 turns while streaming; tail re-layout ≤ 1 ms), which answers the go/no-go the Expo app left open | M |
+| **R0 Skeleton and transcript** | The Xcode project with xcconfig tracks and package scaffolds. The token generator. MonoTranscript ported out of the Expo module. Debug → Transcript Lab with the fixtures. The fling benchmark writing `Documents/benchmarks/latest.json`. `scripts/check.sh` running `swift test` and `xcodebuild test` | Builds and runs on the iPhone 17 simulator (iOS 27) and the iPhone 13 (iOS 26). In the Lab, the hosted transcript scrolls under the glass navigation bar with the scroll-edge effect (§16.6.4). S11 is measured on the iPhone 13 (0 hitches flinging 1,000 turns while streaming; tail re-layout ≤ 1 ms), which answers the go/no-go the Expo app left open | M |
 | **R1 Channel and pairing** | MonoChannel with vectors and golden fixtures. Direct transport and race. `HostRuntime`. Keychain. Pairing screens and the scanner. The hosts table. Settings → Machines. MonoDemo, enough to show Agents | Pairs with a CLI-started host on the LAN, lists its projects and survives a host restart. Revoke closes the channel. The interop test passes | L |
 | **R2 Read path** | Agents, Projects, the Project screen and the session screen with the transcript fed by the row builder. The cache (S18), watch, windowed sync, older pages, tool and attachment sheets. The demo host's read path | Feature parity with the Expo app's M2. The list and navigation budgets in 15 §15.5 pass. The ported sync and paging tests pass | L |
 | **R3 Write path** | The outbox, the composer, pickers, queue card and usage tab, approvals, the banner, the question form, New session with a worktree, drafts, the keyboard (S20) | Parity with the Expo app's M3. No lost or duplicated commands in fault runs. The keyboard budget passes | L |
