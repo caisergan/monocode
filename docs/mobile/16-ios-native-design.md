@@ -579,6 +579,7 @@ has the detail.
 | # | Deviation from this plan | Reason |
 |---|---|---|
 | R0-1 | MonoDesign carries the palette resolved at the default tint, for dark and light, not a Swift port of `palette()` for any hue, saturation and lightness. It has no spacing tokens | The custom tint is an Appearance setting that has no screen until R7; `@monocode/design` has no spacing tokens to generate |
+| R0-2 | `MonoTranscriptView` still takes ops and the theme as JSON strings in the Expo app's `spec.ts` shape (`apply(_:)`, `setTheme(_:)`), parsed with `JSONSerialization` on the layout queue. `RowSpec` is not yet the Swift type of [15 §15.4](15-performance.md#154-the-native-transcript-monotranscriptview), and ops are serialised (§16.4 says they are not) | The fixtures and the Lab feed it JSON until the Swift row builder exists (R2). The prototype's measurements also showed `JSONSerialization` faster than Codable for a 1,000-turn reset |
 
 ## 16.8 Spikes
 
