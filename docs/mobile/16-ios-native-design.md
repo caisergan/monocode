@@ -151,7 +151,7 @@ apps/ios/
                                   #   row builder, Markdown, document mode for the viewers
     MonoHighlight/                # Code highlighting (S21)
     MonoDemo/                     # The demo host
-  UITests/
+  MonoCodeUITests/                # UI tests (the MonoCodeUITests target)
   scripts/
     gen-design-tokens.mjs         # @monocode/design → MonoDesign/Sources/MonoDesign/Generated/Tokens.swift
     gen-fixtures.mjs              # TypeScript implementations → golden JSON fixtures (§16.5)
