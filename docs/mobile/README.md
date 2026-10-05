@@ -36,6 +36,7 @@ built and run under the maintainer's own Apple and Expo accounts for local workf
 | 15 | [Performance and smoothness](15-performance.md) | The hybrid architecture, the native transcript, native chrome, per-surface rules, budgets and benchmark gates (read after 12) |
 | 13 | [Testing and release](13-testing-and-release.md) | Test strategy, QA matrix, CI, EAS, store submission, compatibility, compliance |
 | 14 | [Roadmap](14-roadmap.md) | Milestones, spikes, exit criteria, estimates, risks, open questions |
+| 16 | [iOS native design plan](16-ios-native-design.md) | How the built app adopts native iOS chrome (large titles, search bars, form sheets, context menus, glass, keyboard) around MonoCode content; audit, decisions M12 to M16, slices N1 to N7 (read after 11, 12 and 15) |
 
 ## Summary
 
