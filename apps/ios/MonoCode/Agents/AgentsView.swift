@@ -56,7 +56,7 @@ struct AgentsView: View {
     }
     .screenBackground()
     .navigationTitle("Agents")
-    .toolbarTitleDisplayMode(.large)
+    .toolbarTitleDisplayMode(.inlineLarge)
     .toolbar {
       if model.hasMachines {
         ToolbarItem(placement: .topBarTrailing) {

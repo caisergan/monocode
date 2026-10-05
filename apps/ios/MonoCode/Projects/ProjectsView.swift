@@ -42,7 +42,7 @@ struct ProjectsView: View {
     }
     .screenBackground()
     .navigationTitle("Projects")
-    .toolbarTitleDisplayMode(.large)
+    .toolbarTitleDisplayMode(.inlineLarge)
     .modifier(ProjectSearch(enabled: model.hasMachines, query: $query))
     .task(id: engine.hosts.records.count) { engine.loadProjects() }
   }

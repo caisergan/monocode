@@ -79,7 +79,7 @@ part of this work.
 | `TabView` with `Tab(_:systemImage:value:)`, `.badge` | 18 | The tab bar |
 | `.tabBarMinimizeBehavior(.onScrollDown)` (`TabBarMinimizeBehavior`: `automatic`, `onScrollDown`, `onScrollUp`, `never`) | 26 | The tab bar minimises while a list scrolls down |
 | `.tabViewBottomAccessory { }`, `@Environment(\.tabViewBottomAccessoryPlacement)` (`expanded`, `inline`) | 26 | "＋ New session · N working" |
-| `NavigationStack(path:)`, `.navigationTitle`, `.toolbarTitleDisplayMode(.large)` | 16, 17 | A stack per tab, large titles |
+| `NavigationStack(path:)`, `.navigationTitle`, `.toolbarTitleDisplayMode(.inlineLarge)` and `(.large)` | 16, 17 | A stack per tab, large titles |
 | `.navigationSubtitle(_:)` | 26 | "model · machine" under a session's title |
 | `.searchable(text:placement:prompt:)`, `.searchToolbarBehavior(.minimize)` | 15, 26 | Search in the bar |
 | `.toolbar` with `ToolbarItem(placement: .bottomBar)`, `ToolbarSpacer`, `.toolbarVisibility(_:for:)` | 14, 26, 18 | Viewer toolbars, hiding the tab bar on the session screen |
@@ -312,7 +312,9 @@ TabView(selection: $router.tab) {
   exception is the session screen, which hides it with
   `.toolbarVisibility(.hidden, for: .tabBar)` because the composer needs the bottom
   edge (M16).
-- **Titles.** Agents, Projects and Settings use `.toolbarTitleDisplayMode(.large)`.
+- **Titles.** Agents and Projects use `.toolbarTitleDisplayMode(.inlineLarge)`, so the
+  title sits on the bar's row, aligned with `plus` and the search button (owner,
+  2026-10-06). Settings uses `.toolbarTitleDisplayMode(.large)`.
   Pushed screens use inline titles.
 - **Modals.** Pairing is a `.sheet` at the large detent with its own stack. Everything
   else in §16.6.5 is a sheet with detents.
@@ -552,7 +554,7 @@ inside it for the title and an `xmark` close button. Each picker edits the compo
 | # | Deviation | Reason |
 |---|---|---|
 | M12 | SF Symbols for all chrome and content glyphs, instead of Hugeicons. Harness and brand marks and mascots stay MonoCode's | Tab items, toolbars and menus take SF Symbol names. Mixing two icon families would look wrong |
-| M13 | Native large titles on Agents, Projects and Settings, in the system's title font, instead of a 28/600 title | Large titles collapse on scroll and host the search field |
+| M13 | Native large titles on Agents, Projects and Settings, in the system's title font, instead of a 28/600 title. Agents and Projects use the inline large title, on the same row as the bar's buttons (owner, 2026-10-06) | Native titles collapse on scroll. The inline form lines the title up with `plus` and search instead of leaving a row under them |
 | M14 | Pickers are native sheets with detents. The rows inside stay MonoCode's | Detents, drag to dismiss and Liquid Glass come from the system |
 | M15 | A long press on a session card opens a context menu with a preview. Project and Changes rows get context menus without one. Action sheets remain only for confirmations | UIContextMenu is the iOS idiom for actions on a row |
 | M16 | Pushed screens keep the tab bar, except the session screen | The iOS default. The session screen needs the bottom edge for the composer |
