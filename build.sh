@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds MonoCode.app for this Mac.
+# Builds MonoCode.app and a MonoCode .dmg installer for this Mac.
 #
 #   ./build.sh                 build for this Mac's architecture
 #   ./build.sh --arch x86_64   build for Intel (arm64 | x86_64 | universal)
@@ -68,18 +68,29 @@ if [ ! -f node_modules/.package-lock.json ] ||
   npm ci
 fi
 
-echo "==> Building MonoCode.app ($target)"
+bundle_dir="target/$target/release/bundle"
+# Clear old disk images so the one reported below is from this build.
+rm -rf "$bundle_dir/dmg"
+
+echo "==> Building MonoCode.app and .dmg ($target)"
 # `beforeBuildCommand` runs `npm run build` (tsc + vite) first.
 npx tauri build \
   --target "$target" \
-  --bundles app \
+  --bundles app,dmg \
   --config '{"bundle":{"createUpdaterArtifacts":false}}'
 
-app="target/$target/release/bundle/macos/MonoCode.app"
+app="$bundle_dir/macos/MonoCode.app"
 if [ ! -d "$app" ]; then
   echo "Build finished but $app was not found." >&2
   exit 1
 fi
+
+dmgs=("$bundle_dir"/dmg/*.dmg)
+if [ ! -f "${dmgs[0]}" ]; then
+  echo "Build finished but no .dmg was found in $bundle_dir/dmg." >&2
+  exit 1
+fi
+dmg="$(cd "$(dirname "${dmgs[0]}")" && pwd)/$(basename "${dmgs[0]}")"
 
 if $install; then
   echo "==> Installing to /Applications"
@@ -90,3 +101,4 @@ fi
 
 echo
 echo "Built $(cd "$(dirname "$app")" && pwd)/$(basename "$app")"
+echo "Built $dmg"
