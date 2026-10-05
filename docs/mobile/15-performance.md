@@ -217,10 +217,12 @@ rest land with the screens that need them.
   Icon Theme set, resolved by the same name and extension rules as the desktop's
   `FileTypeIcon`.
 - **Hosting.** The session screen hosts the view through a
-  `UIViewControllerRepresentable`. Its scroll view should be picked up as the screen's
-  content scroll view, so it scrolls under the glass bar and gets the scroll-edge
-  effect. R0 checks this ([16 §16.7](16-ios-native-design.md#167-milestones)); the
-  fallback is a UIKit session controller.
+  `UIViewControllerRepresentable`, which runs edge to edge and passes the controller's
+  safe-area insets to the transcript. It scrolls under the glass bars and gets the
+  scroll-edge effect: checked in R0 on the simulator
+  ([16 §16.6.4](16-ios-native-design.md#1664-session-screen)). A `.safeAreaBar`'s
+  height is not in the controller's safe area and is passed explicitly. The fallback,
+  a UIKit session controller, stays named for the device run.
 
 ### Testing the transcript
 

@@ -1,6 +1,7 @@
 # 16. Native iOS app (Swift)
 
-Status: **plan**, rev 2, 2026-10-05, on branch `feat/ios-native-design` (worktree
+Status: **plan**, rev 2, 2026-10-05; **R0 in progress** (simulator steps done
+2026-10-06, see §16.7 "R0 deviations"), on branch `feat/ios-native-design` (worktree
 `.worktrees/ios-native-design`), created from `feat/mobile-app` at `b286412`. Rev 1
 (commit `8fc0ca6`) kept React Native and moved the app onto native iOS chrome. On
 2026-10-05 the owner decided to rewrite the phone app as a native iOS app in Swift
@@ -375,11 +376,22 @@ TabView(selection: $router.tab) {
   10. Delete, with the destructive role
 
   Items the host can't perform are hidden.
-- **Transcript.** `MonoTranscriptView` is wrapped in a `UIViewControllerRepresentable`.
-  The intent is that UIKit picks its scroll view up as the screen's content scroll
-  view, so it scrolls under the glass navigation bar and gets the system's scroll-edge
-  effect. That is unverified and is checked in R0 (§16.7). If it fails, the session
-  screen becomes a UIKit controller, as in S20's fallback.
+- **Transcript.** `MonoTranscriptView` is wrapped in a `UIViewControllerRepresentable`,
+  so it scrolls under the glass navigation bar and gets the system's scroll-edge
+  effect. **Checked in R0 on the iPhone 17 simulator (iOS 27), 2026-10-06: it does.**
+  - The representable ignores the safe area and runs edge to edge. The hosting
+    controller passes its `safeAreaInsets` to the transcript as top and bottom
+    insets, so rows clear the bars at rest and pass under them while scrolling.
+  - Rows under the navigation bar get the same soft edge blur as a plain SwiftUI
+    `List` in the same stack, and rows under the bottom toolbar look the same as the
+    `List`'s too (`screenshots/r0`, 03 to 07).
+  - `setContentScrollView(_:for:)` is not what makes it work: with the call skipped,
+    the effect is the same. The controller still registers the scroll view.
+  - **SwiftUI bars don't reach UIKit's safe area.** The controller's `safeAreaInsets`
+    include the navigation bar and the toolbar, but not a `.safeAreaBar`. The
+    composer's height therefore has to be passed to the transcript explicitly, as the
+    Lab does for its status card. S20 starts from this.
+  - Not yet checked: the iPhone 13 on iOS 26 (R0's device run).
 - **Composer.** It sits in `.safeAreaBar(edge: .bottom)`, so the transcript scrolls
   under it. The box is
   `.glassEffect(.regular, in: .rect(cornerRadius: tokens.radius.md))`, with
@@ -581,6 +593,8 @@ has the detail.
 | R0-1 | MonoDesign carries the palette resolved at the default tint, for dark and light, not a Swift port of `palette()` for any hue, saturation and lightness. It has no spacing tokens | The custom tint is an Appearance setting that has no screen until R7; `@monocode/design` has no spacing tokens to generate |
 | R0-2 | `MonoTranscriptView` still takes ops and the theme as JSON strings in the Expo app's `spec.ts` shape (`apply(_:)`, `setTheme(_:)`), parsed with `JSONSerialization` on the layout queue. `RowSpec` is not yet the Swift type of [15 §15.4](15-performance.md#154-the-native-transcript-monotranscriptview), and ops are serialised (§16.4 says they are not) | The fixtures and the Lab feed it JSON until the Swift row builder exists (R2). The prototype's measurements also showed `JSONSerialization` faster than Codable for a 1,000-turn reset |
 | R0-3 | The transcript fixtures live in MonoTranscript's own resources (`Sources/MonoTranscript/Resources/Fixtures`), not test resources, so they ship in every build that links the package (about 6 MB). The recorded stream is 30 s long and bound to the 1,000-turn base: it inserts after that fixture's last turn | The Lab loads them at run time. They move to a debug-only bundle before the first TestFlight build. 30 s covers the Lab's benchmark run (stream from 2 s, fling from 3.5 s to 13.5 s) at a third of the size of a full replay |
+| R0-4 | The Lab cannot open folds or answer approvals, and its stream replays only on the 1,000-turn fixture. Scenarios run unattended through `<scheme>://lab?run=big\|huge\|huge-stream`, or the `-MCOpen <url>` launch argument, which skips the system's "open in" prompt | Without the Swift row builder (R2) there is nothing to rebuild rows from; the recording is bound to its base (R0-3). The launch argument lets `simctl` and UI tests drive the Lab |
+| R0-5 | The R0 benchmark numbers come from the iPhone 17 simulator. Its display link runs at 60 Hz, and the Mac's CPU does the layout. They are not S11, which still needs the iPhone 13 on iOS 26 | The owner runs the device; the coding agent may only use the simulator (decision 4) |
 
 ## 16.8 Spikes
 

@@ -6,7 +6,23 @@
 	objectVersion = 110;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		5A0000020000000000000003 /* MonoDesign in Frameworks */ = {isa = PBXBuildFile; productRef = 5A0000020000000000000002 /* MonoDesign */; };
+		5A0000020000000000000006 /* MonoTranscript in Frameworks */ = {isa = PBXBuildFile; productRef = 5A0000020000000000000005 /* MonoTranscript */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		5A0000030000000000000001 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 59786EB530744DAD000C3680 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 59786EBC30744DAD000C3680;
+			remoteInfo = MonoCode;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
+		59786ECF3074531D000C3680 /* MonoCodeUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = MonoCodeUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		5A0000010000000000000001 /* Shared.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Shared.xcconfig; sourceTree = "<group>"; };
 		5A0000010000000000000002 /* Personal.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Personal.xcconfig; sourceTree = "<group>"; };
 		59786EBD30744DAD000C3680 /* MonoCode.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MonoCode.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -31,10 +47,22 @@
 			path = MonoCode;
 			sourceTree = "<group>";
 		};
+		59786ED03074531D000C3680 /* MonoCodeUITests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = MonoCodeUITests;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		59786EBA30744DAD000C3680 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			files = (
+				5A0000020000000000000003 /* MonoDesign in Frameworks */,
+				5A0000020000000000000006 /* MonoTranscript in Frameworks */,
+			);
+		};
+		59786ECC3074531D000C3680 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			files = (
 			);
@@ -47,6 +75,7 @@
 			children = (
 				5A0000010000000000000003 /* Config */,
 				59786EBF30744DAD000C3680 /* MonoCode */,
+				59786ED03074531D000C3680 /* MonoCodeUITests */,
 				59786EBE30744DAD000C3680 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -55,6 +84,7 @@
 			isa = PBXGroup;
 			children = (
 				59786EBD30744DAD000C3680 /* MonoCode.app */,
+				59786ECF3074531D000C3680 /* MonoCodeUITests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -85,9 +115,34 @@
 				59786EBF30744DAD000C3680 /* MonoCode */,
 			);
 			name = MonoCode;
+			packageProductDependencies = (
+				5A0000020000000000000002 /* MonoDesign */,
+				5A0000020000000000000005 /* MonoTranscript */,
+			);
 			productName = MonoCode;
 			productReference = 59786EBD30744DAD000C3680 /* MonoCode.app */;
 			productType = "com.apple.product-type.application";
+		};
+		59786ECE3074531D000C3680 /* MonoCodeUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 59786ED33074531D000C3680 /* Build configuration list for PBXNativeTarget "MonoCodeUITests" */;
+			buildPhases = (
+				59786ECB3074531D000C3680 /* Sources */,
+				59786ECC3074531D000C3680 /* Frameworks */,
+				59786ECD3074531D000C3680 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				5A0000030000000000000002 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				59786ED03074531D000C3680 /* MonoCodeUITests */,
+			);
+			name = MonoCodeUITests;
+			productName = MonoCodeUITests;
+			productReference = 59786ECF3074531D000C3680 /* MonoCodeUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
 		};
 /* End PBXNativeTarget section */
 
@@ -102,6 +157,10 @@
 					59786EBC30744DAD000C3680 = {
 						CreatedOnToolsVersion = 27.0;
 					};
+					59786ECE3074531D000C3680 = {
+						CreatedOnToolsVersion = 27.0;
+						TestTargetID = 59786EBC30744DAD000C3680;
+					};
 				};
 			};
 			buildConfigurationList = 59786EB830744DAD000C3680 /* Build configuration list for PBXProject "MonoCode" */;
@@ -113,18 +172,28 @@
 			);
 			mainGroup = 59786EB430744DAD000C3680;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				5A0000020000000000000001 /* XCLocalSwiftPackageReference "Packages/MonoDesign" */,
+				5A0000020000000000000004 /* XCLocalSwiftPackageReference "Packages/MonoTranscript" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 59786EBE30744DAD000C3680 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
 				59786EBC30744DAD000C3680 /* MonoCode */,
+				59786ECE3074531D000C3680 /* MonoCodeUITests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		59786EBB30744DAD000C3680 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			files = (
+			);
+		};
+		59786ECD3074531D000C3680 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			files = (
 			);
@@ -137,7 +206,20 @@
 			files = (
 			);
 		};
+		59786ECB3074531D000C3680 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			files = (
+			);
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		5A0000030000000000000002 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 59786EBC30744DAD000C3680 /* MonoCode */;
+			targetProxy = 5A0000030000000000000001 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		59786EC630744DB0000C3680 /* Debug configuration for PBXProject "MonoCode" */ = {
@@ -309,6 +391,34 @@
 			};
 			name = Release;
 		};
+		59786ED43074531D000C3680 /* Debug configuration for PBXNativeTarget "MonoCodeUITests" */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 5A0000010000000000000002 /* Personal.xcconfig */;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(MC_BUNDLE_ID).UITests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				TEST_TARGET_NAME = MonoCode;
+			};
+			name = Debug;
+		};
+		59786ED53074531D000C3680 /* Release configuration for PBXNativeTarget "MonoCodeUITests" */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 5A0000010000000000000002 /* Personal.xcconfig */;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "";
+				PRODUCT_BUNDLE_IDENTIFIER = "$(MC_BUNDLE_ID).UITests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				TEST_TARGET_NAME = MonoCode;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -328,7 +438,37 @@
 			);
 			defaultConfigurationName = Release;
 		};
+		59786ED33074531D000C3680 /* Build configuration list for PBXNativeTarget "MonoCodeUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				59786ED43074531D000C3680 /* Debug configuration for PBXNativeTarget "MonoCodeUITests" */,
+				59786ED53074531D000C3680 /* Release configuration for PBXNativeTarget "MonoCodeUITests" */,
+			);
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		5A0000020000000000000001 /* XCLocalSwiftPackageReference "Packages/MonoDesign" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/MonoDesign;
+		};
+		5A0000020000000000000004 /* XCLocalSwiftPackageReference "Packages/MonoTranscript" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Packages/MonoTranscript;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		5A0000020000000000000002 /* MonoDesign */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MonoDesign;
+		};
+		5A0000020000000000000005 /* MonoTranscript */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = MonoTranscript;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 59786EB530744DAD000C3680 /* Project object */;
 	validationLevel = 1;

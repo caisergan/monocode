@@ -5,6 +5,7 @@
 
 MC_TRACK = personal
 MC_APP_NAME = MonoCode Dev
-PRODUCT_BUNDLE_IDENTIFIER = com.monocode.mobile.dev
+MC_BUNDLE_ID = com.monocode.mobile.dev
+PRODUCT_BUNDLE_IDENTIFIER = $(MC_BUNDLE_ID)
 DEVELOPMENT_TEAM = 8854B8S8X2
 MC_URL_SCHEME = monocode-dev
