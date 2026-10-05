@@ -7,6 +7,7 @@ import Testing
 @MainActor
 final class EngineHarness {
   let engine = TranscriptEngine()
+  private var latest: Snapshot?
   private var waiting: [(Int, CheckedContinuation<Snapshot, Never>)] = []
 
   init(width: CGFloat = 390) {
@@ -15,11 +16,26 @@ final class EngineHarness {
   }
 
   private func received(_ snapshot: Snapshot) {
+    latest = snapshot
     waiting.removeAll { rows, continuation in
       guard snapshot.count == rows else { return false }
       continuation.resume(returning: snapshot)
       return true
     }
+  }
+
+  /// Sends `json` ops without waiting.
+  func send(_ json: String) {
+    engine.apply(json)
+  }
+
+  /// The snapshot after every op sent so far: the stats callback is queued
+  /// behind the last publish.
+  func settle() async -> Snapshot? {
+    await withCheckedContinuation { continuation in
+      engine.statsSnapshot { _ in continuation.resume() }
+    }
+    return latest
   }
 
   /// Applies `ops` and returns the next snapshot with `rows` rows.

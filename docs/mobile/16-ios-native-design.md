@@ -580,6 +580,7 @@ has the detail.
 |---|---|---|
 | R0-1 | MonoDesign carries the palette resolved at the default tint, for dark and light, not a Swift port of `palette()` for any hue, saturation and lightness. It has no spacing tokens | The custom tint is an Appearance setting that has no screen until R7; `@monocode/design` has no spacing tokens to generate |
 | R0-2 | `MonoTranscriptView` still takes ops and the theme as JSON strings in the Expo app's `spec.ts` shape (`apply(_:)`, `setTheme(_:)`), parsed with `JSONSerialization` on the layout queue. `RowSpec` is not yet the Swift type of [15 §15.4](15-performance.md#154-the-native-transcript-monotranscriptview), and ops are serialised (§16.4 says they are not) | The fixtures and the Lab feed it JSON until the Swift row builder exists (R2). The prototype's measurements also showed `JSONSerialization` faster than Codable for a 1,000-turn reset |
+| R0-3 | The transcript fixtures live in MonoTranscript's own resources (`Sources/MonoTranscript/Resources/Fixtures`), not test resources, so they ship in every build that links the package (about 6 MB). The recorded stream is 30 s long and bound to the 1,000-turn base: it inserts after that fixture's last turn | The Lab loads them at run time. They move to a debug-only bundle before the first TestFlight build. 30 s covers the Lab's benchmark run (stream from 2 s, fling from 3.5 s to 13.5 s) at a third of the size of a full replay |
 
 ## 16.8 Spikes
 

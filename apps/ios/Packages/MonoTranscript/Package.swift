@@ -12,7 +12,7 @@ let package = Package(
     .library(name: "MonoTranscript", targets: ["MonoTranscript"])
   ],
   targets: [
-    .target(name: "MonoTranscript"),
+    .target(name: "MonoTranscript", resources: [.copy("Resources/Fixtures")]),
     .testTarget(name: "MonoTranscriptTests", dependencies: ["MonoTranscript"]),
   ]
 )
