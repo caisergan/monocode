@@ -1,493 +1,623 @@
-# 16. iOS native design plan
+# 16. Native iOS app (Swift)
 
-Status: **proposal**, 2026-10-05, on branch `feat/ios-native-design` (worktree
-`.worktrees/ios-native-design`), created from `feat/mobile-app` at `b286412`. The host
-Origin fix is still uncommitted on `feat/mobile-app` and is not on this branch. Read after [11](11-design-and-ux.md),
-[12](12-mobile-engineering.md) and [15](15-performance.md).
+Status: **plan**, rev 2, 2026-10-05, on branch `feat/ios-native-design` (worktree
+`.worktrees/ios-native-design`), created from `feat/mobile-app` at `b286412`. Rev 1
+(commit `8fc0ca6`) kept React Native and moved the app onto native iOS chrome. On
+2026-10-05 the owner decided to rewrite the phone app as a native iOS app in Swift
+instead (D19), and this revision replaces rev 1. Read after
+[11](11-design-and-ux.md), [12](12-mobile-engineering.md) and
+[15](15-performance.md).
 
-This document plans how the app that exists today becomes an iOS-native MonoCode:
-the platform's chrome everywhere (D18) around MonoCode's content (D12). It is written
-against the installed toolchain and names only APIs that exist in
-`apps/mobile/node_modules` as of the baseline:
+This document plans how the phone app is rebuilt in Swift. It covers the platform
+baseline, the architecture and package layout, a map from every part of the Expo app to
+its Swift home, how the Swift client stays compatible with the TypeScript host, the
+design of each surface in SwiftUI, milestones, spikes and risks. It names only
+APIs that exist in the iOS 27 SDK shipped with Xcode 27.0
+(`SwiftUI.swiftinterface`, `SwiftUICore.swiftinterface`, the UIKit and
+BackgroundTasks headers), and states the iOS version each one needs.
 
-| Piece | Version | Relevance |
+## 16.1 Decision and scope
+
+**D19.** The phone app is a native iOS app written in Swift: SwiftUI for screens and
+chrome, UIKit where a budget needs it. The minimum is iOS 26. D19 supersedes D1 (Expo
+and React Native for iOS and Android) and D17 (the hybrid architecture). Android is
+out of v1.
+
+**What changes:**
+
+- **The phone client.** It is rebuilt as `apps/ios`. Every surface in `apps/mobile`
+  gets a Swift equivalent (§16.4).
+- **Push delivery.** The push gateway calls APNs directly, and Expo Push is gone
+  ([07 §7.5](07-relay-and-push-service.md#75-push-gateway)). Nothing in `services/`
+  exists yet, so this costs nothing to change.
+- **Android.** It moves to "deferred". Its sections in the spec stay and are marked
+  deferred. The protocol stays language-neutral (D13), so a later Kotlin app can
+  implement it.
+
+**What does not change:**
+
+- **The host, the desktop and the protocol.** `host/`, the desktop app,
+  `@monocode/channel` and `@monocode/core` as the host and desktop use them. The same
+  goes for the channel protocol ([06](06-channel-protocol.md)), pairing
+  ([04](04-pairing.md)), the connectivity rules ([05](05-connectivity.md)), the relay
+  rooms ([07](07-relay-and-push-service.md)) and the notification policy
+  ([08](08-notifications.md)).
+- **What the phone does.** The design language and every screen and state
+  ([11](11-design-and-ux.md)). The behaviour of sync, the outbox and the cache
+  ([12](12-mobile-engineering.md)). The performance budgets
+  ([15 §15.5](15-performance.md#155-budgets)). Every string.
+
+**Owner decisions, 2026-10-05:**
+
+| # | Decision |
+|---|---|
+| 1 | Minimum iOS 26. There is one material tier, Liquid Glass, and no blur fallbacks |
+| 2 | Android is out of v1. Its sections are marked deferred, not deleted |
+| 3 | The Expo app in `apps/mobile` is frozen at `b286412` as the reference implementation. No features land there. It is deleted in the change that reaches parity (R4, §16.7) |
+| 4 | The coding agent may build and run the app on the iOS simulator for this work. Installs on the physical iPhone stay with the owner |
+
+**How the Expo app is used until then.** It answers behaviour questions: what a
+screen shows in each state, what a command sends, and how the outbox retries. Its unit
+tests are the acceptance list for each Swift port (§16.4). It is not built or run as
+part of this work.
+
+## 16.2 Platform baseline
+
+| Piece | Choice | Notes |
 |---|---|---|
-| Expo SDK / Expo Router | 57.0.26 / 57.0.24 | `NativeTabs` with `BottomAccessory` and `minimizeBehavior`; `Stack.Screen.Title large`, `Stack.Header`, `Stack.SearchBar`, `Stack.Toolbar` (left, right, bottom), `Link.Preview` and `Link.Menu` |
-| react-native-screens | 4.26 | Form sheets: `sheetAllowedDetents` (fractions or `fitToContents`), `sheetGrabberVisible`, `sheetLargestUndimmedDetentIndex`, `sheetInitialDetentIndex`; `headerLargeTitle`, `headerSearchBarOptions`, `headerBlurEffect`, `headerTransparent`; search bar `placement` up to `integrated` |
-| expo-glass-effect | 57.0.4 | `GlassView` (`glassEffectStyle`, `tintColor`, `isInteractive`, `colorScheme`), `GlassContainer`, `isLiquidGlassAvailable()` |
-| expo-blur, expo-symbols, expo-haptics | 57.x | Pre-26 materials, SF Symbols with `animationSpec`, haptics |
-| @expo/ui | 57.0.21 | SwiftUI `BottomSheet` (`fitToContents`), `ContextMenu` with `Trigger`, `Preview`, `Items`; a fallback, not the default |
-| react-native-reanimated / gesture-handler | 4.5 / 2.32 | UI-thread motion; `react-native-gesture-handler/ReanimatedSwipeable` |
-| Xcode | 27.0 | The app builds against an iOS 26-era SDK, so Liquid Glass applies on iOS 26+ automatically. `UIDesignRequiresCompatibility` is not set and must stay unset |
-| Deployment target | iOS 16.4 | Custom sheet detents, `NativeTabs` and `Link.Preview` all work from 16.4 |
+| Deployment target | iOS 26.0 | Every API below runs without `#available` checks. iPhone 11 and later run iOS 26. The owner's iPhone 13 updates from 18.7 before device testing |
+| Toolchain | Xcode 27.0, iOS 27 SDK, Swift 6 language mode with complete strict concurrency | The installed simulator runtime is iOS 27.0 (iPhone 17, iPhone 17e). There is no iOS 26 runtime, so iOS 26 is covered on the iPhone 13. APIs newer than iOS 26 need `if #available(iOS 27, *)` and a fallback |
+| UI | SwiftUI for screens, navigation, sheets, menus and glass. UIKit for the transcript and the viewers (§16.6.4), and where spikes S19 and S20 call for it | |
+| State | Observation (`@Observable`), main-actor view models, one actor per host connection (§16.3) | |
+| Devices | iPhone first. iPad (sidebar-adaptable tabs, split view) in R7 | |
 
-Not installed, and this plan adds it: `react-native-keyboard-controller` (native;
-needs a new dev build). Not installed, and this plan drops it from the iOS story:
-Hugeicons (§16.3, M12).
+**SwiftUI and UIKit APIs this plan uses**, checked in the iOS 27 SDK:
 
-Test tiers:
+| API | Since | Used for |
+|---|---|---|
+| `TabView` with `Tab(_:systemImage:value:)`, `.badge` | 18 | The tab bar |
+| `.tabBarMinimizeBehavior(.onScrollDown)` (`TabBarMinimizeBehavior`: `automatic`, `onScrollDown`, `onScrollUp`, `never`) | 26 | The tab bar minimises while a list scrolls down |
+| `.tabViewBottomAccessory { }`, `@Environment(\.tabViewBottomAccessoryPlacement)` (`expanded`, `inline`) | 26 | "＋ New session · N working" |
+| `NavigationStack(path:)`, `.navigationTitle`, `.toolbarTitleDisplayMode(.large)` | 16, 17 | A stack per tab, large titles |
+| `.navigationSubtitle(_:)` | 26 | "model · machine" under a session's title |
+| `.searchable(text:placement:prompt:)`, `.searchToolbarBehavior(.minimize)` | 15, 26 | Search in the bar |
+| `.toolbar` with `ToolbarItem(placement: .bottomBar)`, `ToolbarSpacer`, `.toolbarVisibility(_:for:)` | 14, 26, 18 | Viewer toolbars, hiding the tab bar on the session screen |
+| `.sheet` with `.presentationDetents` (`medium`, `large`, `fraction`, `height`), `.presentationBackgroundInteraction` | 16.4 | Pickers and the tool sheet |
+| `.contextMenu(menuItems:preview:)` | 16 | Session card menus with a preview |
+| `.swipeActions(edge:allowsFullSwipe:)` | 15 | Card actions; rows inside a `List` only |
+| `.glassEffect(_:in:)`, `Glass` (`regular`, `clear`, `.tint(_:)`, `.interactive(_:)`), `GlassEffectContainer`, `.buttonStyle(.glass)` | 26 | Composer, approval banner, toast, jump to latest |
+| `.safeAreaBar(edge:alignment:spacing:content:)`, `.scrollEdgeEffectStyle(_:for:)` (`automatic`, `hard`, `soft`) | 26 | The composer as a bar the transcript scrolls under |
+| `.scrollDismissesKeyboard(.interactively)` | 16 | Keyboard dismissal by drag |
+| `.sensoryFeedback(_:trigger:)` | 17 | Haptics |
+| `.symbolEffect(_:options:value:)` | 17 | SF Symbol animation (pairing success) |
+| `.refreshable` | 15 | Pull to refresh |
+| UIKit `UIGlassEffect`, `UIScrollEdgeEffect` | 26 | Glass and edge effects inside the UIKit transcript |
+| BackgroundTasks `BGContinuedProcessingTask` | 26 | Commit and push continues in the background, with system progress |
 
-| Tier | Where it runs today | Bars, tab bar, sheets | Glass surfaces |
-|---|---|---|---|
-| iOS 26+ | iPhone 17 simulator (iOS 26) | Liquid Glass, by the system | `GlassView` |
-| iOS 16.4 to 18 | iPhone 13, iOS 18.7 | System bars with their translucent blur | `expo-blur` with the 11 §11.4 values |
-| Reduce Transparency on | Either | System | Opaque tokens |
+**Frameworks.** Apple frameworks come first. A third-party package needs a row here
+with a reason.
 
-Android is out of scope here. Nothing below removes an Android path; every iOS-only
-component is chosen behind a `Platform.OS === "ios"` branch or a capability check.
+| Need | Choice |
+|---|---|
+| Noise, records, push crypto | CryptoKit: `Curve25519.KeyAgreement`, `ChaChaPoly`, `SHA256`, `HMAC`, `HKDF` |
+| Record compression (deflate-raw) | Apple `Compression` (`COMPRESSION_ZLIB` is raw deflate, RFC 1951), streaming, with the bounded-output rule of [03 §3.5](03-identity-and-crypto.md#35-record-layer) |
+| WebSocket | `URLSessionWebSocketTask`. Network.framework `NWProtocolWebSocket` if spike S23 needs it |
+| Network status | Network.framework `NWPathMonitor` |
+| Cache | SQLite through GRDB, encrypted per spike S18 |
+| Secrets | Keychain Services, with an access group shared with the notification extension |
+| QR scanning | VisionKit `DataScannerViewController`, QR only |
+| Photos and camera | PhotosUI `PhotosPicker`; the camera through `UIImagePickerController`; ImageIO to downsample and strip EXIF |
+| Notifications | UserNotifications and a Notification Service Extension |
+| Background work | `UIApplication.beginBackgroundTask`, `BGAppRefreshTask`, `BGContinuedProcessingTask` |
+| App lock | LocalAuthentication |
+| Sound | AVFoundation, playing the exported `cuelume` cue files |
+| Markdown | A Swift port of the app's own block and inline parser (`src/transcript/markdown.ts`) |
+| Code highlighting | Decided by spike S21 |
 
-## 16.1 The rule: native chrome, MonoCode content
+**Third-party packages (SwiftPM):** GRDB (and SQLCipher if S18 keeps encryption), and
+the highlighter S21 picks. Nothing else in v1.
 
-**Chrome is the platform's.** Tab bar, navigation bars and large titles, search bars,
-bottom toolbars, pull-down and context menus, action sheets, alerts, form sheets and
-their detents, push and sheet transitions, the back swipe, scroll-edge effects, glass
-materials, keyboard tracking, haptics and SF Symbols. The system draws them, the
-system animates them, and MonoCode only tints them (`accent` for the tab selection and
-bar buttons).
+## 16.3 Architecture
 
-**Content is MonoCode's.** Session cards, project rows, the composer box and its
-chips, buttons, the segmented control, notice bars, settings `Group` cards, the
-transcript and the viewers keep the desktop's anatomy, tokens, radii, type scale and
-copy from `@monocode/design`. They sit inside native chrome and scroll under it.
+### Repository layout
 
-**What is not changed by this plan.** The native transcript, the FlashList viewers,
-the outbox, sync, pairing crypto, the demo host, and every string.
+```
+apps/ios/
+  MonoCode.xcodeproj              # app and extension targets; folders are synchronized groups,
+                                  #   so the project file holds no per-file lists
+  Config/
+    Shared.xcconfig
+    Personal.xcconfig             # publisher values per track (13 §13.5)
+    Official.xcconfig
+  MonoCode/                       # the app target
+    App/                          # MonoCodeApp, the root TabView, Router, deep links, scene phase
+    Agents/  Projects/  Session/  Compose/  Workspace/  Settings/  Pairing/
+    Debug/                        # Transcript Lab and the fling benchmark (debug builds only)
+    Resources/                    # Assets.xcassets (app icon, harness marks, file-type icons,
+                                  #   mascots), cue sounds, Localizable.xcstrings
+  NotificationService/            # Notification Service Extension target (08 §8.7)
+  Packages/
+    MonoChannel/                  # Noise IK, records, envelope, offer and link codec, pairing
+                                  #   proof and confirmation code, push open and ticket seal
+    MonoWire/                     # Codable wire and session types, applySessionSync, turn and
+                                  #   step grouping, question replies, summaries, windowing
+    MonoStore/                    # SQLite cache and migrations, Keychain wrapper
+    MonoSync/                     # HostRuntime, transports, race, watch, session windows,
+                                  #   paging, attachments, outbox, workspace API
+    MonoDesign/                   # Generated tokens (palette, type, radii, spacing, motion) and
+                                  #   SwiftUI and UIKit helpers
+    MonoTranscript/               # The transcript engine, layout, models and view (UIKit), the
+                                  #   row builder, Markdown, document mode for the viewers
+    MonoHighlight/                # Code highlighting (S21)
+    MonoDemo/                     # The demo host
+  UITests/
+  scripts/
+    gen-design-tokens.mjs         # @monocode/design → MonoDesign/Sources/Generated/Tokens.swift
+    gen-fixtures.mjs              # TypeScript implementations → golden JSON fixtures (§16.5)
+```
 
-## 16.2 Audit: what the app does today
+- **Dependencies point one way.** The app depends on MonoSync, MonoTranscript and
+  MonoDemo. MonoSync uses MonoStore, MonoChannel and MonoWire. MonoTranscript uses
+  MonoWire, MonoDesign and MonoHighlight. The extension links only MonoChannel and
+  MonoStore's Keychain wrapper.
+- **Tests run without a simulator where they can.** MonoChannel, MonoWire, MonoStore,
+  MonoSync, MonoHighlight and MonoDemo build for macOS too, so `swift test` runs them on
+  the Mac. MonoTranscript and MonoDesign's UIKit parts are tested on the simulator with
+  `xcodebuild test`.
+- **Publisher values** (bundle ids, team, app group, keychain group, scheme, link
+  domains, gateway URL and keys) live in the xcconfig files and reach the code through
+  `Info.plist` keys. No Swift file names a team, domain or credential
+  ([13 §13.5](13-testing-and-release.md#135-publishers-and-build-tracks)). The
+  personal track keeps `com.monocode.mobile.dev`, so a Swift build replaces the
+  Expo dev build on a phone.
 
-| Surface | Today (baseline) | Native target | Gap |
-|---|---|---|---|
-| Tab bar | `NativeTabs`, SF Symbols, `tintColor` accent, Agents badge | Same, plus `minimizeBehavior="onScrollDown"`, the iOS 26 bottom accessory ("＋ New session · N working"), `sidebarAdaptable` on iPad | Small |
-| Tab screen headers | No navigation bar. A JS `Title` (28 pt text in a `SafeAreaView`) and a JS "＋" glyph | Each tab owns a native stack with a large title that collapses on scroll, a `plus` toolbar button, and a native search bar where the spec has one | Medium (route restructure) |
-| Search | JS `SearchField` (Projects, Project sessions, Explorer, model sheet) | `Stack.SearchBar` in the navigation bar, `hideWhenScrolling` | Small per screen |
-| Project screen | Custom `headerTitle` view, JS "＋", JS `Segmented`, `ToggleChip` for Archived | Keep the title view and the MonoCode segmented control; `plus` and a filter `Stack.Toolbar.Menu` with checkmark items; sessions search in the bar | Small |
-| Session ⋯ menu | `Stack.Toolbar.Menu` with Explorer and Changes | Same mechanism with the full 11 §11.15 list, destructive Delete, submenus | Small |
-| Composer pickers (model, access, add) | RN `Modal presentationStyle="pageSheet"` with a custom "MODEL · Done" header, full height | Native form sheets with detents (`fitToContents` for Access and Add, `[0.5, 1]` for Model), grabber, a native header with a close button | Medium (state moves to a store) |
-| New session pickers (place, workspace, branch) | The same `Sheet` modal | The same form sheets | Medium |
-| Long question form | The same `Sheet` modal | A form sheet route | Small |
-| Tool and attachment sheets | Form sheet routes, detents `[0.5, 1]` and `[0.75, 1]`, grabber, no header | Keep; add `sheetLargestUndimmedDetentIndex: 0` for the tool sheet so the transcript stays scrollable at half height | Tiny |
-| Action sheets | `ActionSheetIOS` (Projects ＋ and row long press, Changes rows) | Keep for the ＋ and for Changes rows; replace row long presses with context menus | Small |
-| Context menus | None on session cards; action sheet on project rows | `Link.Menu` on project rows; `Link.Menu` plus `Link.Preview` on session cards | Medium |
-| Swipe actions | None | `ReanimatedSwipeable`: Archive, Pin or Unpin, Mark seen | Medium |
-| Approval banner | Opaque `t.base` card, `Animated` + `PanResponder` | Glass card (`GlassView` or blur), gesture-handler pan on the UI thread, `ease.pop` entrance | Small |
-| Toast | Opaque pill | Glass pill | Tiny |
-| Jump to latest | Not built (the Swift view already emits `onAtBottomChange`) | A 32 pt interactive glass square above the composer, with the "Waiting for approval" variant | Small |
-| Composer material | Opaque `fill.composer` | `GlassView` on iOS 26, blur 8 before, opaque under Reduce Transparency; MonoCode border and radius on top | Small |
-| Keyboard | `KeyboardAvoidingView` with a hard-coded `insets.top + 44` offset; the composer does not follow interactive dismissal | `react-native-keyboard-controller` sticky composer; the transcript's bottom inset follows the keyboard inside Swift | Medium |
-| File and diff toolbars | A JS 44 pt `Toolbar` under the header | `Stack.Toolbar placement="bottom"` (glass on iOS 26); Find as a `Stack.SearchBar`; Wrap and Preview as checkmark menu items | Small |
-| Explorer | In-place breadcrumbs inside the Project segment | Folders push native screens (the Files pattern); "Go to File" is the search bar | Medium |
-| Settings | One screen of ad-hoc `Card`s | Large title, grouped list, pushed pages with MonoCode `Group` cards, Machine details | Medium |
-| Pairing | One modal screen whose stages are JS state; "✓" is a text glyph | Keep the modal and the stage machine; native titles per stage, a Cancel bar button, an SF Symbol bounce on success | Small |
-| Icons | SF Symbols through `expo-symbols` everywhere (the spec said Hugeicons) | SF Symbols, recorded as deviation M12 | Decision |
-| Glass | `expo-glass-effect` and `expo-blur` installed, unused | One `Surface` primitive used by every floating surface | Small |
-| Dynamic Type | `TYPE` is fixed; `transcriptTheme(t, scale)` has an unused scale | `fontScale` clamped at 1.6× feeds the tokens, the row-height functions and the transcript | Small |
-| Reduce Transparency and Reduce Motion | Not read | Read once; gate materials and the M9 motions | Tiny |
-| Haptics | Approve, Build, pairing | A small map (§16.4.11) | Tiny |
-| App icon | `assets/expo.icon` (Icon Composer bundle) | Keep; verify the layered icon renders on iOS 26 | Verify |
+### Runtime
 
-## 16.3 Decisions this plan proposes
+- **`HostRuntime` is an actor**, one per paired host. It owns the transport, the
+  Noise cipher states, request matching, the watch set and the reconnect timers. Its
+  state machine is unchanged from [12 §12.4](12-mobile-engineering.md#124-host-runtime).
+- **Stores are `@Observable` and main-actor bound:** hosts, inbox, projects, one per
+  open session, outbox and catalogs. They replace the Zustand stores, and runtimes feed
+  them through `AsyncStream`s. Views read only the properties they show, so
+  Observation re-renders only what changed.
+- **The streaming path stays off the main thread.** The socket receives, then off the
+  main actor: decrypt, inflate, JSON decode, `applySessionSync`, row build. The
+  transcript then applies the resulting ops on the main thread at most once per display
+  frame. SwiftUI never re-renders for a streamed token
+  ([15 §15.1](15-performance.md#151-principles)).
+- **Navigation lives in a `Router`** (`@Observable`): the selected tab, one
+  `NavigationPath` per tab, and the presented sheet. Deep links and notification taps
+  resolve into it (§16.6.2).
 
-These extend the deviations table in [11 §11.1](11-design-and-ux.md#111-design-parity-rules).
+## 16.4 Porting map
+
+From the Expo app at `b286412` to the Swift app.
+
+| Expo app | Swift home | Notes |
+|---|---|---|
+| `packages/channel`: `noise`, `record`, `envelope`, `offer`, `pairing`, `session`, `client`, `socket` | MonoChannel | CryptoKit; the same vectors (§16.5) |
+| `@monocode/core`: `wire`, `window`, `summary`, `session`, `transcript` | MonoWire | `session.ts` and `transcript.ts` re-export desktop model code: `src/features/sessions/model/session.ts`, `transcriptActivity.ts` and `userQuestion.ts`, and `src/features/connections/model/protocol.ts`. Their types become Codable models. `applySessionSync`, turn and step grouping, `sessionNeedsInput`, `hasPendingApproval` and the question helpers are ported as logic |
+| `packages/design` | MonoDesign | Generated by `gen-design-tokens.mjs`. The TypeScript parity test against the desktop stays where it is |
+| `src/hosts`: `runtime`, `connect`, `registry`, `pins`, `status`, `seen` | MonoSync | |
+| `src/hosts/secrets.ts` | MonoStore (Keychain) | |
+| `src/sync`: `sessionWindow`, `paging`, `older`, `projects`, `attachments`, `upload` | MonoSync | |
+| `src/outbox`: `engine`, `policy`, `mutate`, `index` | MonoSync | The 458-line engine test suite ports case by case |
+| `src/storage`: `schema`, `repo`, `cache`, `sql` | MonoStore | The same tables, starting again at schema version 1 (a new install) |
+| `src/pairing/pair.ts` | MonoSync (pairing state machine) and the app's Pairing screens | |
+| `src/transcript`: `rows`, `markdown`, `optimistic`, `fixtures` | MonoTranscript | `rows.ts` becomes the row builder and `markdown.ts` the parser. The fixtures feed the Lab and the tests |
+| `modules/transcript/ios`: `TranscriptEngine`, `TranscriptLayout`, `TranscriptModels` | MonoTranscript | Carried over. They import CoreText, UIKit and QuartzCore only |
+| `modules/transcript/ios`: `MonoTranscriptView`, `MonoTranscriptModule` | MonoTranscript | Rewritten: the `ExpoView` base becomes `UIView`, and the Expo props and events become a Swift API |
+| `modules/transcript/src`: `spec.ts`, `diff.ts` | MonoTranscript | `RowSpec` becomes Swift types. There is no bridge, so no ops are serialised |
+| `src/highlight` | MonoHighlight | S21 |
+| `src/workspace`: `api`, `git`, `diff`, `find`, `lines`, `paths`, `status`, `store` | MonoSync (API, Git, Myers diff) and the app's Workspace screens | |
+| `src/workspace`: `ExplorerPane`, `ChangesPane` | The app's Workspace screens | §16.6.6 |
+| `src/compose`: `Composer`, `sheets`, `tabs`, `catalog`, `command`, `models`, `pick`, `prefs`, `queue`, `question` | The app's Compose screens | §16.6.5 |
+| `src/ui`: `SessionCard`, `ApprovalBanner`, `toast`, `Segmented`, `FileTypeIcon`, `CodeLine`, `components`, `toolbar`, `sheet` | The app and MonoDesign | `sheet` and `toolbar` disappear into SwiftUI's own |
+| `src/demo`: `demoHost`, `demoRepo` | MonoDemo | Answers RPCs in process, behind the same transport protocol as a real host (§16.5) |
+| `src/app/*` (Expo Router routes) | The app's screens | §16.6 |
+| `src/app/lab.tsx` | Debug → Transcript Lab | Runs S11 |
+
+The Expo app's unit tests (`src/**/__tests__`, `modules/transcript/src/diff.test.ts`)
+port to Swift Testing next to the code they cover. A Swift port is done when its
+ported cases pass.
+
+## 16.5 Keeping the Swift client compatible with the host
+
+The TypeScript host stays the source of truth for the protocol. Three checks keep the
+Swift client in step with it:
+
+1. **Crypto vectors.** MonoChannel's tests run
+   `packages/channel/src/vectors/cacophony-ik.json` and `snow-ik.json` against the
+   CryptoKit Noise implementation. Negative tests from
+   [13 §13.2](13-testing-and-release.md#132-automated-tests) are included: a tampered
+   message 1 or 2, the wrong prologue, a reused nonce.
+2. **Golden fixtures.** `apps/ios/scripts/gen-fixtures.mjs` runs the TypeScript
+   implementations and writes JSON fixtures into the packages' test resources. The
+   fixtures cover:
+   - records at the boundary sizes, and compressed records;
+   - offers and pairing links, proofs and confirmation codes;
+   - envelopes for every method;
+   - push seals and tickets;
+   - `applySessionSync` before and after cases;
+   - wire objects captured from the demo host and from a real host.
+
+   Swift decodes each fixture, re-encodes it and compares. CI regenerates the fixtures
+   and fails on a diff, so a TypeScript change without a matching Swift change fails a
+   build.
+3. **Interop test.** `swift test --filter Interop` in MonoSync does the following:
+   1. builds the host (`npm run host:build`);
+   2. starts `node build/host/monocode-host.mjs` in a temporary data directory with
+      fake providers;
+   3. pairs through a test hook that approves through `/lifecycle`;
+   4. runs the Swift client through a handshake, a watch, a fake turn with an approval,
+      sync deltas, outbox commands whose responses are dropped, and a revoke.
+
+   It runs on the Mac, with no simulator.
+
+**Decoding is tolerant.** Unknown fields are ignored, and unknown enum cases decode to
+an `unknown` case. A newer host therefore doesn't break an older app
+([06 §6.12](06-channel-protocol.md#612-versioning-and-compatibility)).
+
+**The demo host** in MonoDemo implements the same `Transport` protocol as the direct
+and relay transports, so the runtime, stores, outbox and screens are all real when it
+runs. The demo transport skips Noise, as the Expo app's memory transport did. Its
+fixtures come from `src/demo/demoHost.ts` and `demoRepo.ts`, converted to JSON by
+`gen-fixtures.mjs`.
+
+## 16.6 Design by surface
+
+The rule from rev 1 still holds: **chrome is the platform's, content is MonoCode's.**
+- **The system draws the chrome:** the tab bar, navigation bars and large titles,
+  search fields, toolbars, menus, sheets and their detents, alerts, transitions, the
+  back swipe, scroll-edge effects, Liquid Glass and the keyboard. MonoCode only tints
+  the chrome with `accent`.
+- **MonoCode draws the content:** cards, rows, the composer, chips, notices, `Group`
+  cards, the transcript and the viewers. They keep the desktop's anatomy, tokens,
+  radii, type scale and copy from `@monocode/design`
+  ([11 §11.1](11-design-and-ux.md#111-design-parity-rules)).
+
+Deviations M12 to M16 (§16.6.11) are recorded in 11 §11.1.
+
+### 16.6.1 Tab bar and bottom accessory
+
+```swift
+TabView(selection: $router.tab) {
+  Tab("Agents", systemImage: "bubble.left.and.text.bubble.right", value: .agents) {
+    AgentsStack()
+  }
+  .badge(inbox.needsInput)
+  Tab("Projects", systemImage: "folder", value: .projects) { ProjectsStack() }
+  Tab("Settings", systemImage: "gearshape", value: .settings) { SettingsStack() }
+}
+.tint(tokens.accent)
+.tabBarMinimizeBehavior(.onScrollDown)
+.tabViewBottomAccessory { NewSessionAccessory() }
+```
+
+- **The accessory** reads `tabViewBottomAccessoryPlacement`:
+  - `expanded`: on the left, `plus` and "New session" (15/500). On the right, the
+    braille spinner in `accent` and "N working" (13 pt), or "Nothing running" (13 pt,
+    α .45).
+  - `inline` (the tab bar is minimised): only the spinner and the count.
+- **Taps.** "New session" pushes New session onto the current tab's stack. The count
+  switches to Agents.
+- **The badge** on Agents counts sessions that need input, as today.
+
+### 16.6.2 Navigation
+
+- **Each tab owns a `NavigationStack(path:)`.** Project, Session, Explorer folders,
+  Changes and the viewers push onto the stack of the tab that opened them.
+- **The tab bar stays visible on pushed screens** (the iOS default). The one
+  exception is the session screen, which hides it with
+  `.toolbarVisibility(.hidden, for: .tabBar)` because the composer needs the bottom
+  edge (M16).
+- **Titles.** Agents, Projects and Settings use `.toolbarTitleDisplayMode(.large)`.
+  Pushed screens use inline titles.
+- **Modals.** Pairing is a `.sheet` at the large detent with its own stack. Everything
+  else in §16.6.5 is a sheet with detents.
+- **Deep links:**
+
+| Link | Destination |
+|---|---|
+| `<scheme>://pair#o=…`, `https://<linkDomain>/pair#o=…` | The pairing sheet with that offer |
+| A notification tap (approval, question, finished, failed) | The Agents tab with its path reset to that session |
+| `<scheme>://m/<env>/s/<sessionId>` | The Agents tab, that session |
+
+### 16.6.3 Agents, Projects and the session lists
+
+- **Lists are SwiftUI `List`s** with `.listStyle(.plain)`. Each row is a MonoCode card:
+  `.listRowBackground(Color.clear)`, token insets, and `.listRowSeparator(.hidden)`. A
+  `List` gives cell reuse, `swipeActions`, context menus, `.refreshable` and
+  `.searchable` together. Spike S19 checks the 500-card fling budget.
+- **Agents.** Large title "Agents", and `plus` in the bar. The "Updating…" line and
+  the host notices stay as `NoticeBar`s at the top of the list. The Working, Need
+  approval and Done sections are unchanged
+  ([11 §11.12](11-design-and-ux.md#1112-agents-home)).
+- **Projects.** Large title "Projects", and `.searchable(prompt: "Search projects...")`
+  with `.searchToolbarBehavior(.minimize)`. `plus` is a toolbar `Menu` holding the
+  actions of today's action sheet.
+- **Session card menu.** `.contextMenu(menuItems:preview:)` with these items:
+  - Pin or Unpin;
+  - Rename;
+  - "Copy session ID" as a submenu with Harness session ID and MonoCode session ID;
+  - Mute notifications;
+  - Archive;
+  - Delete (`role: .destructive`, disabled while running).
+
+  Items whose host methods don't exist yet (Rename, Archive, Delete, Mute) stay hidden
+  until the host lists the capability.
+- **The preview** is a light card at a fixed 320 × 200 pt: the title, the last
+  assistant line and the status. Building a live transcript for a peek would cost a
+  sync; that stays a later option.
+- **Swipe actions.**
+  - Leading: Pin or Unpin, then Mark seen (`sel.strong` tint).
+  - Trailing: Archive (`status.danger` tint), hidden until the host supports it.
+- **Project rows** get a context menu without a preview: Pin or Unpin, New session,
+  Copy path.
+
+### 16.6.4 Session screen
+
+- **Header.** `.navigationTitle(title)` and `.navigationSubtitle("model · machine")`.
+  The ⋯ button is a toolbar `Menu` with the [11 §11.15](11-design-and-ux.md#1115-session-screen)
+  list in this order:
+  1. Session info
+  2. Explorer
+  3. Changes
+  4. Rename
+  5. Pin (a toggle)
+  6. Archive
+  7. Mute notifications (a toggle)
+  8. Compact context
+  9. "Copy session ID", as a submenu
+  10. Delete, with the destructive role
+
+  Items the host can't perform are hidden.
+- **Transcript.** `MonoTranscriptView` is wrapped in a `UIViewControllerRepresentable`.
+  Its scroll view is the screen's content scroll view, so it scrolls under the glass
+  navigation bar and gets the system's scroll-edge effect.
+- **Composer.** It sits in `.safeAreaBar(edge: .bottom)`, so the transcript scrolls
+  under it. The box is
+  `.glassEffect(.regular, in: .rect(cornerRadius: tokens.radius.md))`, with
+  MonoCode's α .10 border and α .20 focus border drawn on top. The chips, top bar and
+  send button are unchanged.
+- **Keyboard.** The composer follows the keyboard frame by frame, including
+  interactive dismissal. The transcript's bottom inset follows with it, so the last
+  row is never hidden. Spike S20 decides how: SwiftUI's keyboard safe area with
+  `safeAreaBar`, or a UIKit session controller that pins a hosted composer to
+  `keyboardLayoutGuide`.
+- **Jump to latest.** A 32 pt circle with `chevron.down` and
+  `.glassEffect(.regular.interactive(), in: .circle)`, centred 12 pt above the
+  composer. It shows when the transcript reports that it isn't at the bottom. With an
+  undecided approval below the fold it widens to the amber-dotted "Waiting for
+  approval" pill (M6). It enters and leaves with `ease.pop`, 170 ms.
+- **Approval banner.** A glass card with the dashed α .20 border and `shadow-xl`.
+  - It is dragged with `DragGesture` and springs back (M8).
+  - Entrance: translateY −8, scale .98, 180 ms `ease.pop`. Under Reduce Motion it is a
+    120 ms fade (M9).
+- **Toast.** A glass capsule.
+- **Tool and attachment sheets.**
+  - Detents: `.presentationDetents([.medium, .large])` for the tool sheet and
+    `[.fraction(0.75), .large]` for the attachment sheet.
+  - The tool sheet adds `.presentationBackgroundInteraction(.enabled(upThrough:
+    .medium))`, so the transcript behind it still scrolls at half height.
+  - Each has a title and an `xmark` close button.
+- **Question form.** It stays inline. The tall case opens a sheet at
+  `[.fraction(0.6), .large]` with the same content.
+
+### 16.6.5 Composer pickers and other sheets
+
+Every picker is a `.sheet` with detents, a drag indicator, and a `NavigationStack`
+inside it for the title and an `xmark` close button. Each picker edits the composer's
+`@Observable` draft directly. The rev-1 problem of moving composer state into a store
+(S14) doesn't exist in SwiftUI.
+
+| Sheet | Detents | Content |
+|---|---|---|
+| Model | `[.medium, .large]` | The model's settings rows, then "Model" → the model list with `.searchable(prompt: "Search models")` and the provider strip |
+| Access | `.height(h)`, with `h` measured from the content | The four access rows. Full access confirms with the existing alert (D16) |
+| Add to message | `.height(h)` | Camera, Photo library, Plan mode, Draft |
+| Place (New session) | `[.fraction(0.6), .large]` | Machines, projects, "Open folder on a machine…" |
+| Workspace (New session) | `.height(h)` | Current checkout, worktrees, New worktree |
+| Branch (New session) | `[.fraction(0.6), .large]` | Branches, with `.searchable` |
+| Session info | `[.fraction(0.6), .large]` | [11 §11.15](11-design-and-ux.md#1115-session-screen) |
+
+- Rows stay MonoCode `SheetRow`, `SheetSwitch` and `SheetCaption` views.
+- Every pick fires `.sensoryFeedback(.selection, trigger:)`.
+
+### 16.6.6 Project screen, Explorer, Changes
+
+- **Header.** The title view stays. On the right: `plus`, and a filter `Menu` with
+  `line.3.horizontal.decrease`. The menu holds the [11 §11.14](11-design-and-ux.md#1114-project-screen-and-session-list)
+  filters as toggles in sections:
+  - Archived;
+  - Status (Working, Needs approval, Done);
+  - Time (All time, Today, Last 7 days, Last 30 days);
+  - Provider;
+  - Clear filters.
+
+  Only Archived is wired today. The rest stay hidden until `sessions.page` takes those
+  filters.
+- **Segmented control.** It stays MonoCode's own (Sessions, Explorer, Changes), with a
+  selection haptic.
+- **Sessions search.** `.searchable(prompt: "Search conversations...")`, shown while
+  the Sessions segment is active.
+- **Explorer.**
+  - The segment shows the root listing.
+  - A folder pushes a screen whose title is the folder name, and whose back button
+    shows the parent's name. The back stack is the breadcrumb, so the breadcrumb row
+    goes away.
+  - "Go to File" is `.searchable` on the root and on pushed folders.
+  - `.refreshable` reloads the listing.
+- **Changes.**
+  - The header, the message field, and Commit with a chevron `Menu` (Commit, Commit
+    and push) are unchanged.
+  - Rows get a context menu (Stage, Unstage, Open) instead of the action sheet.
+  - Commit and push runs as a `BGContinuedProcessingTask`, so it finishes if the app
+    goes to the background within the host's 110 s.
+
+### 16.6.7 File and diff viewers
+
+- **Engine.** Both viewers use MonoTranscript in document mode, as
+  [15 §15.2](15-performance.md#152-architecture-by-surface) planned. The Expo app's
+  FlashList viewers were a recorded deviation, and that deviation ends here.
+- **Bottom toolbar** (`ToolbarItemGroup(placement: .bottomBar)`):
+  - File: a `textformat` `Menu` with Wrap and Preview toggles (Preview only for
+    Markdown), `ToolbarSpacer`, then a `magnifyingglass` button that opens Find.
+  - Diff: `chevron.left` Prev and `chevron.right` Next, `ToolbarSpacer`, and the Wrap
+    menu.
+- **Find** is `.searchable(text:isPresented:)`, presented on demand. While it is
+  active, the "n of m" counter and the previous and next buttons replace the toolbar
+  items.
+- **Share.** `ShareLink` shares the file text or the diff as text.
+
+### 16.6.8 Settings and machine details
+
+- **The root.** Large title "Settings", then MonoCode `Group` cards
+  ([11 §11.21](11-design-and-ux.md#1121-machines-and-settings)) in a `ScrollView`. Each group pushes
+  pages within the Settings stack:
+  - App: Machines, Appearance, Security, Privacy;
+  - Agents: Chat, Notifications;
+  - About: Version, Licences, Diagnostics, Demo.
+- **Each page:** an inline title, a page heading (22/600) and description, `Group`
+  cards, rows, and a native `Toggle` tinted `accent`.
+- **Machine details** show the 11 §11.21 groups. Remove keeps the native alert.
+- **Choices on a row** (Lock after, App lock) are a `Picker` with `.menu` style on the
+  row's value. A choice whose options need descriptions is a `.height(h)` sheet.
+- **SwiftUI `Form` styling is not used.** It would replace MonoCode's `Group` card
+  with Apple's, which 11 §11.1 rule 2 forbids.
+
+### 16.6.9 Pairing and onboarding
+
+- **The stage machine is ported unchanged:** offer, scan, connect, confirm, done.
+  - Each stage sets its own title: "Pair a computer", "Scan code", "Connect to
+    {host}?", "Connecting…", "Confirm", "Paired".
+  - Every stage has a Cancel button on the left.
+- **The scanner stage** shows `DataScannerViewController`, recognising QR codes only,
+  edge to edge under a transparent bar.
+- **Success** is `Image(systemName: "checkmark.circle.fill")` with
+  `.symbolEffect(.bounce)`, tinted `status.done`, with the success haptic.
+- **The Welcome empty state** on Agents is unchanged.
+
+### 16.6.10 Materials, motion, accessibility, haptics
+
+- **Materials.**
+  - System chrome is Liquid Glass with no custom backgrounds, blur or shadows.
+  - MonoCode's floating surfaces use `.glassEffect`: the composer, banner, toast and
+    jump button.
+  - Glass is never tinted on bars. It is tinted only on small interactive surfaces,
+    and never with more than 20 % `accent`.
+- **Reduce Transparency.** Every glass surface has an opaque sibling: `t.base` with a
+  `stroke` hairline. It is used when
+  `@Environment(\.accessibilityReduceTransparency)` is on, or when the legibility check
+  in R2 finds glass over `#171717` too muddy for that surface.
+- **Motion.**
+  - The `MOTION` tokens become `Animation.timingCurve(_:_:_:_:duration:)` with the
+    desktop's bezier points.
+  - Springs are used only where a gesture hands off (M8).
+  - `@Environment(\.accessibilityReduceMotion)` gates the M9 motions.
+- **Dynamic Type.** The type roles scale with `UIFontMetrics`, capped at 1.6×. Card and
+  row layouts are fixed per size category, so a row never changes height while it
+  scrolls. The transcript gets the same scale.
+- **Haptics** through `.sensoryFeedback`:
+  - `selection` on segments and picks;
+  - `impact(weight: .light)` on chip toggles;
+  - `impact(weight: .medium)` on Allow, Deny and Build;
+  - `success` on pairing and commit;
+  - `warning` on a failed send, a failed commit or a pairing failure;
+  - nothing on scroll or streaming.
+
+### 16.6.11 Icons and recorded deviations
+
+- **Icons.** All chrome and content glyphs are SF Symbols. Harness marks and file-type
+  icons are template or vector images in the asset catalog. Mascots stay pixel sprites.
+- **Deviations recorded in 11 §11.1:**
 
 | # | Deviation | Reason |
 |---|---|---|
-| M12 | **SF Symbols** for all chrome and content glyphs on iOS, instead of Hugeicons. Harness and brand marks stay MonoCode's (SVG or `xcasset` template images). Mascots stay pixel sprites | `NativeTabs`, `Stack.Toolbar`, `Link.Menu` and native menus take SF Symbol names, not vectors. The app already uses `expo-symbols` everywhere; mixing families would look wrong. Hugeicons is not installed |
-| M13 | **Native large titles** on Agents, Projects and Settings, in the system's title font, not the 28/600 JS title. Pushed screens keep inline titles | Large titles collapse under scroll and host the search bar; they are the strongest iOS signal a list screen can give |
-| M14 | **Pickers are native form sheets** with detents; "Add to message" fits its contents. Rows inside stay MonoCode `SheetRow`s | Detents, grabber, drag to dismiss and Liquid Glass come free; the RN `Modal` has none of them |
-| M15 | **Long press on a session card opens a native context menu with a preview** of the session; project rows get a menu without preview. This supersedes the "context menus become action sheets" line for iOS. Action sheets remain for the Projects ＋ and for Changes rows | UIContextMenu is the iOS idiom for "actions on a row"; a preview is how iOS shows "peek" |
-| M16 | **Pushed screens cover the tab bar.** Each tab owns a stack only for its header; Project, Session, Explorer, Changes and the viewers stay in the root stack as today | Keeps one copy of every route. The session screen needs the whole bottom edge for the composer anyway. Keeping the tab bar on Project screens would need shared route groups; deferred (§16.8) |
+| M12 | SF Symbols for all chrome and content glyphs, instead of Hugeicons. Harness and brand marks and mascots stay MonoCode's | Tab items, toolbars and menus take SF Symbol names. Mixing two icon families would look wrong |
+| M13 | Native large titles on Agents, Projects and Settings, in the system's title font, instead of a 28/600 title | Large titles collapse on scroll and host the search field |
+| M14 | Pickers are native sheets with detents. The rows inside stay MonoCode's | Detents, drag to dismiss and Liquid Glass come from the system |
+| M15 | A long press on a session card opens a context menu with a preview. Project and Changes rows get context menus without one. Action sheets remain only for confirmations | UIContextMenu is the iOS idiom for actions on a row |
+| M16 | Pushed screens keep the tab bar, except the session screen | The iOS default. The session screen needs the bottom edge for the composer |
 
-Material rules, as 11 §11.4 already states, made concrete:
+## 16.7 Milestones
 
-- Bars and the tab bar get **no** `backgroundColor`, `blurEffect` or `shadowColor` on
-  iOS 26, so they stay Liquid Glass. Before iOS 26 they get `Stack.Header
-  blurEffect="systemChromeMaterialDark"` (or `Light`) over the system bar.
-- `GlassView` is never tinted on bars. It is tinted only when interactive and small
-  (the jump button, the accessory's spinner pill), and never with the accent at more
-  than 20 % alpha.
-- Every glass surface has an opaque sibling: `t.base` with a `stroke` hairline.
+The host and desktop milestones in [14 §14.1](14-roadmap.md#141-milestones) and their
+"As built" record stand. The phone milestones become R0 to R8. Sizes are relative (S,
+M, L). Engineer-week estimates are written into 14 after R0, once the speed of the port
+is known.
 
-## 16.4 Design by surface
+| Milestone | Scope | Exit criteria | Size |
+|---|---|---|---|
+| **R0 Skeleton and transcript** | The Xcode project with xcconfig tracks and package scaffolds. The token generator. MonoTranscript ported out of the Expo module. Debug → Transcript Lab with the fixtures. The fling benchmark writing `Documents/benchmarks/latest.json`. `scripts/check.sh` running `swift test` and `xcodebuild test` | Builds and runs on the iPhone 17 simulator (iOS 27) and the iPhone 13 (iOS 26). S11 is measured on the iPhone 13 (0 hitches flinging 1,000 turns while streaming; tail re-layout ≤ 1 ms), which answers the go/no-go the Expo app left open | M |
+| **R1 Channel and pairing** | MonoChannel with vectors and golden fixtures. Direct transport and race. `HostRuntime`. Keychain. Pairing screens and the scanner. The hosts table. Settings → Machines. MonoDemo, enough to show Agents | Pairs with a CLI-started host on the LAN, lists its projects and survives a host restart. Revoke closes the channel. The interop test passes | L |
+| **R2 Read path** | Agents, Projects, the Project screen and the session screen with the transcript fed by the row builder. The cache (S18), watch, windowed sync, older pages, tool and attachment sheets. The demo host's read path | Feature parity with the Expo app's M2. The list and navigation budgets in 15 §15.5 pass. The ported sync and paging tests pass | L |
+| **R3 Write path** | The outbox, the composer, pickers, queue card and usage tab, approvals, the banner, the question form, New session with a worktree, drafts, the keyboard (S20) | Parity with the Expo app's M3. No lost or duplicated commands in fault runs. The keyboard budget passes | L |
+| **R4 Workspace and parity** | Explorer, Changes, commit and push, the file and diff viewers in document mode, highlighting (S21) | Parity with the Expo app's M6. **`apps/mobile` is deleted in this change**, and 14's "As built" records it | M |
+| **R5 Relay** | The client side of M4: the relay transport and the upgrade probe | 14 M4's exit criteria | M |
+| **R6 Push** | The client side of M5: APNs registration, the extension, categories and actions, the badge. The gateway's APNs provider (S22) | 14 M5's exit criteria | M |
+| **R7 Hardening** | M7: app lock, privacy overlay, iPad, accessibility, P1 motion, sounds, diagnostics, the QA matrix | 14 M7's exit criteria | L |
+| **R8 Official publication** | M8 | 14 M8's exit criteria | S |
 
-### 16.4.1 Tab bar and bottom accessory
+**Every milestone ends with:**
+- `swift test` for the packages and `xcodebuild test` for the app and MonoTranscript;
+- a run on the iPhone 17 simulator, with screenshots of each changed surface (the
+  coding agent may do this);
+- a run on the iPhone 13 (the owner does this);
+- the spec updates for that milestone, in the same change.
 
-```tsx
-<NativeTabs tintColor={t.accent} minimizeBehavior="onScrollDown" sidebarAdaptable>
-  <NativeTabs.BottomAccessory>
-    <Accessory />
-  </NativeTabs.BottomAccessory>
-  <NativeTabs.Trigger name="(agents)">…</NativeTabs.Trigger>
-  <NativeTabs.Trigger name="(projects)">…</NativeTabs.Trigger>
-  <NativeTabs.Trigger name="(settings)">…</NativeTabs.Trigger>
-</NativeTabs>
-```
+## 16.8 Spikes
 
-- The accessory renders only on iOS 26; UIKit gives it the glass capsule, so the
-  content draws no background of its own. `NativeTabs.BottomAccessory.usePlacement()`
-  returns `"regular"` (tab bar expanded) or `"inline"` (minimised, the accessory sits
-  beside the tab bar):
-  - regular: left, `plus` + "New session" (row type 15/500); right, the braille
-    spinner in `accent` + "N working" (13 pt), or "Nothing running" (13 pt α .45).
-  - inline: only the spinner and the count.
-- Tapping "New session" pushes `/new`. Tapping the count switches to Agents.
-- Before iOS 26 there is no accessory; the ＋ stays in each navigation bar.
-- Tab icons stay SF Symbols with `default` and `selected` variants. The badge stays.
-
-### 16.4.2 Tab screens: nested stacks, large titles, search
-
-Route groups keep every URL as it is (`/`, `/projects`, `/settings`):
-
-```
-src/app/(tabs)/_layout.tsx                 NativeTabs, triggers (agents) (projects) (settings)
-src/app/(tabs)/(agents)/_layout.tsx        <Stack>
-src/app/(tabs)/(agents)/index.tsx          "/"           Agents
-src/app/(tabs)/(projects)/_layout.tsx      <Stack>
-src/app/(tabs)/(projects)/projects.tsx     "/projects"
-src/app/(tabs)/(settings)/_layout.tsx      <Stack>
-src/app/(tabs)/(settings)/settings.tsx     "/settings"
-src/app/(tabs)/(settings)/settings/…       "/settings/machines", "/settings/machines/[env]", "/settings/appearance", "/settings/security", "/settings/about"
-```
-
-Each tab's stack shares the root stack's `screenOptions` (`contentStyle` base colour)
-through one `stackScreenOptions(t)` helper, and sets the pre-26 bar material there.
-A screen then declares its chrome as children, the Expo Router way:
-
-```tsx
-export default function Agents() {
-  return (
-    <>
-      <Stack.Screen>
-        <Stack.Screen.Title large>Agents</Stack.Screen.Title>
-      </Stack.Screen>
-      <Stack.Toolbar placement="right">
-        <Stack.Toolbar.Button icon="plus" accessibilityLabel="New session" onPress={() => router.push("/new")} />
-      </Stack.Toolbar>
-      <SectionList contentInsetAdjustmentBehavior="automatic" … />
-    </>
-  );
-}
-```
-
-The `options` form (`headerLargeTitle`, `headerSearchBarOptions`) is the fallback if
-a child component misbehaves; both are in the installed types.
-
-- **Agents.** Large title "Agents"; `plus` at right. The "Updating…" line and the host
-  notices stay as `NoticeBar`s under the bar. Sections and cards unchanged. The list
-  uses `contentInsetAdjustmentBehavior="automatic"` so it scrolls under the large
-  title and the tab bar.
-- **Projects.** Large title "Projects"; `Stack.SearchBar placeholder="Search projects..."
-  hideWhenScrolling` drives `query`; `plus` opens the existing action sheet. The
-  machine chips from 11 §11.12 (All, then one per machine) can wait.
-- **Settings.** Large title "Settings"; no search.
-- The JS `Title` component and the `SafeAreaView edges={["top"]}` wrappers go away on
-  these three screens.
-- Tapping the selected tab again scrolls its list to the top and pops its stack. Both
-  are `NativeTabs` defaults.
-
-### 16.4.3 Session screen
-
-- **Header.** The custom title view (title 17/600 over the 12 pt subline) stays; it is
-  the right shape for "title + model · machine" and renders fine in a glass bar. On
-  iOS 26 the header becomes `Stack.Header transparent` and the transcript gets
-  `topInset={useHeaderHeight()}` (from `expo-router/react-navigation`) so rows scroll
-  under the glass. Before iOS 26 the header stays opaque and `topInset` stays 0.
-- **The ⋯ menu** keeps `Stack.Toolbar.Menu` and grows to the 11 §11.15 list as the
-  host allows: Session info (opens the info form sheet), Explorer, Changes, Rename,
-  Pin or Unpin (`isOn`), Archive, Mute notifications (`isOn`), Compact context, a
-  "Copy session ID" submenu (nested `Stack.Toolbar.Menu`), then Delete with
-  `destructive`. Items the host can't do are `hidden`, as today.
-- **Composer.** The box becomes a `Surface` (§16.4.11): `GlassView` on iOS 26 with no
-  tint, blur 8 before, opaque under Reduce Transparency; MonoCode's `r.md` radius, the
-  α .10 border and α .20 focus border on top. Chips, the top bar and the send button
-  are unchanged.
-- **Keyboard.** The composer sits in a `KeyboardStickyView` from
-  `react-native-keyboard-controller`, so it tracks the keyboard frame by frame and
-  follows interactive dismissal (the transcript already sets
-  `keyboardDismissMode = .interactive`). The transcript's bottom inset follows the
-  keyboard natively: `MonoTranscriptView` observes
-  `UIResponder.keyboardWillChangeFrameNotification` and animates `contentInset.bottom`
-  with the notification's duration and curve. No JS per frame. The `insets.top + 44`
-  offset goes away.
-- **Jump to latest.** A 32 pt interactive `Surface` square with `chevron.down`,
-  centred 12 pt above the composer, shown when `onAtBottomChange` reports `false`;
-  tapping calls `scrollToBottom(true)`. With an undecided approval below the fold it
-  widens to the amber-dotted "Waiting for approval" pill (M6). Entrance and exit are
-  `ease.pop` 170 ms on the UI thread.
-- **Question form.** The inline form stays. The "tall" case opens
-  `/m/[env]/s/[sessionId]/question` as a form sheet (`sheetAllowedDetents: [0.6, 1]`,
-  grabber) with the same content.
-- **Tool and attachment sheets.** Keep. The tool sheet adds
-  `sheetLargestUndimmedDetentIndex: 0`, so at half height the transcript behind it is
-  still scrollable, the Messages pattern. Each gets a native header with the title and
-  a `xmark` close button (`Stack.Toolbar placement="right"`), because iOS 26 sheets
-  have no implicit close affordance besides the grabber.
-
-### 16.4.4 Pickers and other sheets
-
-Every picker becomes a form sheet route under `src/app/sheets/`, and the state it edits
-moves into a small Zustand store (`src/compose/sheetStore.ts`) keyed by `draftKey`:
-
-| Route | Detents | Content |
-|---|---|---|
-| `/sheets/model?draftKey=` | `[0.5, 1]`, initial 0 | The model's settings rows, then "Model" → the model list with `Stack.SearchBar placeholder="Search models"` and the provider strip |
-| `/sheets/access?draftKey=` | `fitToContents` | The four access rows; Full access confirms with the existing alert (D16) |
-| `/sheets/add?draftKey=` | `fitToContents` | Camera, Photo library, Plan mode, Draft |
-| `/sheets/place?draftKey=` | `[0.6, 1]` | Machines, projects, "Open folder on a machine…" |
-| `/sheets/workspace?draftKey=` | `fitToContents` | Current checkout, worktrees, New worktree |
-| `/sheets/branch?draftKey=` | `[0.6, 1]` | Branches with `Stack.SearchBar` |
-| `/m/[env]/s/[sessionId]/info` | `[0.6, 1]` | Session info (11 §11.15) |
-
-- Each has `sheetGrabberVisible`, a native header with the sheet's title and an
-  `xmark` close button. The custom uppercase "MODEL · Done" header goes away.
-- Rows stay `SheetRow`, `SheetSwitch` and `SheetCaption` (MonoCode content).
-- Selection haptic (`Haptics.selectionAsync()`) on every pick.
-- `ui/sheet.tsx`'s `Sheet` (the RN `Modal`) is deleted once the last caller moves.
-- **Fallback.** If route-based sheets prove awkward for the composer's per-instance
-  state, `@expo/ui`'s SwiftUI `BottomSheet` (`fitToContents`) can host the same React
-  children in place. Decide in spike S14.
-
-### 16.4.5 Cards: context menus with preview, swipe actions
-
-**Session cards** (Agents, Project) wrap in a `Link`:
-
-```tsx
-<Link href={{ pathname: "/m/[env]/s/[sessionId]", params }} asChild>
-  <Link.Trigger>
-    <SessionCard … />
-  </Link.Trigger>
-  <Link.Preview />
-  <Link.Menu>
-    <Link.MenuAction title="Pin" icon="pin" isOn={card.pinned} onPress={…} />
-    <Link.MenuAction title="Rename" icon="pencil" onPress={…} />
-    <Link.Menu title="Copy session ID" icon="doc.on.doc">
-      <Link.MenuAction title="Harness session ID" onPress={…} />
-      <Link.MenuAction title="MonoCode session ID" onPress={…} />
-    </Link.Menu>
-    <Link.MenuAction title="Mute notifications" icon="bell.slash" isOn={muted} onPress={…} />
-    <Link.MenuAction title="Archive" icon="archivebox" onPress={…} />
-    <Link.MenuAction title="Delete" icon="trash" destructive disabled={running} onPress={confirmDelete} />
-  </Link.Menu>
-</Link>
-```
-
-- `Link.Preview` with no children renders the destination route itself, which opens
-  the session window (sync, native transcript) for the peek. Spike S15 measures that
-  on the simulator with a 1,000-turn session. If it is too heavy, the preview gets
-  explicit children: the card's title, the last assistant line and the status, in a
-  fixed 320 × 200 pt MonoCode card.
-- Items that need host methods the baseline lacks (Rename, Archive, Delete, Mute) are
-  listed with `hidden` until their commands exist; the menu ships with Pin, Copy
-  session ID and the hidden flags.
-- **Swipe actions** through `ReanimatedSwipeable`: left reveals Archive (fill
-  `status.danger` α .20, label `red-300`); right reveals Pin or Unpin and Mark seen
-  (fill `sel.strong`). A light impact fires when the action threshold is crossed.
-  FlashList recycling and the swipeable are validated in S15 too.
-- **Project rows** get `Link.Menu` without a preview: Pin or Unpin (`isOn`), New
-  session, Copy path. The long-press action sheet goes away.
-
-### 16.4.6 Project screen, Explorer, Changes
-
-- **Header.** Title view unchanged. Right side: `plus` and a filter
-  `Stack.Toolbar.Menu icon="line.3.horizontal.decrease"` with the 11 §11.14 filter
-  items as `isOn` actions in `inline` groups: Archived; Status (Working, Needs
-  approval, Done); Time (All time, Today, Last 7 days, Last 30 days); Provider; Clear
-  filters. The `ToggleChip` goes away. Only Archived is wired at the baseline; the
-  rest are `hidden` until `sessions.page` takes those filters.
-- **Search.** "Search conversations..." moves into the bar as `Stack.SearchBar` with
-  `hideWhenScrolling`, shown only while the Sessions segment is active.
-- **Segmented control.** Stays MonoCode's JS control (identity). Selection haptic
-  added. A native `UISegmentedControl` in the title (through `@expo/ui` `Picker
-  variant="segmented"` inside a `Host`) is a later option, not planned.
-- **Explorer.** The segment shows the root listing. Tapping a folder pushes
-  `/m/[env]/explorer?path=…` (the route exists) with the folder name as the title and
-  the parent's name on the back button (`headerBackButtonDisplayMode: "default"`).
-  Breadcrumbs go away; the back stack is the breadcrumb. "Go to File" becomes the
-  bar's `Stack.SearchBar` on both the segment and the pushed screens. Pull to refresh
-  stays (native `UIRefreshControl` through FlashList).
-- **Changes.** Unchanged, except the per-row action sheet keeps `ActionSheetIOS`
-  (stage, unstage, open) and the row gets a `Link.Menu` later if wanted. The commit
-  chevron stays.
-
-### 16.4.7 File and diff viewers
-
-- The JS `Toolbar` under the header is replaced by `Stack.Toolbar` with the default
-  bottom placement (a glass bar on iOS 26, a translucent toolbar before):
-  - **File:** a `Stack.Toolbar.Menu icon="textformat"` with `isOn` items Wrap and
-    Preview (Preview hidden for non-Markdown), a `Spacer`, then
-    `Stack.Toolbar.Button icon="magnifyingglass"` that opens Find.
-  - **Diff:** `chevron.left` Prev and `chevron.right` Next buttons, a `Spacer`, and
-    the Wrap menu.
-- **Find** becomes `Stack.SearchBar placeholder="Find in file" placement="inline"`;
-  the "n of m" counter and the previous and next arrows become `Stack.Toolbar.Button`s
-  that appear while the search bar is active. The custom find row goes away.
-- **Share.** `square.and.arrow.up` at the right of the header shares the file text or
-  the diff as text through `Share.share` (no new dependency).
-- `ui/toolbar.tsx` keeps `HeaderTitle` and loses `Toolbar` and `ToolButton`.
-
-### 16.4.8 Settings and machine details
-
-- Large title "Settings", then MonoCode `Group` cards (11 §11.21) as a grouped list
-  that pushes pages inside the Settings stack:
-  - **App:** Machines, Appearance, Security, Privacy.
-  - **Agents:** Chat, Notifications.
-  - **About:** Version, Licences, Diagnostics, Demo.
-- Each page: inline title, page heading (22/600) and description, `Group` cards,
-  `Row`s, native `Switch`. The current single-screen cards become the Machines page.
-- **Machine details** (`/settings/machines/[env]`): the 11 §11.21 groups. Remove keeps
-  the native alert.
-- Rows that open a choice (Lock after, App lock) use a `Stack.Toolbar.Menu` style
-  pull-down on the row value, or a `fitToContents` form sheet when the list has
-  descriptions.
-- SwiftUI `Form` or inset-grouped `List` from `@expo/ui` is not used: it would replace
-  MonoCode's `Group` card with Apple's, which 11 §11.1 rule 2 forbids.
-
-### 16.4.9 Pairing and onboarding
-
-- The modal and the stage machine stay. Each stage sets its own `Stack.Screen`
-  title ("Pair a computer", "Scan code", "Connect to {host}?", "Connecting…",
-  "Confirm", "Paired") and a Cancel `Stack.Toolbar.Button variant="plain"` at left.
-- The scanner stage sets `Stack.Header transparent` so the camera fills the sheet.
-- The "✓" text becomes `SymbolView name="checkmark.circle.fill"` with
-  `animationSpec={{ effect: { type: "bounce" } }}`, tinted `status.done`, next to the
-  existing success haptic. The "Connecting…" ghost button becomes a `ProgressView`-like
-  `ActivityIndicator` row with the copy from 11 §11.11.
-- The Welcome empty state on Agents is unchanged.
-
-### 16.4.10 Floating surfaces: approval banner, toast
-
-- **Approval banner.** The card becomes a `Surface` (glass on iOS 26, blur 24 before)
-  with the dashed α .20 border and `shadow-xl`. The pan gesture moves to
-  `react-native-gesture-handler` `Gesture.Pan()` with Reanimated shared values, so the
-  drag and the spring-back run on the UI thread. Entrance stays translateY −8, scale
-  .98, 180 ms `ease.pop`; under Reduce Motion it is a 120 ms fade (M9).
-- **Toast.** The pill becomes a `Surface` with blur 12. Nothing else changes.
-
-### 16.4.11 Materials, motion, accessibility, haptics
-
-- **`Surface`** (`src/ui/Surface.tsx`): props `kind: "composer" | "banner" | "pill" |
-  "button"`, `interactive`. It picks the material from `useMaterial()`:
-  `"glass"` when `isLiquidGlassAvailable()` and Reduce Transparency is off;
-  `"blur"` on iOS before 26 with Reduce Transparency off; `"opaque"` otherwise and on
-  Android. Blur intensities and fills come from 11 §11.4. The component owns the
-  radius, border and shadow so callers never stack their own backgrounds on glass.
-- **`useMaterial()` and `useReducedMotion()`** read `AccessibilityInfo`
-  (`isReduceTransparencyEnabled`, `isReduceMotionEnabled`) once and subscribe to
-  their change events; Reanimated's `useReducedMotion` is used for worklets.
-- **Dynamic Type.** `useTokens()` gains `t.type`, the `TYPE` table scaled by
-  `Math.min(useWindowDimensions().fontScale, 1.6)`. `sessionCardHeight`, the Projects
-  row heights and the Explorer and Changes row heights take `t.type` instead of
-  `TYPE`; the transcript gets `transcriptTheme(t, scale)` with the same factor.
-- **Motion.** Everything new animates with Reanimated on the UI thread using the
-  `MOTION` tokens; no `Animated` or `PanResponder` remains after N4.
-- **Haptics map** (`src/ui/haptics.ts`): selection on segmented and picker changes;
-  light impact on chip toggles and swipe thresholds; medium impact on Allow, Deny and
-  Build (exists); success on paired and on commit; warning on a failed send, failed
-  commit or pairing failure. Nothing on scroll or streaming.
-
-### 16.4.12 Icons
-
-- All chrome icons are SF Symbol names typed through `expo-symbols`'s `SFSymbol`
-  (M12). The `Icon` component stays the one in-content wrapper.
-- Harness marks (Claude, Codex, …) are drawn as `xcasset` template images when they
-  appear in native chrome (a menu or toolbar), and as SVG elsewhere.
-- Hugeicons is removed from 12 §12.1 for iOS. Android can still choose it later.
-
-## 16.5 Work plan
-
-Seven slices, each small enough for one orchestration card, in dependency order.
-Every slice ends with `tsc`, `expo lint`, the app's vitest suites, and a run on the
-iPhone 17 simulator (iOS 26) plus the iPhone 13 (iOS 18.7) for the pre-26 tier.
-Workers never run the simulator themselves; the owner does.
-
-| Slice | Scope | Touches | New native deps | Size |
-|---|---|---|---|---|
-| **N1 Native headers and tab bar** | Route groups and per-tab stacks (§16.4.2); large titles; `plus` toolbar buttons; `Stack.SearchBar` on Projects; list insets; `minimizeBehavior`; the iOS 26 bottom accessory; `sidebarAdaptable`; delete `Title` | `src/app/(tabs)/**`, `src/app/_layout.tsx`, `ui/components.tsx`, `pair.tsx` (`dismissTo("/")` unchanged) | None | M |
-| **N2 Sheets and menus** | Form sheet routes and `sheetStore` for every picker (§16.4.4); native sheet headers; the full session ⋯ menu; the Project filter menu; project row `Link.Menu`; Projects search in the bar; delete `ui/sheet.tsx`'s `Sheet` | `src/app/sheets/*`, `compose/*`, `new.tsx`, `(projects)/projects.tsx`, `m/[env]/p/[projectId].tsx`, `m/[env]/s/[sessionId].tsx` | None | L |
-| **N3 Cards** | `Link.Preview` + `Link.Menu` on session cards; `ReanimatedSwipeable` actions; haptics map | `ui/SessionCard.tsx`, both card lists, `ui/haptics.ts` | None | M |
-| **N4 Materials and floating surfaces** | `Surface`, `useMaterial`, `useReducedMotion`; composer glass; approval banner and toast on gesture-handler + Reanimated; jump to latest; pre-26 bar blur; Reduce Transparency fallbacks | `ui/Surface.tsx`, `ui/material.ts`, `compose/Composer.tsx`, `ui/ApprovalBanner.tsx`, `ui/toast.tsx`, session screen | None | M |
-| **N5 Keyboard** | `react-native-keyboard-controller`; sticky composer; Swift keyboard inset in `MonoTranscriptView`; `headerTransparent` + `topInset` on iOS 26; remove `KeyboardAvoidingView` offsets | `_layout.tsx` (provider), session and new screens, `modules/transcript/ios/MonoTranscriptView.swift` | **Yes**, new dev build | M |
-| **N6 Viewers and Explorer** | Bottom toolbars; Find as a search bar; Share; pushed folders; "Go to File" in the bar; delete `Toolbar` | `m/[env]/file.tsx`, `m/[env]/diff.tsx`, `m/[env]/explorer.tsx`, `workspace/ExplorerPane.tsx`, `ui/toolbar.tsx` | None | M |
-| **N7 Settings, pairing, Dynamic Type** | Settings pages and Machine details; pairing titles and symbol effect; `t.type` scaling through the row-height functions and the transcript | `(settings)/**`, `pair.tsx`, `ui/theme.ts`, `ui/SessionCard.tsx`, list rows | None | M |
-
-Acceptance, per slice:
-
-- **N1.** Agents, Projects and Settings show native large titles that collapse on
-  scroll; the lists scroll under the title and the tab bar; the Projects search bar
-  hides on scroll and filters; the tab bar minimises on scroll down on the iOS 26
-  simulator and shows "＋ New session · N working"; tapping a tab again scrolls to the
-  top; `/`, `/projects`, `/settings` and every deep link still resolve; the iPhone 13
-  shows classic translucent bars.
-- **N2.** Every picker opens as a native sheet with the stated detents and a grabber;
-  swiping down dismisses; the Access and Add sheets fit their contents; the session
-  ⋯ menu shows Delete in red and the submenu; no RN `Modal` remains in `src/`.
-- **N3.** Long-pressing a session card shows a preview and the menu; releasing on the
-  preview opens the session; swiping reveals the actions with the threshold haptic;
-  FlashList recycling leaves no stale swipe state after a scroll.
-- **N4.** On the iOS 26 simulator the composer, banner, toast and jump button are
-  glass with content legible through them; on the iPhone 13 they are blur; with
-  Reduce Transparency on they are opaque; no `Animated` or `PanResponder` import
-  remains.
-- **N5.** Opening the keyboard moves the composer and the transcript together without
-  a jump; dragging the transcript down dismisses the keyboard with the composer
-  following the finger; the transcript's last row is never hidden under the composer;
-  the S11 benchmark numbers are unchanged.
-- **N6.** The file and diff toolbars are native bottom bars; Find uses the bar's
-  search field with a working counter; folders push with the parent name on the back
-  button; the back swipe walks up the tree.
-- **N7.** Settings pushes pages; Machine details shows the 11 §11.21 groups; the
-  pairing modal shows a title per stage and a bouncing check on success; at the
-  largest accessibility text size cards grow instead of truncating.
-
-## 16.6 Spikes and risks
+These extend [14 §14.2](14-roadmap.md#142-m0-spikes).
 
 | # | Question | How to answer it | If it fails |
 |---|---|---|---|
-| S14 | Can the composer's per-instance state live in a store cleanly enough for route-based sheets, or is `@expo/ui` `BottomSheet` the better host? | Build the Access sheet both ways in N2's first day | Use `BottomSheet` for composer pickers, routes for the rest |
-| S15 | `Link.Preview` rendering the session route: memory and open time with a 1,000-turn session; `ReanimatedSwipeable` inside FlashList recycling | Simulator run with the transcript lab fixture, `Documents/benchmarks/latest.json` unchanged | Preview with explicit light children; swipeable keyed by row id with state reset on recycle |
-| S16 | `react-native-keyboard-controller` with Expo Router form sheets and the native transcript's own inset animation: no double offset, no fight during interactive dismissal | N5 on both tiers | Keep `KeyboardAvoidingView` with `useHeaderHeight()` for the offset and accept no interactive follow |
-| S17 | The bottom accessory's glass capsule is provided by UIKit, and `usePlacement()` flips to `inline` when minimised | N1 on the iOS 26 simulator | Render the accessory in a `GlassView` of its own |
+| S11 | Carried over: 0 hitches flinging 1,000 turns while streaming on the iPhone 13; tail re-layout ≤ 1 ms; streaming equals final | R0, Transcript Lab on the device | As in 14 §14.2: reduce the animated row kinds, or move layout to a shared core |
+| S18 | Cache encryption: GRDB with SQLCipher through SwiftPM (build size, open time, migration speed), against plain SQLite under Data Protection `completeUntilFirstUserAuthentication` | R2, day one | Data Protection only. 03 §3.9 and 12 §12.6 are amended |
+| S19 | A SwiftUI `List` of MonoCode cards with swipe actions and context menus: 0 hitches flinging 500 cards on the iPhone 13 | R2 | A `UICollectionView` list layout in a representable, with the same cards hosted by `UIHostingConfiguration` |
+| S20 | Keyboard: does the composer in `safeAreaBar` follow interactive dismissal frame by frame, with the UIKit transcript's bottom inset following, with no double offset? | R3, day one | A UIKit session controller: transcript plus a hosted composer pinned to `keyboardLayoutGuide` |
+| S21 | Highlighting: tree-sitter (SwiftTreeSitter with the language grammars) against highlight.js in JavaScriptCore. A 400-line TypeScript file within 50 ms on the iPhone 13, with the desktop's `github-dark` and `github-light` colours | R4, day one | highlight.js in JavaScriptCore, which matches the Expo app's output |
+| S22 | Can the Cloudflare Worker send to APNs directly (HTTP/2, ES256 token auth)? This replaces S5's Expo Push question | Before R6, with S5 | A small APNs forwarder outside Workers, called by the gateway |
+| S23 | `URLSessionWebSocketTask` to `ws://` LAN, Tailscale `100.x` and `*.ts.net` addresses with `NSAllowsLocalNetworking`. When does the local network prompt fire? This takes over S4 for Swift | R1 | Network.framework `NWConnection` with `NWProtocolWebSocket` |
 
-Other risks:
+Spikes closed by D19: S1 (Hermes performance), S3 (Android background), S6 (Expo
+workspaces), S9 (Hugeicons in React Native), S10 (Android glass), S12 (React Native
+chrome), S13 (JS thread budget). Rev 1's S14 to S17 are withdrawn.
 
-- **Experimental APIs.** `Stack.Toolbar` is marked experimental; `NativeTabs` is
-  imported from `unstable-native-tabs`; `Link.Preview` is new. Pin `expo-router` at
-  `57.0.24` and wrap each in one adapter (`ui/chrome/*`) so churn stays in one place.
-- **Glass legibility over the dark base.** `GlassView` over `#171717` content can
-  read as muddy. Test `colorScheme="dark"` and the `regular` versus `clear` styles on
-  real screenshots before N4 lands; keep the opaque fallback one flag away.
-- **No iOS 26 device.** The iPhone 13 cannot show Liquid Glass, so every glass
-  decision is validated on the simulator only until a 26+ device exists. Record it in
-  13 §13.2's QA matrix.
-- **Route restructure.** N1 moves files; typed routes regenerate. Deep links and
-  `router.dismissTo("/")` must be rechecked, and the demo host's pushes too.
-- **Spec drift.** Each slice updates the documents in §16.7 in the same change.
+## 16.9 Risks
 
-## 16.7 Spec changes to make as slices land
+| Risk | Mitigation |
+|---|---|
+| The rewrite redoes work that is already built (M1 to M6 in the Expo app) | Only the client is rewritten. The ported tests are the acceptance criteria. The Expo app answers behaviour questions. R0 starts with the riskiest piece that carries over |
+| The Swift client drifts from the TypeScript protocol | §16.5: vectors, golden fixtures regenerated in CI, the interop test, tolerant decoding |
+| Two implementations of the channel crypto | Standard primitives (CryptoKit). Both implementations pass the same vectors. The external security review before v1 covers both ([13 §13.9](13-testing-and-release.md#139-release-readiness-checklist-v1)) |
+| SwiftUI misses a budget (long lists, keyboard) | Spikes S19 and S20, each with a UIKit fallback named up front |
+| Liquid Glass reads as muddy over the dark base | The opaque sibling is one flag away (§16.6.10). Legibility is checked on R2 screenshots |
+| Only one physical device, and it needs iOS 26 | The iPhone 13 updates to iOS 26 before R0's device run. 120 Hz and small-screen checks wait for more devices ([13 §13.4](13-testing-and-release.md#134-manual-qa-matrix)) |
+| Upstream doesn't take a Swift app | Host, desktop and package changes stay upstream-shaped (D13). The app is self-contained in `apps/ios` and runs on the personal track meanwhile |
+| Two apps in one repository until R4 | `apps/mobile` is frozen and outside the root workspaces. Its CI job is removed at R4 |
 
-- [11 §11.1](11-design-and-ux.md#111-design-parity-rules): add M12 to M16 to the
-  deviations table; amend the "Context menus → action sheets" row.
-- [11 §11.7](11-design-and-ux.md#117-iconography-brand-and-mascots): SF Symbols on iOS.
-- [11 §11.10](11-design-and-ux.md#1110-navigation): route groups per tab; pushes
-  cover the tab bar; sheet routes under `/sheets/*`.
-- [11 §11.14](11-design-and-ux.md#1114-project-screen-and-session-list) and
-  [§11.20](11-design-and-ux.md#1120-explorer-and-changes): filter menu, pushed
-  folders, bar search.
-- [12 §12.1](12-mobile-engineering.md#121-stack): keyboard-controller added; Hugeicons
-  and the "maintained library or Expo UI" line resolved to Expo Router menus.
-- [14 §14.1](14-roadmap.md#141-milestones): N1 to N7 as M7's content; S14 to S17 in
-  [§14.2](14-roadmap.md#142-m0-spikes); the "As built" table after each slice.
-- [15 §15.2](15-performance.md#152-architecture-by-surface): no change in intent;
-  note the Swift keyboard inset binding as built.
+## 16.10 Spec changes in this revision
 
-## 16.8 Decisions for the owner
+This revision updates the other documents to match D19:
 
-1. **M12, SF Symbols** instead of Hugeicons on iOS. Recommended: yes.
-2. **M16, pushed screens cover the tab bar** for now. Recommended: yes; revisit
-   shared route groups after N7 if the Project screen wants the tab bar.
-3. **Session card preview** (`Link.Preview` of the real session). Recommended: yes if
-   S15 passes; otherwise a light custom preview.
-4. **Route-based sheets** versus `@expo/ui` `BottomSheet` for the composer pickers.
-   Recommended: routes, decided by S14.
-5. **Add `react-native-keyboard-controller`** (a native dependency, so a new dev
-   build). Recommended: yes; it is already in 12 §12.1.
-6. **Settings stays on MonoCode `Group` cards**, not SwiftUI `Form`. Recommended: yes.
+- [README](README.md): rev 4 status, D19, D1 and D17 marked superseded, the summary,
+  and the reading order.
+- [01](01-product.md): Android moves to the non-goals for v1. Release scope is iOS.
+- [02](02-architecture.md): the component diagram, what changes where, and the
+  repository layout (`apps/ios`).
+- [03](03-identity-and-crypto.md): the Keychain, the CryptoKit implementation, push
+  tickets with an APNs token, where secrets live.
+- [04](04-pairing.md): the VisionKit scanner.
+- [05](05-connectivity.md): Swift transports, `NWPathMonitor`, background work.
+- [06](06-channel-protocol.md): two client implementations, kept in step by §16.5.
+- [07](07-relay-and-push-service.md): direct APNs delivery, the gateway secrets.
+- [08](08-notifications.md): the flow without Expo, the Swift extension, Android
+  deferred.
+- [11](11-design-and-ux.md): deviations M12 to M16, SF Symbols, materials on iOS 26,
+  navigation.
+- [12](12-mobile-engineering.md): rewritten as iOS engineering.
+- [13](13-testing-and-release.md): Swift tests, the build pipeline without EAS, the
+  publisher xcconfig, iOS 26 in the QA matrix.
+- [14](14-roadmap.md): R0 to R8, spikes S18 to S23, the closed spikes, risks.
+- [15](15-performance.md): fully native; the Swift streaming path; reference devices.
