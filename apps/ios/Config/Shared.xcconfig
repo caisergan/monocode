@@ -1,0 +1,16 @@
+// Settings shared by every track (16 §16.2). Publisher values live in the
+// track files (Personal.xcconfig, later Official.xcconfig), 13 §13.5.
+
+IPHONEOS_DEPLOYMENT_TARGET = 26.0
+SDKROOT = iphoneos
+TARGETED_DEVICE_FAMILY = 1
+
+SWIFT_VERSION = 6.0
+SWIFT_STRICT_CONCURRENCY = complete
+
+MARKETING_VERSION = 0.1.0
+CURRENT_PROJECT_VERSION = 1
+
+INFOPLIST_FILE = MonoCode/Resources/Info.plist
+INFOPLIST_KEY_CFBundleDisplayName = $(MC_APP_NAME)
+INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait

@@ -38,7 +38,7 @@ The detail is in [16 §16.7](16-ios-native-design.md#167-milestones).
 
 | Milestone | Replaces the phone scope of | Status |
 |---|---|---|
-| R0 Skeleton and transcript | M0 (app skeleton, design foundation, performance harness), T (iOS), S11 | Next |
+| R0 Skeleton and transcript | M0 (app skeleton, design foundation, performance harness), T (iOS), S11 | In progress (As built, R0, below) |
 | R1 Channel and pairing | M1 | |
 | R2 Read path | M2 | |
 | R3 Write path | M3 | |
@@ -152,6 +152,15 @@ on the iPhone 13.
   `@monocode/core`, so the app can drop its copies.
 - Host contract gaps: no question-in-progress signal, no host clock offset, and no
   context usage on the wire.
+
+### As built, R0 (2026-10-06, branch `feat/ios-native-design`)
+
+The Swift app's R0, step by step. Screenshots from the iPhone 17 simulator are in
+[`screenshots/r0`](screenshots/r0).
+
+| Item | Status |
+|---|---|
+| Xcode project | `apps/ios/MonoCode.xcodeproj`, created with Xcode 27 (the iOS App template), not written by hand. One app target, MonoCode, whose folder is a synchronized group. iOS 26.0 minimum, iPhone only (`TARGETED_DEVICE_FAMILY = 1`; iPad is R7), portrait, Swift 6 language mode with complete strict concurrency, and Xcode's default main-actor isolation for the app target. `Config/Shared.xcconfig` holds the shared settings and `Config/Personal.xcconfig` the personal track (`com.monocode.mobile.dev`, team `8854B8S8X2`, "MonoCode Dev", scheme `monocode-dev`); `Official.xcconfig` is not written yet. `MonoCode/Resources/Info.plist` adds the URL type and the `MCTrack` and `MCURLScheme` keys, and is excluded from the resources phase. Builds and runs on the iPhone 17 simulator (iOS 27.0) with one empty screen |
 
 ## 14.3 Risks
 

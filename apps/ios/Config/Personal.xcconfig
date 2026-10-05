@@ -1,0 +1,10 @@
+// The personal track: MonoCode Dev, built under the maintainer's team
+// (13 §13.5). Values reach the code through Info.plist keys.
+
+#include "Shared.xcconfig"
+
+MC_TRACK = personal
+MC_APP_NAME = MonoCode Dev
+PRODUCT_BUNDLE_IDENTIFIER = com.monocode.mobile.dev
+DEVELOPMENT_TEAM = 8854B8S8X2
+MC_URL_SCHEME = monocode-dev
