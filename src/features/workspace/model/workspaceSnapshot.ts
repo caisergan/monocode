@@ -8,6 +8,7 @@ import {
   isTerminalTab,
   leafIds,
   newTab,
+  type BrowserTabSource,
   type CommitTabSource,
   type EditorPane,
   type FilePaneTab,
@@ -17,6 +18,7 @@ import {
   type WorkspaceTab,
 } from "./layout";
 import type { ReleaseNotesTabSource } from "../../../app/model/releaseNotes";
+import { normalizeBrowserUrl } from "../../browser/model/browserUrl";
 import {
   clampDockSize,
   isDockSide,
@@ -566,6 +568,22 @@ function sanitizeFile(raw: unknown): FilePaneTab | null {
   const commit = sanitizeCommit(value.commit);
   const hasSessionChanges = "sessionChanges" in value;
   const sessionChanges = sanitizeSessionChanges(value.sessionChanges);
+  const hasBrowser = "browser" in value;
+  const browser = sanitizeBrowser(value.browser);
+  if (hasBrowser && !browser) return null;
+  if (
+    browser &&
+    (value.plan != null ||
+      "releaseNotes" in value ||
+      "commit" in value ||
+      "sessionChanges" in value ||
+      "remoteFile" in value ||
+      value.review === true ||
+      value.changes === true ||
+      value.terminal === true)
+  ) {
+    return null;
+  }
   const hasRemoteFile = "remoteFile" in value;
   const remoteFile = sanitizeRemoteFile(value.remoteFile);
   if (hasReleaseNotes && !releaseNotes) return null;
@@ -626,6 +644,7 @@ function sanitizeFile(raw: unknown): FilePaneTab | null {
       : {}),
     ...(plan ? { plan } : {}),
     ...(releaseNotes ? { releaseNotes } : {}),
+    ...(browser ? { browser } : {}),
     ...(commit ? { commit } : {}),
     ...(sessionChanges ? { sessionChanges, review: true } : {}),
     ...(value.review === true ? { review: true } : {}),
@@ -680,6 +699,15 @@ function sanitizeCommit(raw: unknown): CommitTabSource | undefined {
     shortSha: value.shortSha.trim(),
     subject: value.subject,
   };
+}
+
+/** Only addresses the frame can load; a stored `javascript:` URL never comes back. */
+function sanitizeBrowser(raw: unknown): BrowserTabSource | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const url = (raw as Record<string, unknown>).url;
+  if (typeof url !== "string") return undefined;
+  const normalized = normalizeBrowserUrl(url);
+  return normalized ? { url: normalized } : undefined;
 }
 
 function sanitizeReleaseNotes(raw: unknown): ReleaseNotesTabSource | undefined {

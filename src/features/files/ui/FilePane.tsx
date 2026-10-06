@@ -8,6 +8,7 @@ import {
 import { SurfaceTabs } from "../../workspace/ui/SurfaceTabs";
 import {
   isAgentTab,
+  isBrowserTab,
   isChangesTab,
   isCommitTab,
   isPlanTab,
@@ -34,6 +35,7 @@ import { MarkdownPreview } from "../../sessions/ui/AgentMarkdown";
 import { BinaryFileView } from "./BinaryFileView";
 import { ReleaseNotesSurface } from "../../../app/ui/ReleaseNotesSurface";
 import { isRemoteProjectPath } from "../../projects/model/recents";
+import { BrowserSurface } from "../../browser/ui/BrowserSurface";
 
 const CommitDiff = lazySurface(async () => {
   const module = await import("../../source-control/ui/CommitDiff");
@@ -82,6 +84,8 @@ type Props = {
   editorNavigation?: EditorNavigationTarget | null;
   onPaneDragStart?: (event: ReactPointerEvent<HTMLElement>) => void;
   onTerminalMetaChange?: (fileId: string, patch: TerminalMetaPatch) => void;
+  onBrowserNavigate?: (fileId: string, url: string) => void;
+  onOpenBrowser?: (url: string, cwd?: string) => void;
 };
 
 function FilePaneComponent({
@@ -105,6 +109,8 @@ function FilePaneComponent({
   editorNavigation,
   onPaneDragStart,
   onTerminalMetaChange,
+  onBrowserNavigate,
+  onOpenBrowser,
 }: Props) {
   const diffViewer = useSyncExternalStore(
     subscribeDiffViewer,
@@ -198,6 +204,12 @@ function FilePaneComponent({
                   onUpdatePlan={onUpdatePlan}
                   onBuildPlan={onBuildPlan}
                 />
+              ) : isBrowserTab(file) ? (
+                <BrowserSurface
+                  url={file.browser.url}
+                  cwd={file.cwd}
+                  onNavigate={(url) => onBrowserNavigate?.(file.id, url)}
+                />
               ) : isReleaseNotesTab(file) ? (
                 <ReleaseNotesSurface source={file.releaseNotes} />
               ) : isTerminalTab(file) ? (
@@ -230,6 +242,7 @@ function FilePaneComponent({
                     onErrorCountChange(file.id, count)
                   }
                   onOpenFile={onOpenFile}
+                  onOpenInBrowser={onOpenBrowser}
                 />
               )}
             </div>
@@ -260,7 +273,9 @@ export const FilePane = memo(FilePaneComponent, (previous, next) => {
     previous.onBuildPlan !== next.onBuildPlan ||
     previous.editorNavigation !== next.editorNavigation ||
     Boolean(previous.onPaneDragStart) !== Boolean(next.onPaneDragStart) ||
-    previous.onTerminalMetaChange !== next.onTerminalMetaChange
+    previous.onTerminalMetaChange !== next.onTerminalMetaChange ||
+    previous.onBrowserNavigate !== next.onBrowserNavigate ||
+    previous.onOpenBrowser !== next.onOpenBrowser
   ) {
     return false;
   }

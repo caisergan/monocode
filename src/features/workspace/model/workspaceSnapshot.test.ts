@@ -12,6 +12,7 @@ import {
   newChangesTab,
   newCommitTab,
   newFileTab,
+  newBrowserTab,
   newEditorWorkspaceTab,
   newReleaseNotesWorkspaceTab,
   newSessionChangesTab,
@@ -59,7 +60,9 @@ describe("project return snapshots", () => {
       path: "remote://env/repo/src/index.ts",
       cwd: project,
     });
-    expect(restored?.tabs[0].editorPanes[0].files[0].remoteFile).toBeUndefined();
+    expect(
+      restored?.tabs[0].editorPanes[0].files[0].remoteFile,
+    ).toBeUndefined();
     const malformed = JSON.parse(JSON.stringify(snapshot));
     malformed.tabs[0].editorPanes[0].files[0].remoteFile = { machineId: 42 };
     expect(parseWorkspaceSnapshot(malformed)).toBeNull();
@@ -381,6 +384,66 @@ describe("collectWorkspaceSnapshot", () => {
       shortSha: "abc1234",
       subject: "Fix the graph",
     });
+  });
+
+  it("round-trips a browser tab's address", () => {
+    const tab = newEditorWorkspaceTab(
+      newBrowserTab("http://localhost:5173/", "localhost:5173", "/tmp/a"),
+    );
+    const snapshot = collectWorkspaceSnapshot(
+      [tab],
+      [],
+      tab.id,
+      "/tmp/a",
+      new Map(),
+    );
+    const file = hydrateWorkspaceSnapshot(snapshot, new Map())?.tabs[0]
+      ?.editorPanes[0]?.files[0];
+
+    expect(file?.browser).toEqual({ url: "http://localhost:5173/" });
+    expect(file?.path).toBe("localhost:5173");
+  });
+
+  it.each([
+    { browser: { url: "javascript:alert(1)" } },
+    { browser: { url: "file:///etc/passwd" } },
+    { browser: { url: "" } },
+    { browser: { url: 5 } },
+    { browser: { url: "http://localhost:5173/" }, terminal: true },
+    { browser: { url: "http://localhost:5173/" }, review: true },
+  ])("drops a browser tab it can't safely reopen: %j", (descriptor) => {
+    const valid = { ...newTab("session-a"), id: "valid-tab" };
+    const paneId = "browser-pane";
+    const parsed = parseWorkspaceSnapshot({
+      tabs: [
+        valid,
+        {
+          kind: "session",
+          id: "browser-tab",
+          layout: leaf(paneId),
+          focusedId: paneId,
+          editorPanes: [
+            {
+              id: paneId,
+              activeFileId: "browser-file",
+              files: [
+                {
+                  id: "browser-file",
+                  path: "Browser",
+                  cwd: "/tmp/a",
+                  ...descriptor,
+                },
+              ],
+            },
+          ],
+          terminalPanes: [],
+        },
+      ],
+      sessions: [],
+      activeTabId: "browser-tab",
+      projectCwd: "/tmp/a",
+    });
+    expect(parsed?.tabs.map((tab) => tab.id)).toEqual(["valid-tab"]);
   });
 
   it("round-trips a release-note descriptor", () => {

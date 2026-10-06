@@ -1,5 +1,6 @@
 import {
   GitCompare,
+  Globe,
   GripVertical,
   Terminal,
   X,
@@ -14,6 +15,7 @@ import {
 } from "../../../platform/tauri/fs";
 import {
   isAgentTab,
+  isBrowserTab,
   isChangesTab,
   isCommitTab,
   isFilesystemTab,
@@ -128,6 +130,16 @@ export function surfaceTabPresentation(
       label: title,
       iconName: "CHANGELOG.md",
       tooltip: title,
+    };
+  }
+
+  if (isBrowserTab(file)) {
+    const name = file.path.trim() || "Browser";
+    return {
+      name,
+      label: name,
+      iconName: name,
+      tooltip: file.browser.url,
     };
   }
 
@@ -308,6 +320,7 @@ export function SurfaceTabs({
           const commit = isCommitTab(file);
           const review = isReviewTab(file) && !changes;
           const terminal = isTerminalTab(file);
+          const browser = isBrowserTab(file);
           const agent = isAgentTab(file) ? file.agent : null;
           const { label, iconName, tooltip } = surfaceTabPresentation(file);
           const tab = (
@@ -377,6 +390,8 @@ export function SurfaceTabs({
               >
                 {terminal ? (
                   <Terminal className="size-3.5 shrink-0" strokeWidth={1.75} />
+                ) : browser ? (
+                  <Globe className="size-3.5 shrink-0" strokeWidth={1.75} />
                 ) : agent ? (
                   <HarnessIcon
                     harness={agent.harness}
