@@ -413,7 +413,10 @@ enum RowLayouter {
       }
       let (line, _) = singleLine(spec.runs + spec.sub, theme: theme, width: width - x - gutter)
       let base = baseline(for: line, top: height, height: rowHeight)
-      // Chips in a single line: measure them from the line itself.
+      // Chips in a single line: measure them from the line itself. A file
+      // chip spans several runs (padding, icon, name), so touching runs of
+      // one chip join into one rectangle before it is filled.
+      var chips: [(CGRect, Int)] = []
       var icons: [Element] = []
       var fileRect: (CGRect, String)?
       for run in CTLineGetGlyphRuns(line) as! [CTRun] {
@@ -423,14 +426,21 @@ enum RowLayouter {
         let start = CTLineGetOffsetForStringIndex(line, range.location, nil)
         let end = CTLineGetOffsetForStringIndex(line, range.location + range.length, nil)
         let rect = CGRect(x: x + start, y: height + 4, width: end - start, height: rowHeight - 8)
-        elements.append(.fill(CGPath(roundedRect: rect, cornerWidth: 4, cornerHeight: 4, transform: nil),
-                              theme.color(chip == 2 ? "fileChip" : "chip")))
+        if let last = chips.indices.last, chips[last].1 == chip, abs(chips[last].0.maxX - rect.minX) < 0.5 {
+          chips[last].0 = chips[last].0.union(rect)
+        } else {
+          chips.append((rect, chip))
+        }
         if let icon = attributes[iconKey] as? String {
           icons.append(.icon(icon, CGRect(x: rect.minX + 1, y: rect.midY - iconSize / 2, width: iconSize, height: iconSize)))
         }
         if let file = attributes[fileKey] as? String {
           fileRect = (fileRect.map { $0.0.union(rect) } ?? rect, file)
         }
+      }
+      for (rect, chip) in chips {
+        elements.append(.fill(CGPath(roundedRect: rect, cornerWidth: 4, cornerHeight: 4, transform: nil),
+                              theme.color(chip == 2 ? "fileChip" : "chip")))
       }
       elements.append(.line(line, CGPoint(x: x, y: base)))
       elements.append(contentsOf: icons)

@@ -186,6 +186,9 @@ private let paragraph = "The session host keeps the channel open while the phone
       return nil
     }
     #expect(trailIcons == ["typescript"])
+    // Padding, icon and name are separate runs but one chip, filled once.
+    let trailFills = snapshot.layouts[1].elements.filter { if case .fill = $0 { true } else { false } }
+    #expect(trailFills.count == 1, "the trail chip split into \(trailFills.count) pieces")
     // The chip's hit comes before the row's, so a tap on it opens the file.
     #expect(snapshot.layouts[1].hits.first?.file == "session.ts")
     #expect(snapshot.layouts[1].hits.last?.action == "tool")
