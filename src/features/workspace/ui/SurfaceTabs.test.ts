@@ -131,6 +131,19 @@ describe("surfaceTabMenuItems", () => {
     }
   });
 
+  it("cannot reveal a file on a connected machine", () => {
+    const reveal = (path: string, cwd: string) =>
+      surfaceTabMenuItems(newFileTab(path, cwd)).find(
+        (item) => item.kind === "item" && item.id === "reveal",
+      );
+    expect(reveal("/repo/docs/report.html", "/repo")).toMatchObject({
+      disabled: false,
+    });
+    expect(
+      reveal("remote://env/repo/docs/report.html", "remote://env/repo"),
+    ).toMatchObject({ disabled: true });
+  });
+
   it("disables Close Others when there are no sibling tabs", () => {
     const items = surfaceTabMenuItems(
       newFileTab("/repo/src/app.ts", "/repo"),

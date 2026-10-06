@@ -477,8 +477,13 @@ export function revealPath(path: string): Promise<void> {
   return invoke<void>("reveal_path", { path });
 }
 
-export function openPathWithDefaultApp(path: string): Promise<void> {
-  return invoke<void>("open_path_with_default_app", { path });
+export async function openPathWithDefaultApp(path: string): Promise<void> {
+  if (!isRemotePath(path))
+    return invoke<void>("open_path_with_default_app", { path });
+  // A file on a connected machine opens from a local copy. The host already
+  // sends its bytes as base64, which passes straight through to that copy.
+  const data = await invoke<string>("read_binary_file", { path });
+  return invokeLocal<void>("open_remote_file_copy", { source: path, data });
 }
 
 export function homeDir(): Promise<string> {

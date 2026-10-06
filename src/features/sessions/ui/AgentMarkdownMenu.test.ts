@@ -2,7 +2,7 @@
 import { act, createElement, type ComponentProps } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { AgentMarkdown } from "./AgentMarkdown";
+import { AgentMarkdown, fileLinkMenuItems } from "./AgentMarkdown";
 
 const actions = vi.hoisted(() => ({
   copyText: vi.fn(async () => {}),
@@ -196,5 +196,20 @@ describe("AgentMarkdown file link context menu", () => {
     expect(container.querySelector('[role="alert"]')?.textContent).toContain(
       "No application can open this file",
     );
+  });
+});
+
+describe("fileLinkMenuItems", () => {
+  const reveal = (path: string) =>
+    fileLinkMenuItems(path, true, true).find((item) => item.kind === "item" && item.id === "reveal");
+
+  it("reveals local files", () => {
+    expect(reveal("/repo/docs/report.html")).toMatchObject({ disabled: false });
+  });
+
+  it("cannot reveal a file on a connected machine", () => {
+    expect(reveal("remote://env/repo/docs/report.html")).toMatchObject({
+      disabled: true,
+    });
   });
 });

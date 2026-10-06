@@ -43,6 +43,7 @@ import { useColorScheme } from "../../../shared/hooks/useColorScheme";
 import { useLockOverscroll } from "../../../shared/hooks/useLockOverscroll";
 import { copyText } from "../../../platform/tauri/clipboard";
 import { openPathWithDefaultApp, revealPath } from "../../../platform/tauri/fs";
+import { REMOTE_PATH_PREFIX } from "../../../shared/lib/remotePaths";
 import { INBOX_MEDIA_PREFIXES, isInboxMediaUrl } from "../../inbox/model/inboxMedia";
 import { isNoteImagePath } from "../../notes";
 import { IS_MAC, IS_WIN } from "../../../platform/tauri/platform";
@@ -132,7 +133,8 @@ const REVEAL_LABEL = IS_MAC
     ? "Reveal in File Explorer"
     : "Open Containing Folder";
 
-function fileLinkMenuItems(
+export function fileLinkMenuItems(
+  path: string,
   canOpenInMonoCode: boolean,
   canCopyRelativePath: boolean,
 ): ExplorerMenuItem[] {
@@ -144,7 +146,12 @@ function fileLinkMenuItems(
       disabled: !canOpenInMonoCode,
     },
     { kind: "item", id: "open-default", label: "Open in Default App" },
-    { kind: "item", id: "reveal", label: REVEAL_LABEL },
+    {
+      kind: "item",
+      id: "reveal",
+      label: REVEAL_LABEL,
+      disabled: path.startsWith(REMOTE_PATH_PREFIX),
+    },
     { kind: "sep" },
     { kind: "item", id: "copy-path", label: "Copy Path" },
     ...(canCopyRelativePath
@@ -627,7 +634,7 @@ export const AgentMarkdown = memo(function AgentMarkdown({
             <ExplorerMenu
               x={fileMenu.x}
               y={fileMenu.y}
-              items={fileLinkMenuItems(!!onOpenFile, !!cwd)}
+              items={fileLinkMenuItems(fileMenu.path, !!onOpenFile, !!cwd)}
               ariaLabel="File link actions"
               onPick={onFileMenuPick}
               onClose={() => setFileMenu(null)}
