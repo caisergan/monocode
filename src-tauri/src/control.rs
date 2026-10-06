@@ -546,6 +546,16 @@ pub fn control_load(
         .map_err(|e| e.to_string())
 }
 
+/// Agents a lead ran in runs it has since replaced, for its agents list.
+#[tauri::command]
+pub fn control_past_workers(
+    store: State<'_, crate::session_store::SessionStore>,
+    lead_id: String,
+) -> Result<Vec<crate::session_store::PastWorker>, String> {
+    let conn = store.lock_conn()?;
+    crate::session_store::past_orchestration_workers(&conn, &lead_id).map_err(|e| e.to_string())
+}
+
 fn resolve_scope(root: &Path, value: &str) -> Result<String, String> {
     let path = Path::new(value);
     if value.is_empty()

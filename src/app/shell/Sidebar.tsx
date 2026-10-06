@@ -73,7 +73,11 @@ import { sessionDisplayTitle } from "../../features/sessions/model/session";
 import { supportsTerminalSurface } from "../../integrations/harness/core/terminalLaunch";
 import { ParticleText } from "../../shared/ui/ParticleText";
 import { nextUnseenFinishedSessions } from "../../features/sessions/model/sessionDone";
-import { orchestrationTaskLabel } from "../../features/orchestration/model/orchestrationSummary";
+import {
+  orchestrationTaskLabel,
+  orchestrationTaskTone,
+} from "../../features/orchestration/model/orchestrationSummary";
+import { OrchestrationAgentsPopover } from "../../features/orchestration/ui/OrchestrationAgentsPopover";
 import {
   orderedSessionActionIds,
   pruneSessionSelection,
@@ -3134,6 +3138,7 @@ const SessionCard = memo(function SessionCard({
   const [dragging, setDragging] = useState(false);
   const [orchestrationTooltipOpen, setOrchestrationTooltipOpen] =
     useState(false);
+  const [agentsOpen, setAgentsOpen] = useState(false);
   const orchestration = session.orchestration;
   const draft = !!session.draft;
   const orchestrationExpanded =
@@ -3570,17 +3575,19 @@ const SessionCard = memo(function SessionCard({
                     orchestration.tasks.length === 1 ? "subagent" : "subagents"
                   }, ${orchestrationDone} done`}
                   aria-describedby={
-                    orchestrationTooltipOpen
+                    orchestrationTooltipOpen && !agentsOpen
                       ? orchestrationTooltipId
                       : undefined
                   }
+                  aria-expanded={agentsOpen}
+                  aria-haspopup="dialog"
                   onPointerDown={(event) => event.stopPropagation()}
                   onFocus={() => setOrchestrationTooltipOpen(true)}
                   onBlur={() => setOrchestrationTooltipOpen(false)}
                   onClick={(event) => {
                     event.stopPropagation();
                     setOrchestrationTooltipOpen(false);
-                    onSelect(session.id, event);
+                    setAgentsOpen((open) => !open);
                   }}
                   className="grid size-5 shrink-0 place-items-center rounded-md text-fuchsia-300/65 hover:bg-content/10 hover:text-fuchsia-200/90"
                 >
@@ -3591,7 +3598,15 @@ const SessionCard = memo(function SessionCard({
           </span>
         </span>
       </div>
-      {orchestration && orchestrationTooltipOpen ? (
+      {orchestration && agentsOpen ? (
+        <OrchestrationAgentsPopover
+          anchor={orchestrationTooltipRootRef}
+          leadId={session.id}
+          summary={orchestration}
+          onDismiss={() => setAgentsOpen(false)}
+        />
+      ) : null}
+      {orchestration && orchestrationTooltipOpen && !agentsOpen ? (
         <Popover
           anchor={orchestrationTooltipRootRef}
           side="right"
@@ -3626,18 +3641,7 @@ const SessionCard = memo(function SessionCard({
                     {task.title}
                   </span>
                   <span
-                    className={`shrink-0 text-[10px] ${
-                      task.needsInput ||
-                      task.status === "failed" ||
-                      task.status === "blocked" ||
-                      task.status === "interrupted"
-                        ? "text-amber-400"
-                        : label === "Working"
-                          ? "text-accent"
-                          : task.status === "completed"
-                            ? "text-emerald-400"
-                            : "text-content/45"
-                    }`}
+                    className={`shrink-0 text-[10px] ${orchestrationTaskTone(task, label)}`}
                   >
                     {label}
                   </span>

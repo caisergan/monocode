@@ -273,6 +273,7 @@ pub fn run() {
             control::control_reply,
             control::control_save,
             control::control_load,
+            control::control_past_workers,
             control::control_scopes,
             control::control_write_path,
             control::control_attach_worker,

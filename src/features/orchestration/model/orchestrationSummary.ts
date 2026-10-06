@@ -70,3 +70,20 @@ export function orchestrationTaskLabel(
     cancelled: "Cancelled",
   }[task.status];
 }
+
+/** Text colour for a task's status label in agent lists. */
+export function orchestrationTaskTone(
+  task: OrchestrationSummary["tasks"][number],
+  label: string,
+): string {
+  if (
+    task.needsInput ||
+    task.status === "failed" ||
+    task.status === "blocked" ||
+    task.status === "interrupted"
+  )
+    return "text-amber-400";
+  if (label === "Working") return "text-accent";
+  if (task.status === "completed") return "text-emerald-400";
+  return "text-content/45";
+}
