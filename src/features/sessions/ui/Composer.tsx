@@ -50,6 +50,7 @@ import {
 } from "../../../shared/lib/drag";
 import { dragPointToClient } from "../../../shared/lib/dragPoint";
 import type { ContextUsage } from "../model/contextUsage";
+import type { SessionTokenTotals } from "../model/sessionTokens";
 import {
   loadProjectFiles,
   peekProjectFiles,
@@ -111,7 +112,7 @@ import {
 } from "../../skills/model/skills";
 import { AccessPicker } from "./AccessPicker";
 import { ComposerRunner } from "./ComposerRunner";
-import { ContextMeter } from "./ContextMeter";
+import { ContextMeter, SessionTokenCount } from "./ContextMeter";
 import { AttachmentChip } from "./AttachmentChip";
 import { BranchPicker } from "../../source-control/ui/BranchPicker";
 import { WorktreePicker } from "../../source-control/ui/WorktreePicker";
@@ -237,6 +238,8 @@ type Props = {
   remoteSession?: boolean;
   remoteFeatures?: { attachments: boolean; plan: boolean; draft: boolean };
   context?: ContextUsage;
+  /** Running input/output totals, shown beside the context ring. */
+  tokenTotals?: SessionTokenTotals;
   compactSupported?: boolean;
   quoteRequest?: QuoteRequest;
   initialDraft?: string;
@@ -528,6 +531,7 @@ export function Composer({
   remoteSession = false,
   remoteFeatures,
   context,
+  tokenTotals,
   compactSupported = false,
   quoteRequest,
   initialDraft,
@@ -2283,7 +2287,8 @@ export function Composer({
                   />
                 </>
               )}
-              <div className="ml-auto flex shrink-0 items-center">
+              <div className="ml-auto flex shrink-0 items-center gap-2">
+                <SessionTokenCount totals={tokenTotals} />
                 <ContextMeter
                   usage={context}
                   onCompact={

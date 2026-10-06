@@ -3,6 +3,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -73,6 +74,7 @@ import {
 } from "../../settings/model/settings";
 import { getComposerDraft, setComposerDraft } from "../model/draftCache";
 import { resolveModel } from "../model/models";
+import { sessionTokenTotals } from "../model/sessionTokens";
 import { isAstraModel } from "../model/astraWelcome";
 import { isOpus55Model } from "../model/opusWelcome";
 import { AstraWelcome } from "./AstraWelcome";
@@ -568,6 +570,15 @@ const LocalSessionPane = memo(function LocalSessionPane({
     return () => window.removeEventListener(ADD_TO_CHAT_EVENT, onAdd);
   }, [addSelectionToChat, addToChatTarget]);
   const workCwd = sessionWorkCwd(session);
+  // Codex already folds cached reads into its input count, so the Claude
+  // normalization in sessionTokenTotals would double-count them there.
+  const tokenTotals = useMemo(
+    () =>
+      session.harness === "claude"
+        ? sessionTokenTotals(session.blocks)
+        : undefined,
+    [session.blocks, session.harness],
+  );
   const showDeckProjectPicker = isEmpty && !looksLikeProject(session.cwd);
   const dockComposer =
     remoteSessionLoading ||
@@ -602,6 +613,7 @@ const LocalSessionPane = memo(function LocalSessionPane({
       hideBranchPicker={!!session.inboxAsk || managed}
       hideTopBar={!!session.inboxAsk}
       context={session.context}
+      tokenTotals={tokenTotals}
       quoteRequest={quoteRequest}
       initialDraft={
         draftRef.current ??

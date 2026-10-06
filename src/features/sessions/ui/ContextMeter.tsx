@@ -4,6 +4,11 @@ import {
   contextTooltip,
   type ContextUsage,
 } from "../model/contextUsage";
+import {
+  sessionTokensTooltip,
+  type SessionTokenTotals,
+} from "../model/sessionTokens";
+import { formatTokens } from "../model/contextUsage";
 import { Popover } from "../../../shared/ui/Popover";
 
 const SIZE = 14;
@@ -131,5 +136,47 @@ function MeterRing({ ratio, label }: { ratio: number; label?: string }) {
         transform={`rotate(-90 ${SIZE / 2} ${SIZE / 2})`}
       />
     </svg>
+  );
+}
+
+/**
+ * Running input and output totals for the session, shown beside the ring.
+ *
+ * The ring is how full the window is right now; these only ever grow.
+ */
+export function SessionTokenCount({ totals }: { totals?: SessionTokenTotals }) {
+  const [hovered, setHovered] = useState(false);
+  const root = useRef<HTMLDivElement>(null);
+  if (!totals) return null;
+
+  const { headline, detail } = sessionTokensTooltip(totals);
+
+  return (
+    <div
+      ref={root}
+      className="relative shrink-0"
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      <span
+        role="img"
+        aria-label={`${headline}: ${detail}`}
+        className="flex items-center gap-1.5 text-[11px] leading-4 tabular-nums text-content/45"
+      >
+        <span>↑{formatTokens(totals.input)}</span>
+        <span>↓{formatTokens(totals.output)}</span>
+      </span>
+      {hovered ? (
+        <Popover
+          anchor={root}
+          side="top"
+          align="end"
+          className="pointer-events-none w-max px-2.5 py-1.5"
+        >
+          <div className="text-[12px] leading-4 text-content">{headline}</div>
+          <div className="text-[11px] leading-4 text-content/50">{detail}</div>
+        </Popover>
+      ) : null}
+    </div>
   );
 }
