@@ -184,6 +184,25 @@ it("offers an explicit host update for an SSH machine missing workspace methods"
   });
 });
 
+it("offers a host update for a machine that can't import terminal sessions", async () => {
+  machines = [machine];
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command === "remote_machines") return [...machines];
+    if (command === "remote_request")
+      return {
+        environmentId: "env",
+        providers: ["claude"],
+        capabilities: ["workspace.run", "git.worktreeCreate"],
+      };
+    throw new Error(`Unexpected command ${command}`);
+  });
+  await render();
+  expect(container.textContent).toContain(
+    "host update needed to import terminal sessions",
+  );
+  expect(button("Update Host")).toBeDefined();
+});
+
 it("advertises every supported provider when checking a host", async () => {
   machines = [machine];
   await render();

@@ -629,10 +629,10 @@ function SidebarComponent({
   const [sessionListLimit, setSessionListLimit] = useState(LIST_PAGE_SIZE);
   const loadMoreRef = useRef<HTMLLIElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
-  // Remote sessions live on their host, not in this computer's agent stores.
+  // A remote project counts its host's terminal sessions.
   const importable = useImportableSessionCount(
-    tab === "sessions" && !remoteProject ? cwd : undefined,
-    sessions.length,
+    tab === "sessions" ? cwd : undefined,
+    remoteProject ? remote.sessions.length : sessions.length,
   );
   const pendingFolderSessionIds = useRef(new Set<string>());
   const busyIdsRef = useRef(busySessionIds);

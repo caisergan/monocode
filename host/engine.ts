@@ -342,6 +342,62 @@ export class HostEngine {
     return summary;
   }
 
+  /** Host sessions holding one of `harness`'s conversations, keyed by the
+   * agent's session id. */
+  providerSessions(
+    harness: RemoteProvider,
+  ): Map<string, { sessionId: string; projectId: string }> {
+    const known = new Map<string, { sessionId: string; projectId: string }>();
+    for (const project of this.store.projects())
+      for (const session of this.store.summaries(project.id))
+        if (session.harness === harness && session.providerSessionId)
+          known.set(session.providerSessionId, {
+            sessionId: session.id,
+            projectId: project.id,
+          });
+    return known;
+  }
+
+  /**
+   * Save a conversation started in this host's terminal as an idle host
+   * session. It keeps the agent's session id, so the next turn resumes that
+   * conversation. A conversation already held by a session opens that one.
+   */
+  adoptSession(
+    projectId: string,
+    session: Session,
+  ): { sessionId: string; existing: boolean } {
+    const providerSessionId = session.providerSessionId;
+    if (!providerSessionId) throw new Error("Nothing to resume in that session");
+    const provider = this.provider(session.harness);
+    const project = this.store.project(projectId);
+    if (this.switchingProjects.has(project.id))
+      throw new Error("Wait for the branch switch to finish");
+    const result = this.store.transaction(() => {
+      const existing = this.providerSessions(
+        session.harness as RemoteProvider,
+      ).get(providerSessionId);
+      if (existing) return { sessionId: existing.sessionId, existing: true };
+      const now = Date.now();
+      const saved = this.store.save(
+        {
+          projectId: project.id,
+          revision: 1,
+          status: "idle",
+          createdAt:
+            session.blocks.find((block) => block.startedAt)?.startedAt ?? now,
+          updatedAt: now,
+          session,
+        },
+        { type: "imported" },
+      );
+      return { sessionId: saved.session.id, existing: false };
+    });
+    if (!result.existing)
+      provider.bind(result.sessionId, providerSessionId, session.cwd);
+    return result;
+  }
+
   private flush(id: string): void {
     const live = this.live.get(id);
     if (!live) return;

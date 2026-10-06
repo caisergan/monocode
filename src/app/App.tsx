@@ -593,6 +593,7 @@ import {
   OPEN_REMOTE_PROJECT_EVENT,
   REMOTE_HISTORY_UPDATED,
   cachedRemoteSessionSummary,
+  refreshRemoteProjectSessions,
   rememberRemotePendingWorktree,
   rememberRemoteSession,
   remotePendingWorktree,
@@ -4445,11 +4446,27 @@ function Workspace({
         void onSelectHistorySession(sessionId);
         return;
       }
+      if (isRemoteProjectPath(cwd)) {
+        // The session is on the host; open it as its Sessions row would.
+        setSettingsOpen(false);
+        setFilePickerOpen(false);
+        setSidebarTab("sessions", cwd);
+        setProjectCwd(cwd);
+        setRecents(rememberProject(cwd));
+        onSelectRemoteSession(cwd, sessionId);
+        refreshRemoteProjectSessions();
+        return;
+      }
       void openReminderSession(sessionId)
         .then(() => refreshHistory(cwd))
         .catch(() => undefined);
     },
-    [onSelectHistorySession, openReminderSession, refreshHistory],
+    [
+      onSelectHistorySession,
+      onSelectRemoteSession,
+      openReminderSession,
+      refreshHistory,
+    ],
   );
 
   const ensureReminderSessionsSaved = useCallback(

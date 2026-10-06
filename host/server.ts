@@ -19,6 +19,13 @@ import { parseGithubWorkItemUrl } from "../src/features/sessions/model/sessionWo
 import { SyncTransfers } from "./sync-transfer";
 import { browseHostDirectories } from "./browse";
 import {
+  claudeProjectsRoot,
+  listClaudeSessions,
+  readClaudeSession,
+  validSessionId,
+} from "./agent-sessions";
+import { claudeTranscriptToSession } from "../src/integrations/harness/providers/claude/claudeImport";
+import {
   createHostBranch,
   hostBranches,
   switchHostBranch,
@@ -288,6 +295,7 @@ export function createHostServer(
                 "attachments.read",
                 "sessions.draft",
                 "sessions.plan",
+                "agentSessions.import",
               ],
             };
             break;
@@ -401,6 +409,69 @@ export function createHostServer(
               String(params.sessionId ?? ""),
               Number(params.after),
             );
+            break;
+          }
+          case "agentSessions.list": {
+            const project = engine.store.project(String(params.projectId ?? ""));
+            const harnesses = Array.isArray(params.harnesses)
+              ? params.harnesses
+              : ["claude"];
+            if (!providers.includes("claude") || !harnesses.includes("claude")) {
+              result = { sessions: [], importedCount: 0, hasMore: false };
+              break;
+            }
+            // A project's sessions also ran in its worktrees.
+            const worktrees = await hostWorktrees(project.cwd)
+              .then(({ worktrees }) =>
+                worktrees.filter((tree) => !tree.missing).map((tree) => tree.path),
+              )
+              .catch(() => []);
+            result = await listClaudeSessions(claudeProjectsRoot(), {
+              scope: [
+                project.cwd,
+                ...worktrees.filter((path) => path !== project.cwd),
+              ],
+              known: engine.providerSessions("claude"),
+              projectId: project.id,
+              query: typeof params.query === "string" ? params.query : undefined,
+              limit: Number.isSafeInteger(params.limit)
+                ? Number(params.limit)
+                : undefined,
+              since: Number.isSafeInteger(params.since)
+                ? Number(params.since)
+                : undefined,
+              includeImported: params.includeImported === true,
+            });
+            break;
+          }
+          case "agentSessions.import": {
+            const project = engine.store.project(String(params.projectId ?? ""));
+            if (params.harness !== "claude" || !providers.includes("claude"))
+              throw new Error("Only Claude Code sessions can be imported here");
+            if (!validSessionId(params.sessionId))
+              throw new Error("Invalid session id");
+            const cwd = await resolveHostWorktreeAsync(project.cwd, params.cwd);
+            const existing = engine
+              .providerSessions("claude")
+              .get(params.sessionId);
+            if (existing) {
+              result = { sessionId: existing.sessionId, existing: true };
+              break;
+            }
+            const session = claudeTranscriptToSession({
+              records: await readClaudeSession(
+                claudeProjectsRoot(),
+                cwd,
+                params.sessionId,
+              ),
+              cwd,
+              providerSessionId: params.sessionId,
+            });
+            if (!session.blocks.some((block) => block.role === "user"))
+              throw new Error(
+                "That Claude Code session has no messages to import.",
+              );
+            result = engine.adoptSession(project.id, session);
             break;
           }
           case "commands.dispatch":
