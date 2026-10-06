@@ -20,6 +20,7 @@ type MenuKey = "file" | "view" | "terminal";
 type Props = {
   onNew: () => void;
   onNewTerminal?: () => void;
+  onNewBrowserTab?: () => void;
   onToggleTerminal?: () => void;
   onGoToFile?: () => void;
   onToggleSidebar: () => void;
@@ -41,6 +42,7 @@ type Props = {
 export function MenuBar({
   onNew,
   onNewTerminal,
+  onNewBrowserTab,
   onToggleTerminal,
   onGoToFile,
   onToggleSidebar,
@@ -144,6 +146,9 @@ export function MenuBar({
         case "new_terminal":
           onNewTerminal?.();
           break;
+        case "new_browser_tab":
+          onNewBrowserTab?.();
+          break;
         case "toggle_terminal":
           onToggleTerminal?.();
           break;
@@ -218,6 +223,7 @@ export function MenuBar({
       onGoToFile,
       onNew,
       onNewTerminal,
+      onNewBrowserTab,
       onToggleTerminal,
       onPickProject,
       onSearch,
@@ -247,6 +253,11 @@ export function MenuBar({
             id: "new_terminal",
             label: "New Terminal",
             shortcut: shortcut("Terminal: New", `${MOD}\``),
+          },
+          {
+            kind: "item",
+            id: "new_browser_tab",
+            label: "New Browser Tab",
           },
           {
             kind: "item",

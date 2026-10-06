@@ -23,6 +23,12 @@ export function isImagePath(path: string): boolean {
   return IMAGE_EXTENSIONS.has(extension);
 }
 
+/** HTML files offer a rendered preview beside their source. */
+export function isHtmlPath(path: string): boolean {
+  const name = basename(path).toLowerCase();
+  return name.endsWith(".html") || name.endsWith(".htm");
+}
+
 /**
  * Identify image bytes by their magic number rather than trusting the name.
  *

@@ -149,8 +149,8 @@ pub fn dispatch(app: &AppHandle, id: &str) {
         | "forward_tab" | "split_right" | "split_down" | "focus_left" | "focus_right"
         | "focus_up" | "focus_down" | "sidebar_opacity" | "open_project" | "go_to_file"
         | "open_search" | "open_inbox" | "open_notes" | "find_in_project" | "find"
-        | "new_terminal" | "new_terminal_tab" | "toggle_terminal" | "open_model_picker"
-        | "open_settings" | "check_for_updates" => {
+        | "new_terminal" | "new_terminal_tab" | "new_browser_tab" | "toggle_terminal"
+        | "open_model_picker" | "open_settings" | "check_for_updates" => {
             let _ = app.emit(id, ());
         }
         // Sidebar, Zoom, Reload, Command Palette, and Close All Tabs target one window: a broadcast would
@@ -270,6 +270,8 @@ fn build(
         "Terminal: New Tab",
         overrides,
     )?;
+    let new_browser_tab =
+        MenuItemBuilder::with_id("new_browser_tab", "New Browser Tab").build(app)?;
     let toggle_terminal = menu_item(
         app,
         "toggle_terminal",
@@ -463,6 +465,7 @@ fn build(
         .item(&new_tab)
         .item(&new_terminal)
         .item(&new_terminal_tab)
+        .item(&new_browser_tab)
         .item(&split_right)
         .item(&split_down)
         .item(&close_tab)

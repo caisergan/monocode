@@ -4,6 +4,7 @@ mod account_identity;
 mod agent_sessions;
 mod automations;
 mod azure_devops;
+mod browser_preview;
 mod chat_background;
 mod checkpoint;
 mod control;
@@ -229,6 +230,8 @@ pub fn run() {
         .manage(pty::PtyHost::new())
         .manage(remote::RemoteConnections::default())
         .manage(window_transfer::WindowTransferState::new())
+        .manage(browser_preview::PreviewRoots::default())
+        .register_asynchronous_uri_scheme_protocol(browser_preview::SCHEME, browser_preview::handle)
         .setup(|app| {
             harness::reap_orphaned_harness_processes();
             session_store::init(app.handle())?;
@@ -280,6 +283,7 @@ pub fn run() {
             control::control_authorize_turn,
             control::control_turn_finished,
             control::app_cli_path,
+            browser_preview::browser_preview_allow_root,
             default_cwd,
             home_dir,
             notifications::notification_permission,

@@ -6,13 +6,16 @@ import {
   isChangesTab,
   isCommitTab,
   isFilesystemTab,
+  isPreviewableTab,
   isReleaseNotesTab,
   isReviewTab,
   isSessionChangesTab,
   isTerminalTab,
+  isVirtualDocumentTab,
   layoutLeaves,
   layoutSashes,
   leaf,
+  newBrowserTab,
   newChangesTab,
   newCommitTab,
   newEditorWorkspaceTab,
@@ -38,14 +41,21 @@ import {
   placePane,
   splitPane,
   splitSizesAtBoundary,
+  updateBrowserTab,
   updateTerminalTab,
   type WorkspaceTab,
 } from "./layout";
 
 describe("preview tabs", () => {
   it("keeps remote files from different machines in distinct editor tabs", () => {
-    const first = newFileTab("remote://machine-a/repo/a.ts", "remote://machine-a/repo");
-    const second = newFileTab("remote://machine-b/repo/a.ts", "remote://machine-b/repo");
+    const first = newFileTab(
+      "remote://machine-a/repo/a.ts",
+      "remote://machine-a/repo",
+    );
+    const second = newFileTab(
+      "remote://machine-b/repo/a.ts",
+      "remote://machine-b/repo",
+    );
     expect(editorTabKey(first)).not.toBe(editorTabKey(second));
     let tab = openEditorTab(newTab("s"), first, { pin: true });
     tab = openEditorTab(tab, second, { pin: true });
@@ -242,6 +252,47 @@ describe("editorTabKey", () => {
     expect(editorTabKey(terminal)).toBe(`terminal:${terminal.id}`);
     expect(isTerminalTab(terminal)).toBe(true);
     expect(isTerminalTab(newFileTab(path, cwd))).toBe(false);
+    const browser = newBrowserTab(
+      "http://localhost:3000/",
+      "localhost:3000",
+      cwd,
+    );
+    expect(editorTabKey(browser)).toBe("browser:http://localhost:3000/");
+    expect(isVirtualDocumentTab(browser)).toBe(true);
+    expect(isFilesystemTab(browser)).toBe(false);
+    expect(isPreviewableTab(browser)).toBe(false);
+  });
+});
+
+describe("updateBrowserTab", () => {
+  it("points the tab at a new address and relabels it", () => {
+    const file = newBrowserTab(
+      "http://localhost:3000/",
+      "localhost:3000",
+      "/p",
+    );
+    const tab = newEditorWorkspaceTab(file);
+    const next = updateBrowserTab(
+      tab,
+      file.id,
+      "http://localhost:4000/",
+      "localhost:4000",
+    );
+    expect(next.editorPanes[0].files[0]).toMatchObject({
+      path: "localhost:4000",
+      browser: { url: "http://localhost:4000/" },
+    });
+    expect(
+      updateBrowserTab(
+        next,
+        file.id,
+        "http://localhost:4000/",
+        "localhost:4000",
+      ),
+    ).toBe(next);
+    expect(updateBrowserTab(tab, "missing", "http://x.dev/", "x.dev")).toBe(
+      tab,
+    );
   });
 });
 

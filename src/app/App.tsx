@@ -1,3 +1,4 @@
+import { browserTabLabel } from "../features/browser/model/browserUrl";
 import { acceptQuickLaunch } from "./model/quickLaunchSession";
 import { useWorkspaceNavigation } from "./hooks/useWorkspaceNavigation";
 import { useIdleSessionDetach } from "./hooks/useIdleSessionDetach";
@@ -194,6 +195,8 @@ import {
   openChangesTab,
   openCommitTab,
   newAgentTab,
+  newBrowserTab,
+  updateBrowserTab,
   openEditorTab,
   openSessionChangesTab,
   pinEditorFile,
@@ -6051,6 +6054,62 @@ function Workspace({
     [activeTabId],
   );
 
+  /** Open an in-app browser tab; an empty URL opens a blank one to type into. */
+  const onOpenBrowser = useCallback(
+    (url: string, cwd?: string) => {
+      const fileCwd = cwd ?? gitCwdRef.current;
+      const fileProjectCwd = sidebarCwdRef.current;
+      const file = {
+        ...newBrowserTab(url, url ? browserTabLabel(url) : "Browser", fileCwd),
+        ...(fileProjectCwd && fileProjectCwd !== fileCwd
+          ? { projectCwd: fileProjectCwd }
+          : {}),
+      };
+      if (loadFileTabMode() === "workspace") {
+        const created = newEditorWorkspaceTab(file);
+        let target: { tabId: string; paneId?: string } | undefined;
+        flushSync(() => {
+          setTabs((prev) => {
+            const result = openWorkspaceFile(
+              prev,
+              file,
+              created,
+              (tabs, tab) => insertBesideActive(tabs, tab, fileProjectCwd),
+              true,
+            );
+            target = result;
+            return result.tabs;
+          });
+        });
+        if (target?.paneId) activateTab(target.tabId, target.paneId);
+        else if (target) setActiveTabId(target.tabId);
+        setProjectTerminalFocused(false);
+        setComposerFocused(false);
+        return;
+      }
+      setTabs((prev) =>
+        prev.map((entry) =>
+          entry.id === activeTabIdRef.current
+            ? openEditorTab(entry, file, { split: "right", pin: true })
+            : entry,
+        ),
+      );
+      setComposerFocused(false);
+    },
+    [activateTab, insertBesideActive],
+  );
+
+  const onNewBrowserTab = useCallback(() => onOpenBrowser(""), [onOpenBrowser]);
+
+  const onBrowserNavigate = useCallback((fileId: string, url: string) => {
+    setTabs((prev) => {
+      const next = prev.map((tab) =>
+        updateBrowserTab(tab, fileId, url, browserTabLabel(url)),
+      );
+      return next.some((tab, index) => tab !== prev[index]) ? next : prev;
+    });
+  }, []);
+
   const onPinFile = useCallback((fileId: string) => {
     setTabs((prev) => {
       const next = prev.map((tab) => pinEditorFile(tab, fileId));
@@ -10767,6 +10826,7 @@ function Workspace({
     pickProject,
     onNewTerminal,
     onNewTerminalTab,
+    onNewBrowserTab,
     onToggleProjectTerminal,
     onNavigateSessionList,
     onNavigateProjectList,
@@ -10799,6 +10859,7 @@ function Workspace({
     pickProject,
     onNewTerminal,
     onNewTerminalTab,
+    onNewBrowserTab,
     onToggleProjectTerminal,
     onNavigateSessionList,
     onNavigateProjectList,
@@ -11057,6 +11118,9 @@ function Workspace({
       ),
       listen("new_terminal_tab", () =>
         run("new-terminal-tab", actions.current.onNewTerminalTab),
+      ),
+      listen("new_browser_tab", () =>
+        run("new-browser-tab", actions.current.onNewBrowserTab),
       ),
       listen("toggle_terminal", () =>
         run("toggle-terminal", actions.current.onToggleProjectTerminal),
@@ -11454,6 +11518,7 @@ function Workspace({
                   <MenuBar
                     onNew={onNew}
                     onNewTerminal={onNewTerminal}
+                    onNewBrowserTab={onNewBrowserTab}
                     onToggleTerminal={onToggleProjectTerminal}
                     onGoToFile={onGoToFile}
                     onToggleSidebar={onToggleSidebar}
@@ -11585,6 +11650,8 @@ function Workspace({
                                 onMovePane={onMovePane}
                                 onDetachPane={onDetachPane}
                                 onTerminalMetaChange={onTerminalMetaChange}
+                                onBrowserNavigate={onBrowserNavigate}
+                                onOpenBrowser={onOpenBrowser}
                               />
                             </div>
                           </div>

@@ -30,6 +30,8 @@ import {
   AlertCircle,
   ChevronDown,
   ChevronUp,
+  Globe,
+  RefreshCw,
   RotateCcw,
 } from "../../../shared/ui/icons";
 import { formatInteger } from "../../../shared/lib/numbers";
@@ -95,6 +97,10 @@ import { editorLint } from "../editor/editorLint";
 import { editorSearch } from "../editor/editorSearch";
 import { editorScrollbar } from "../editor/editorScrollbar";
 import { FilePreviewSearch } from "./FilePreviewSearch";
+import { HtmlFilePreview } from "../../browser/ui/HtmlFilePreview";
+import { isHtmlPath } from "../model/filePreview";
+import { browserPreviewUrl } from "../../../platform/tauri/browserPreview";
+import { isRemoteProjectPath } from "../../projects/model/recents";
 
 type EditorNavigationRequest = EditorNavigation & { token: number };
 
@@ -112,6 +118,7 @@ type Props = {
   onDirtyChange: (path: string, dirty: boolean) => void;
   onErrorCountChange?: (path: string, count: number) => void;
   onOpenFile?: (path: string) => void;
+  onOpenInBrowser?: (url: string, cwd: string) => void;
 };
 
 type LoadState =
@@ -132,6 +139,7 @@ export function FileEditor({
   onDirtyChange,
   onErrorCountChange,
   onOpenFile,
+  onOpenInBrowser,
 }: Props) {
   const [loadState, setLoadState] = useState<LoadState>({ status: "loading" });
   const [saveState, setSaveState] = useState<SaveState>({ status: "idle" });
@@ -146,22 +154,26 @@ export function FileEditor({
   } | null>(null);
   const markdown = isMarkdownPath(path);
   const svg = isSvgPath(path);
+  // The local preview protocol can't serve a connected machine's files.
+  const html = isHtmlPath(path) && !isRemoteProjectPath(path);
   // Diff tabs open as source: the git gutter only renders in the editor.
+  // HTML opens as source too, so a page's scripts run only once asked.
   const [mode, setMode] = useMarkdownMode(
     showDiff ? `review:${path}` : path,
-    showDiff ? "source" : "preview",
+    showDiff || html ? "source" : "preview",
   );
+  const [diskVersion, setDiskVersion] = useState(0);
   const sourceNavigationToken = useRef<number | undefined>(undefined);
   useEffect(() => {
     if (
       !navigation ||
-      (!markdown && !svg) ||
+      (!markdown && !svg && !html) ||
       sourceNavigationToken.current === navigation.token
     )
       return;
     sourceNavigationToken.current = navigation.token;
     setMode("source");
-  }, [markdown, svg, navigation, setMode]);
+  }, [markdown, svg, html, navigation, setMode]);
   const saveQueue = useRef<Promise<void>>(Promise.resolve());
   const saveGeneration = useRef(0);
   const loadGeneration = useRef(0);
@@ -184,6 +196,7 @@ export function FileEditor({
       return { status: "ready", content };
     });
     setDraft(content);
+    setDiskVersion((version) => version + 1);
   }, []);
 
   const reloadFromDisk = useCallback(
@@ -348,6 +361,7 @@ export function FileEditor({
         await operation;
         await syncWatchedMtime(path);
         notifyGitChanged();
+        setDiskVersion((version) => version + 1);
         if (generation === saveGeneration.current) {
           setSaveState({ status: "saved" });
         }
@@ -458,10 +472,22 @@ export function FileEditor({
           changes. Line breaks are normalized in this view.
         </p>
       )}
-      {markdown || svg ? (
+      {markdown || svg || html ? (
         <MarkdownViewShell
           mode={mode}
           onModeChange={setMode}
+          actions={
+            html && mode === "preview" ? (
+              <HtmlPreviewActions
+                onReload={() => setDiskVersion((version) => version + 1)}
+                onOpenInBrowser={
+                  onOpenInBrowser
+                    ? () => onOpenInBrowser(browserPreviewUrl(path), cwd)
+                    : undefined
+                }
+              />
+            ) : undefined
+          }
           preview={
             markdown ? (
               <FilePreviewSearch
@@ -475,6 +501,10 @@ export function FileEditor({
                   onOpenFile={onOpenFile}
                 />
               </FilePreviewSearch>
+            ) : html ? (
+              mode === "preview" ? (
+                <HtmlFilePreview path={path} cwd={cwd} version={diskVersion} />
+              ) : null
             ) : (
               <SvgPreview source={draft} />
             )
@@ -1294,6 +1324,41 @@ function SvgPreview({ source }: { source: string }) {
     <div className="grid h-full place-items-center overflow-auto p-6">
       <img src={url} alt="" className="max-h-full max-w-full object-contain" />
     </div>
+  );
+}
+
+function HtmlPreviewActions({
+  onReload,
+  onOpenInBrowser,
+}: {
+  onReload: () => void;
+  onOpenInBrowser?: () => void;
+}) {
+  const button =
+    "grid size-6 place-items-center rounded-md border border-content/10 bg-content/10 text-content/60 backdrop-blur-md hover:text-content";
+  return (
+    <>
+      <button
+        type="button"
+        title="Reload"
+        aria-label="Reload"
+        onClick={onReload}
+        className={button}
+      >
+        <RefreshCw className="size-3.5" strokeWidth={1.75} />
+      </button>
+      {onOpenInBrowser ? (
+        <button
+          type="button"
+          title="Open in Browser Tab"
+          aria-label="Open in Browser Tab"
+          onClick={onOpenInBrowser}
+          className={button}
+        >
+          <Globe className="size-3.5" strokeWidth={1.75} />
+        </button>
+      ) : null}
+    </>
   );
 }
 

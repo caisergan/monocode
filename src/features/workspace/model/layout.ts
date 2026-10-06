@@ -51,6 +51,11 @@ export type AgentTabSource = {
   harness: HarnessId;
 };
 
+/** A page in the in-app browser: a dev server, a site, or a previewed file. */
+export type BrowserTabSource = {
+  url: string;
+};
+
 export type SessionChangesSource = {
   sessionId: string;
 };
@@ -75,6 +80,7 @@ export type FilePaneTab = {
   /** Read-only transcript of an orchestration worker. Live only — not persisted. */
   agent?: AgentTabSource;
   terminal?: boolean;
+  browser?: BrowserTabSource;
   /** Foreground command when it isn't the shell. Live only — not persisted. */
   foreground?: string;
   /** Temporary tab: the next preview open in its pane replaces it. */
@@ -307,6 +313,37 @@ export function newAgentTab(
   return { id: crypto.randomUUID(), path: title, cwd, agent };
 }
 
+/** `path` carries the label: a browser tab has no file behind it. */
+export function newBrowserTab(
+  url: string,
+  label: string,
+  cwd: string,
+): FilePaneTab {
+  return { id: crypto.randomUUID(), path: label, cwd, browser: { url } };
+}
+
+/** Point a browser tab at a new address. Returns `tab` unchanged when nothing matched. */
+export function updateBrowserTab(
+  tab: WorkspaceTab,
+  fileId: string,
+  url: string,
+  label: string,
+): WorkspaceTab {
+  let changed = false;
+  const editorPanes = tab.editorPanes.map((pane) => {
+    const files = pane.files.map((file) => {
+      if (file.id !== fileId || !file.browser) return file;
+      if (file.browser.url === url && file.path === label) return file;
+      changed = true;
+      return { ...file, path: label, browser: { url } };
+    });
+    return files.some((file, index) => file !== pane.files[index])
+      ? { ...pane, files }
+      : pane;
+  });
+  return changed ? { ...tab, editorPanes } : tab;
+}
+
 export function newTerminalFile(
   cwd: string,
   title?: string,
@@ -420,6 +457,12 @@ export function isCommitTab(
   return !!file.commit;
 }
 
+export function isBrowserTab(
+  file: FilePaneTab,
+): file is FilePaneTab & { browser: BrowserTabSource } {
+  return !!file.browser;
+}
+
 export function isTerminalTab(file: FilePaneTab): boolean {
   return !!file.terminal;
 }
@@ -435,7 +478,8 @@ export function isVirtualDocumentTab(file: FilePaneTab): boolean {
     isPlanTab(file) ||
     isReleaseNotesTab(file) ||
     isCommitTab(file) ||
-    isAgentTab(file)
+    isAgentTab(file) ||
+    isBrowserTab(file)
   );
 }
 
@@ -516,6 +560,7 @@ export function editorTabKey(file: FilePaneTab): string {
   if (file.agent) return `agent:${file.agent.sessionId}`;
   if (file.plan) return `plan:${file.plan.blockId}`;
   if (file.releaseNotes) return `release-notes:${file.releaseNotes.version}`;
+  if (file.browser) return `browser:${file.browser.url}`;
   if (file.commit) return `commit:${file.cwd}:${file.commit.sha}`;
   if (file.sessionChanges)
     return `session-changes:${file.cwd}:${file.sessionChanges.sessionId}`;
@@ -545,6 +590,7 @@ export function isPreviewableTab(file: FilePaneTab): boolean {
     !file.agent &&
     !file.plan &&
     !file.releaseNotes &&
+    !file.browser &&
     !file.changes
   );
 }

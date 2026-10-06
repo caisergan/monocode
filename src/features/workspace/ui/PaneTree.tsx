@@ -192,6 +192,8 @@ type Shared = {
   onOpenSessionInTerminal?: (sessionId: string) => void;
   onTerminalExit?: (sessionId: string) => void;
   onTerminalMetaChange?: (fileId: string, patch: TerminalMetaPatch) => void;
+  onBrowserNavigate?: (fileId: string, url: string) => void;
+  onOpenBrowser?: (url: string, cwd?: string) => void;
   transcriptPool?: TranscriptPool;
 };
 
@@ -283,6 +285,8 @@ function PaneTreeComponent({
   onOpenSessionInTerminal,
   onTerminalExit,
   onTerminalMetaChange,
+  onBrowserNavigate,
+  onOpenBrowser,
   transcriptPool,
 }: Props) {
   const treeRef = useRef<HTMLDivElement>(null);
@@ -499,6 +503,8 @@ function PaneTreeComponent({
                   editorNavigation={editorNavigation}
                   onPaneDragStart={onPaneDragStart}
                   onTerminalMetaChange={onTerminalMetaChange}
+                  onBrowserNavigate={onBrowserNavigate}
+                  onOpenBrowser={onOpenBrowser}
                 />
               ) : session ? (
                 <SessionPane
