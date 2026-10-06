@@ -54,6 +54,12 @@ Actions, with the JSON object each one takes:
             Cancel a task, whether it is running or still queued. A task you
             already accepted cannot be cancelled: its changes are in your
             checkout.
+  hold      {"taskIds":["..."]}
+            Keep queued tasks from starting until you release them. Omit
+            taskIds to hold every queued task. Works while paused too.
+  release   {"taskIds":["..."]}
+            Let held tasks start as worker slots free up. Omit taskIds to
+            release every held task. Works while paused too.
   review    {"taskId":"..."}
             Accept a completed task's result and apply its changes to your
             checkout. Everything the worker changed counts, including edits
@@ -76,7 +82,8 @@ unblock one with respond or answer -> inspect the changes yourself -> message
 for corrections -> review each task -> finish.
 
 When paused, by you, the user or an interruption, list, get and wait still
-return the reason and recovery steps.
+return the reason and recovery steps, and hold and release still arrange the
+queue for when the run resumes.
 Do not keep polling or retry mutations. Explain the pause and ask the user to
 click Resume in MonoCode. Resume continues interrupted workers in their
 retained checkouts. A policy-blocked worker remains stopped until message,
@@ -100,9 +107,9 @@ MonoCode sets MONOCODE_CONTROL_ENDPOINT and MONOCODE_CONTROL_TOKEN for the lead
 agent's process only. They are already in your environment; never print them.
 "#;
 
-const ACTIONS: [&str; 13] = [
+const ACTIONS: [&str; 15] = [
     "list", "delegate", "get", "steer", "message", "retry", "cancel", "wait", "review", "finish",
-    "respond", "answer", "pause",
+    "respond", "answer", "pause", "hold", "release",
 ];
 const APP_ACTIONS: [&str; 17] = [
     "models.list",

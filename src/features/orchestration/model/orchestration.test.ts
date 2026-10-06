@@ -1442,7 +1442,17 @@ describe("local orchestration", () => {
     ).toHaveLength(1);
     expect(restored.run("lead")?.status).toBe("paused");
     expect(restored.submissionError(worker)).toContain("paused");
-    expect(restored.submissionError("lead")).toContain("Resume");
+    // The user can still talk to a paused lead. After a restart it has no
+    // control connection, so the run's state rides along with the turn.
+    expect(restored.submissionError("lead")).toBeNull();
+    const restoredPrompt = restored.prompt("lead", "How are the agents?");
+    expect(restoredPrompt.startsWith("How are the agents?")).toBe(true);
+    expect(restoredPrompt).toContain("control connection is closed");
+    expect(restoredPrompt).toContain(`"taskId":"${f.tasks()[0].id}"`);
+    expect(restoredPrompt).toContain('"status":"interrupted"');
+    expect(restoredPrompt).toContain("you cannot resume it yourself");
+    // A worker's own turns get no lead context.
+    expect(restored.prompt(worker, "Hi")).toBe("Hi");
     expect(await restored.ownsTurns({ id: "unrelated" })).toBe(false);
     await restored.stopRun("lead");
     expect(
@@ -1800,6 +1810,67 @@ describe("local orchestration", () => {
     await vi.waitFor(() => expect(f.tasks()[0].status).toBe("running"));
     await f.manager.stopRun("lead");
   });
+  it("keeps held queued work from starting until it is released", async () => {
+    const f = setup();
+    await f.start();
+    await f.delegate(["a"]);
+    await f.delegate(["b"]);
+    await f.delegate(["c"]);
+    await vi.waitFor(() =>
+      expect(f.tasks().filter((task) => task.status === "running")).toHaveLength(2),
+    );
+    const [first, , queued] = f.tasks();
+    expect(queued.status).toBe("queued");
+    await expect(f.call("hold", { taskIds: [first.id] })).rejects.toThrow(
+      "only queued tasks can be held",
+    );
+    expect(await f.call("hold", { taskIds: [queued.id] })).toEqual({
+      held: [queued.id],
+      stillHeld: [queued.id],
+    });
+    expect(await f.call("get", { taskId: queued.id })).toMatchObject({
+      waitingFor: "Held: release it to start",
+    });
+    // A free slot does not start held work.
+    f.completions.get(first.sessionId)!({ status: "completed", text: "Done" });
+    await vi.waitFor(() => expect(f.tasks()[0].status).toBe("completed"));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(f.tasks()[2].status).toBe("queued");
+    expect(f.host.createWorker).toHaveBeenCalledTimes(2);
+    expect(await f.call("release")).toMatchObject({ released: [queued.id] });
+    await vi.waitFor(() => expect(f.tasks()[2].status).toBe("running"));
+    await f.manager.stopRun("lead");
+  });
+  it("lets the queue be held while paused so Resume starts only what is wanted", async () => {
+    const f = setup();
+    await f.start();
+    await f.delegate(["a"]);
+    await f.delegate(["b"]);
+    await f.delegate(["c"]);
+    await vi.waitFor(() =>
+      expect(f.tasks().filter((task) => task.status === "running")).toHaveLength(2),
+    );
+    await f.call("pause", { reason: "Check the first two" });
+    expect(await f.call("hold")).toMatchObject({ held: [f.tasks()[2].id] });
+    // Other mutations stay refused while paused.
+    await expect(f.call("cancel", { taskId: f.tasks()[2].id })).rejects.toThrow(
+      "click Resume",
+    );
+    f.lead.busy = false;
+    await f.manager.start("lead", ["codex"], 3);
+    await vi.waitFor(() =>
+      expect(f.tasks().slice(0, 2).map((task) => task.status)).toEqual([
+        "running",
+        "running",
+      ]),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(f.tasks()[2]).toMatchObject({ status: "queued", held: true });
+    // The user releases it from the card.
+    await f.manager.setTaskHeld("lead", f.tasks()[2].id, false);
+    await vi.waitFor(() => expect(f.tasks()[2].status).toBe("running"));
+    await f.manager.stopRun("lead");
+  });
   it("lets the user pause the run, stopping the lead's turn as well", async () => {
     const f = setup();
     await f.start();
@@ -1813,6 +1884,11 @@ describe("local orchestration", () => {
       status: "paused",
       error: "The user paused this run.",
     });
+    // Paused in this process, the lead keeps read access to the run.
+    expect(f.manager.submissionError("lead")).toBeNull();
+    const pausedPrompt = f.manager.prompt("lead", "Hold the queue");
+    expect(pausedPrompt).toContain("hold and release still arrange queued tasks");
+    expect(pausedPrompt).toContain("The user paused this run.");
     expect(f.tasks()[0].status).toBe("interrupted");
     expect(leadStops()).toBe(stopsBefore + 1);
     expect(f.lead.busy).toBe(false);

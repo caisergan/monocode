@@ -1098,6 +1098,9 @@ fn index_orchestration(conn: &Connection, lead: &str, run: &Value) -> rusqlite::
             "sessionId": id, "title": task["title"], "harness": task["harness"],
             "model": task["model"], "status": task["status"],
         });
+        if task["status"] == "queued" && task["held"] == true {
+            summary["held"] = json!(true);
+        }
         let workspace = &task["workspace"];
         if let Some(branch) = workspace["branch"].as_str() {
             summary["branch"] = json!(branch);
@@ -2325,7 +2328,7 @@ mod tests {
         let run = json!({"status": "active", "tasks": [
             {"sessionId": "worker-a", "title": "UI", "harness": "codex", "model": "one", "status": "running", "prompt": "private instructions", "result": "large result",
              "workspace": {"id": "checkout:/tmp/a-worktrees/mc-orch-1", "projectCwd": "/tmp/a", "checkoutCwd": "/tmp/a-worktrees/mc-orch-1", "kind": "worktree", "branch": "mc/orch-1"}},
-            {"sessionId": "worker-b", "title": "Tests", "harness": "claude", "model": "two", "status": "queued"}
+            {"sessionId": "worker-b", "title": "Tests", "harness": "claude", "model": "two", "status": "queued", "held": true}
         ]});
         save_orchestration(&conn, "lead", &run).unwrap();
         // Reopening/migration must not hydrate, pause or otherwise mutate runs.
@@ -2343,6 +2346,9 @@ mod tests {
         assert_eq!(summary["tasks"][0]["worktreeCwd"], "/tmp/a-worktrees/mc-orch-1");
         assert!(summary["tasks"][1].get("branch").is_none());
         assert!(summary["tasks"][1].get("worktreeCwd").is_none());
+        // A held queued task says so on the card after a reload too.
+        assert_eq!(summary["tasks"][1]["held"], true);
+        assert!(summary["tasks"][0].get("held").is_none());
         let worker = get_session(&conn, "worker-a").unwrap().unwrap();
         assert_eq!(worker.orchestration_lead_id.as_deref(), Some("lead"));
         assert!(has_user_block(&worker.blocks));

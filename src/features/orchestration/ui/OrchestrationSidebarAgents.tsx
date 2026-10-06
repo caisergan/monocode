@@ -250,6 +250,30 @@ export function OrchestrationSidebarAgents({
                         See details
                       </button>
                     )}
+                    {live?.status === "queued" &&
+                      (run?.status === "active" || run?.status === "paused") && (
+                        <button
+                          type="button"
+                          className={solidAction}
+                          disabled={pending}
+                          title={
+                            live.held
+                              ? "Let this task start when a worker slot is free"
+                              : "Keep this task from starting until you release it"
+                          }
+                          onClick={() =>
+                            void perform(() =>
+                              orchestrator.setTaskHeld(
+                                leadId,
+                                live.id,
+                                !live.held,
+                              ),
+                            )
+                          }
+                        >
+                          {live.held ? "Release" : "Hold"}
+                        </button>
+                      )}
                     {live && ["queued", "running"].includes(live.status) && (
                       <button
                         type="button"
@@ -308,7 +332,7 @@ export function OrchestrationSidebarAgents({
               ? "Stopping interrupted work before this run can resume."
               : leadBusy
                 ? "Waiting for the lead's current turn to finish before this run can resume."
-                : "Resume continues interrupted workers from their retained checkouts and starts queued work. Policy-blocked tasks stay stopped for review."}
+                : "Resume continues interrupted workers from their retained checkouts and starts queued work. Policy-blocked tasks stay stopped for review. You can message the lead meanwhile."}
           </p>
           {resumeBlocker && (
             <p className="px-0.5 text-[11px] leading-relaxed text-amber-400">

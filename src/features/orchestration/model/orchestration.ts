@@ -231,6 +231,8 @@ const FIELDS = new Map<string, string[]>([
   ["message", ["taskId", "text"]],
   ["retry", ["taskId", "text", "files"]],
   ["cancel", ["taskId"]],
+  ["hold", ["taskIds"]],
+  ["release", ["taskIds"]],
   ["wait", ["timeoutSeconds", "since"]],
   ["review", ["taskId"]],
   ["finish", []],
@@ -327,6 +329,8 @@ export class Orchestrator {
   private listeners = new Set<() => void>();
   private loaded = new Set<string>();
   private hydrating = new Map<string, Promise<void>>();
+  /** Leads holding a control connection in this app process. */
+  private connected = new Set<string>();
   private deleted = new Set<string>();
   private persisted = new Map<string, OrchestrationRun>();
   private saves = Promise.resolve();
@@ -660,6 +664,7 @@ export class Orchestrator {
           ].map((sessionId) => this.host?.stop(sessionId)),
         );
         await this.store.disable(id);
+        this.connected.delete(id);
       }
       const interrupted = new Set(
         run.tasks
@@ -889,6 +894,7 @@ export class Orchestrator {
       ".",
     ]);
     const cli = await this.store.enable(leadId, workspace.checkoutCwd);
+    this.connected.add(leadId);
     const resumedTasks =
       previous?.status === "paused"
         ? previous.tasks.map((task) =>
@@ -943,6 +949,7 @@ export class Orchestrator {
       });
     } catch (error) {
       await this.store.disable(leadId);
+      this.connected.delete(leadId);
       throw error;
     }
     // Nothing else continues the lead after Resume until a worker reports,
@@ -992,8 +999,6 @@ export class Orchestrator {
     );
     if (other)
       return "This checkout has an active orchestrator. Stop that run before starting independent work.";
-    if (own?.status === "paused")
-      return "Resume or stop orchestration before sending the lead another turn.";
     if (
       own?.status === "active" &&
       !sameCheckout(
@@ -1006,9 +1011,35 @@ export class Orchestrator {
   }
   prompt(id: string, prompt: string): string {
     const run = this.run(id);
+    if (run?.status === "paused" && run.leadId === id)
+      return `${prompt}\n\n${this.pausedLeadContext(run)}`;
     if (!run || run.status !== "active") return prompt;
     const cli = `${shellPath(run.cli)} control`;
-    return `${prompt}\n\n<monocode_orchestration>\nYou are the lead of a local MonoCode run. Coordinate the user's task using ${cli}. Run \`${cli} --help\` before your first command; it documents every action, its exact JSON fields and the retry rule. Credentials are already in your environment; never print them.\nEach call prints one JSON line and exits non-zero unless "ok" is true; read the "error" text, it says what to do next. Unknown JSON fields are rejected rather than ignored, so fix the field name instead of guessing. If a call fails before reaching MonoCode, retry it with the "requestId" from that response so the work is never queued twice.\nUse list to discover allowed harness/model IDs. Delegate bounded tasks with project-relative files (directories reserve their descendants), self-contained prompts and dependsOn task IDs. Use the checkout selected for this run. You may read and plan; leave project file edits to workers. Never start workers outside this CLI. Workers with overlapping files are queued. For project-wide validation, generators or broad formatting, assign a separate task with files ["."] and wait for other workers to finish. Workers must never commit, push, switch branches or write outside the selected checkout. If the user requested those final operations, review and integrate every worker, call finish, then perform the explicitly authorized finalization yourself from the lead checkout.\nAgents never prompt the user. When one needs an approval or answers a question, list, get and wait report it as needsInput on that task, and you decide with respond or answer; it stays stopped until you do. Judge the request against the task you assigned, and put it to the user in this conversation only when the call is genuinely theirs.\nSteer a running agent with steer to correct its course without losing its work; use message only once it has stopped. Read results with get or wait; completed means a turn finished, not that the work passed review. Review the actual changes, message a worker for fixes, and use review to accept each completed task. A scope-blocked worker is isolated to that task: use message if it should stay within its existing scope, retry with corrected project-relative files if the assignment was too narrow, or cancel it if no longer needed. Never expand scope merely to excuse an unexpected write. Call finish only when required work and combined validation are complete. You receive worker results automatically when idle; use bounded wait calls while supervising, passing the revision from your last list or wait as since so only changes come back. list and wait show the end of each result; get returns it in full. When the work must stop until the user weighs in, because the plan is wrong, a worker is doing damage or the user asked you to hold, call pause: every running agent stops with its work kept and queued tasks wait. Steer or cancel a single agent instead when only that one is off course. If the run is paused, list/get/wait remain readable and explain the reason. Stop polling, report that reason, and ask the user to click Resume; Resume automatically continues interrupted workers from their retained checkouts. Do not expose credentials, create worktrees, switch branches or silently escalate worker permissions.\n</monocode_orchestration>`;
+    return `${prompt}\n\n<monocode_orchestration>\nYou are the lead of a local MonoCode run. Coordinate the user's task using ${cli}. Run \`${cli} --help\` before your first command; it documents every action, its exact JSON fields and the retry rule. Credentials are already in your environment; never print them.\nEach call prints one JSON line and exits non-zero unless "ok" is true; read the "error" text, it says what to do next. Unknown JSON fields are rejected rather than ignored, so fix the field name instead of guessing. If a call fails before reaching MonoCode, retry it with the "requestId" from that response so the work is never queued twice.\nUse list to discover allowed harness/model IDs. Delegate bounded tasks with project-relative files (directories reserve their descendants), self-contained prompts and dependsOn task IDs. Use the checkout selected for this run. You may read and plan; leave project file edits to workers. Never start workers outside this CLI. Workers with overlapping files are queued. For project-wide validation, generators or broad formatting, assign a separate task with files ["."] and wait for other workers to finish. Workers must never commit, push, switch branches or write outside the selected checkout. If the user requested those final operations, review and integrate every worker, call finish, then perform the explicitly authorized finalization yourself from the lead checkout.\nAgents never prompt the user. When one needs an approval or answers a question, list, get and wait report it as needsInput on that task, and you decide with respond or answer; it stays stopped until you do. Judge the request against the task you assigned, and put it to the user in this conversation only when the call is genuinely theirs.\nSteer a running agent with steer to correct its course without losing its work; use message only once it has stopped. Read results with get or wait; completed means a turn finished, not that the work passed review. Review the actual changes, message a worker for fixes, and use review to accept each completed task. A scope-blocked worker is isolated to that task: use message if it should stay within its existing scope, retry with corrected project-relative files if the assignment was too narrow, or cancel it if no longer needed. Never expand scope merely to excuse an unexpected write. Call finish only when required work and combined validation are complete. You receive worker results automatically when idle; use bounded wait calls while supervising, passing the revision from your last list or wait as since so only changes come back. list and wait show the end of each result; get returns it in full. When the work must stop until the user weighs in, because the plan is wrong, a worker is doing damage or the user asked you to hold, call pause: every running agent stops with its work kept and queued tasks wait. Steer or cancel a single agent instead when only that one is off course. When queued work must wait for you or the user, hold those tasks; they never start until you release them. If the run is paused, list/get/wait remain readable and explain the reason. Stop polling, report that reason, and ask the user to click Resume; Resume automatically continues interrupted workers from their retained checkouts. Do not expose credentials, create worktrees, switch branches or silently escalate worker permissions.\n</monocode_orchestration>`;
+  }
+  /**
+   * What a paused lead needs to talk with the user. Nothing runs until
+   * Resume, and after a restart the lead has no control connection at all,
+   * so the run's state rides along with the turn.
+   */
+  private pausedLeadContext(run: OrchestrationRun): string {
+    const cli = `${shellPath(run.cli)} control`;
+    const access = this.connected.has(run.leadId)
+      ? `${cli} list, get and wait still show the current state, and hold and release still arrange queued tasks. Every other action is refused until Resume.`
+      : "Its control connection is closed until Resume, so the control CLI will not connect. Use the snapshot below. If a queued task must not start on Resume, ask the user to hold it on the session card.";
+    const snapshot = run.tasks.map((task) => ({
+      taskId: task.id,
+      title: task.title,
+      status: task.status,
+      accepted: task.accepted,
+      ...(task.dependsOn.length ? { dependsOn: task.dependsOn } : {}),
+      ...(task.held ? { held: true } : {}),
+      ...(task.error ? { error: task.error } : {}),
+      ...(task.result ? { resultTail: task.result.slice(-600) } : {}),
+    }));
+    return `<monocode_orchestration>\nYou lead a MonoCode orchestration run that is paused. Reason: ${
+      run.error ?? run.lastPauseReason ?? "not recorded"
+    }\nThe user is talking to you while it is paused. No agent runs and no task starts until the user clicks Resume in MonoCode; you cannot resume it yourself. ${access} Answer the user and agree with them what happens next. Make no project edits yourself. On Resume, interrupted tasks continue from their retained checkouts and queued tasks that are not held start as worker slots free up, and you get a turn to act on what you agreed: steer, message, cancel or delegate through the control CLI.\nRun snapshot: ${JSON.stringify(snapshot)}\n</monocode_orchestration>`;
   }
   async handle(
     leadId: string,
@@ -1044,7 +1075,13 @@ export class Orchestrator {
         const run = this.run(leadId);
         if (!run)
           throw new Error("No orchestration run was found for this lead");
-        if (run.status !== "active" && !["list", "get"].includes(action))
+        // Holding or releasing queued work starts nothing while paused, so
+        // the lead can arrange the queue before the user resumes.
+        if (
+          run.status !== "active" &&
+          !["list", "get"].includes(action) &&
+          !(run.status === "paused" && ["hold", "release"].includes(action))
+        )
           throw new Error(this.inactiveReason(run));
         if (
           !["list", "get"].includes(action) &&
@@ -1122,6 +1159,7 @@ export class Orchestrator {
     task: OrchestrationTask,
   ): string | undefined {
     if (task.status !== "queued") return undefined;
+    if (task.held) return "Held: release it to start";
     const dependency = run.tasks.find(
       (entry) => task.dependsOn.includes(entry.id) && !entry.accepted,
     );
@@ -1330,6 +1368,7 @@ export class Orchestrator {
             prompt: text(input.text, "text"),
             dependsOn: liveDependencies(this.run(run.leadId)!, target),
             status: "queued",
+            held: undefined,
             accepted: false,
             result: "",
             error: undefined,
@@ -1377,6 +1416,7 @@ export class Orchestrator {
             writeScopes: undefined,
             dependsOn: liveDependencies(current, target),
             status: "queued",
+            held: undefined,
             accepted: false,
             result: "",
             error: undefined,
@@ -1625,7 +1665,52 @@ export class Orchestrator {
           },
         );
         await this.store.disable(run.leadId);
+        this.connected.delete(run.leadId);
         return result;
+      }
+      case "hold":
+      case "release": {
+        const hold = action === "hold";
+        const current = this.run(run.leadId)!;
+        const targets =
+          input.taskIds === undefined
+            ? current.tasks.filter((entry) => entry.status === "queued")
+            : strings(input.taskIds, "taskIds").map((id) => {
+                const found = current.tasks.find((entry) => entry.id === id);
+                if (!found)
+                  throw new Error(
+                    `Task ${id} does not belong to this run. Use taskIds from list.`,
+                  );
+                if (found.status !== "queued")
+                  throw new Error(
+                    `${found.title} is ${found.status}; only queued tasks can be ${
+                      hold ? "held" : "released"
+                    }.${found.status === "running" ? " Steer it, cancel it or pause the run instead." : ""}`,
+                  );
+                return found;
+              });
+        const changed = targets
+          .filter((entry) => !!entry.held !== hold)
+          .map((entry) => entry.id);
+        return record(
+          {
+            ...current,
+            tasks: current.tasks.map((entry) =>
+              changed.includes(entry.id)
+                ? { ...entry, held: hold || undefined }
+                : entry,
+            ),
+          },
+          {
+            [hold ? "held" : "released"]: changed,
+            stillHeld: current.tasks
+              .filter((entry) =>
+                changed.includes(entry.id) ? hold : !!entry.held,
+              )
+              .filter((entry) => entry.status === "queued")
+              .map((entry) => entry.id),
+          },
+        );
       }
       case "pause": {
         const why =
@@ -1690,7 +1775,7 @@ export class Orchestrator {
         since > this.revision ||
         !run.tasks.some((task) => this.changedSince(task, since))) &&
       (run.tasks.some(activeTask) ||
-        run.tasks.some((task) => task.status === "queued"))
+        run.tasks.some((task) => task.status === "queued" && !task.held))
     ) {
       await new Promise<void>((resolve) => {
         const finish = () => {
@@ -1823,6 +1908,7 @@ export class Orchestrator {
           if (
             !task ||
             task.status !== "queued" ||
+            task.held ||
             task.dependsOn.some(
               (id) => !run.tasks.find((entry) => entry.id === id)?.accepted,
             )
@@ -2244,6 +2330,28 @@ export class Orchestrator {
       await this.interruptTask(leadId, task.id, error);
   }
   /**
+   * The user holds or releases one queued task from the card. Serialized with
+   * control actions, and a release lets the dispatcher start it right away.
+   */
+  setTaskHeld(leadId: string, taskId: string, held: boolean): Promise<void> {
+    const result = this.actions
+      .catch(() => undefined)
+      .then(async () => {
+        const run = this.run(leadId);
+        const task = run?.tasks.find((entry) => entry.id === taskId);
+        if (
+          !run ||
+          (run.status !== "active" && run.status !== "paused") ||
+          task?.status !== "queued" ||
+          !!task.held === held
+        )
+          return;
+        await this.patchTask(leadId, taskId, { held: held || undefined });
+      });
+    this.actions = result.catch(() => undefined);
+    return result.finally(() => void this.pump());
+  }
+  /**
    * The user pauses the whole run: its agents stop with their checkouts kept,
    * queued work waits, and the lead's turn stops too, since Resume needs an
    * idle lead. Queued behind control actions so a review is never cut in half.
@@ -2326,6 +2434,7 @@ export class Orchestrator {
     );
     this.emit();
     await this.store.disable(leadId);
+    this.connected.delete(leadId);
   }
   stopForSession(id: string): Promise<void> | null {
     const run = this.forSession(id);
