@@ -246,11 +246,16 @@ struct HarnessMark: View {
   var size: CGFloat
 
   var body: some View {
-    Image("harness-\(harness)")
-      .resizable()
-      .scaledToFit()
-      .frame(width: size, height: size)
-      .accessibilityHidden(true)
+    Group {
+      if UIImage(named: "harness-\(harness)") != nil {
+        Image("harness-\(harness)").resizable().scaledToFit()
+      } else {
+        // A harness the catalog has no mark for yet.
+        Image(systemName: "cpu").resizable().scaledToFit().fontWeight(.light)
+      }
+    }
+    .frame(width: size, height: size)
+    .accessibilityHidden(true)
   }
 }
 

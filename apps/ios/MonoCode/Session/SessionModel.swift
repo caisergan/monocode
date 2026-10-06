@@ -18,6 +18,11 @@ final class SessionModel: TranscriptViewDelegate {
   private(set) var store: SessionStore?
   /// The transcript is at its end; the jump button hides.
   private(set) var atBottom = true
+  /// The person scrolled back into older rows: the composer folds to a
+  /// capsule until they turn back, reach the end or tap it.
+  private(set) var composerCollapsed = false
+  /// The composer's picks for the next message.
+  @ObservationIgnored let draft = ComposerDraft()
   /// The block a tapped tool, thinking or trail row shows in the tool sheet.
   var toolBlock: ToolSheetItem?
   @ObservationIgnored var openURL: ((URL) -> Void)?
@@ -56,6 +61,12 @@ final class SessionModel: TranscriptViewDelegate {
 
   func jumpToLatest() {
     transcript.scrollToBottom(animated: true)
+  }
+
+  /// A tap on the collapsed composer opens it where the reader is.
+  func expandComposer() {
+    transcript.resetReadingBack()
+    composerCollapsed = false
   }
 
   /// An undecided approval in the window (M6: the jump button says so).
@@ -128,6 +139,12 @@ final class SessionModel: TranscriptViewDelegate {
 
   func transcript(_ view: MonoTranscriptView, atBottomChanged atBottom: Bool) {
     self.atBottom = atBottom
+  }
+
+  func transcript(_ view: MonoTranscriptView, readingBackChanged readingBack: Bool) {
+    // VoiceOver users keep the full composer: a control that moves while
+    // they swipe through rows is hard to find again.
+    composerCollapsed = readingBack && !UIAccessibility.isVoiceOverRunning
   }
 
   func transcriptNeedsOlder(_ view: MonoTranscriptView) {

@@ -17,6 +17,12 @@ struct SessionView: View {
   @State private var model: SessionModel
   @State private var composerHeight: CGFloat = 0
   @State private var showInfo = false
+  @State private var sheet: ComposerSheet?
+
+  enum ComposerSheet: String, Identifiable {
+    case add, model, access
+    var id: String { rawValue }
+  }
 
   init(env: String, sessionId: String) {
     self.env = env
@@ -38,17 +44,63 @@ struct SessionView: View {
     return parts.joined(separator: " · ")
   }
 
+  /// The chip row, from the composer's draft over the session.
+  private var chips: ComposerChips {
+    let draft = model.draft
+    let session = value?.session
+    let modelId = draft.model(for: session)
+    let agent = engine.catalogs.catalogs[env]?.model(modelId)
+    let values = draft.settings(for: session)
+    let effort = agent.flatMap { ($0.settings ?? []).first(where: ModelSettings.isEffort) }
+      .map { ModelSettings.valueLabel($0, values) }
+      ?? values["effort"].map { $0.prefix(1).uppercased() + $0.dropFirst() }
+    return ComposerChips(
+      harness: agent?.harness ?? session?.harness ?? engine.inbox.item(env, sessionId)?.harness ?? "claude",
+      model: engine.catalogs.modelName(env, modelId.isEmpty ? engine.inbox.item(env, sessionId)?.model : modelId),
+      effort: effort,
+      access: AccessMode(draft.runtimeMode(for: session)),
+      mode: draft.mode,
+      add: { sheet = .add },
+      pickModel: { sheet = .model },
+      pickAccess: { sheet = .access },
+      clearMode: { draft.mode = nil })
+  }
+
+  @ViewBuilder private func composerSheet(_ sheet: ComposerSheet) -> some View {
+    let draft = model.draft
+    let running = value?.status == .running
+    switch sheet {
+    case .add:
+      AddSheet(mode: draft.mode) { draft.mode = $0 }
+    case .model:
+      ModelSheet(env: env, session: value?.session, running: running, draft: draft)
+    case .access:
+      AccessSheet(running: running, current: AccessMode(draft.runtimeMode(for: value?.session))) {
+        draft.runtimeMode = $0.runtimeMode
+      }
+    }
+  }
+
   var body: some View {
     @Bindable var model = model
+    // An approval below keeps the composer open: the jump's pill says so.
+    let collapsed = model.composerCollapsed && !model.waitingForApproval
     ZStack(alignment: .bottom) {
       TranscriptHost(transcript: model.transcript, bottomBars: composerHeight)
         .ignoresSafeArea()
-      JumpToLatest(visible: !model.atBottom, waiting: model.waitingForApproval) { model.jumpToLatest() }
+      JumpToLatest.Floating(visible: !model.atBottom && !collapsed, waiting: model.waitingForApproval) { model.jumpToLatest() }
         .padding(.bottom, 12)
     }
     .safeAreaBar(edge: .bottom) {
-      ComposerPlaceholder(branch: value?.session.branch, worktree: value?.session.worktreeCwd != nil)
-        .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { composerHeight = $0 }
+      SessionBottomBar(
+        branch: value?.session.branch,
+        worktree: value?.session.worktreeCwd != nil,
+        chips: chips,
+        collapsed: collapsed,
+        jumpVisible: !model.atBottom,
+        jump: { model.jumpToLatest() },
+        expand: { model.expandComposer() },
+        onComposerHeight: { composerHeight = $0 })
     }
     .overlay(alignment: .top) {
       if let notice = engine.hosts.notice(env) {
@@ -60,11 +112,17 @@ struct SessionView: View {
     .toolbarTitleDisplayMode(.inline)
     .toolbarVisibility(.hidden, for: .tabBar)
     .toolbar {
-      ToolbarItem(placement: .topBarTrailing) { menu }
+      ToolbarItem(placement: .topBarTrailing) {
+        SessionMenu(sessionId: sessionId, harnessId: value?.session.providerSessionId, showInfo: $showInfo)
+          .equatable()
+      }
     }
     .sheet(item: $model.toolBlock) { item in
       ToolSheet(env: env, sessionId: sessionId, item: item)
         .environment(\.palette, palette)
+    }
+    .sheet(item: $sheet) { sheet in
+      composerSheet(sheet).environment(\.palette, palette)
     }
     .sheet(isPresented: $showInfo) {
       SessionInfoSheet(env: env, value: value)
@@ -99,66 +157,101 @@ struct SessionView: View {
     }
     #endif
   }
+}
 
-  /// The ⋯ menu in 11 §11.15's order. Explorer, Changes, Rename, Pin,
-  /// Archive, Mute, Compact context and Delete need host methods or the write
-  /// path that R1 has not built, so they are not listed.
-  private var menu: some View {
+/// The ⋯ menu in 11 §11.15's order. Explorer, Changes, Rename, Pin,
+/// Archive, Mute, Compact context and Delete need host methods or the write
+/// path that R1 has not built, so they are not listed.
+///
+/// Equatable on its ids alone: the session screen re-renders on every
+/// streamed delta, and a menu rebuilt under the finger drops its taps.
+private struct SessionMenu: View, Equatable {
+  var sessionId: String
+  var harnessId: String?
+  @Binding var showInfo: Bool
+  @State private var copied = 0
+
+  static func == (a: Self, b: Self) -> Bool {
+    a.sessionId == b.sessionId && a.harnessId == b.harnessId
+  }
+
+  var body: some View {
     Menu("Session menu", systemImage: "ellipsis") {
       Button("Session info", systemImage: "info.circle") { showInfo = true }
-      Menu("Copy session ID", systemImage: "doc.on.doc") {
-        if let harness = value?.session.providerSessionId {
-          Button("Harness session ID") { UIPasteboard.general.string = harness }
+      if let harnessId {
+        Menu("Copy session ID", systemImage: "doc.on.doc") {
+          Button("Harness session ID") { copy(harnessId) }
+          Button("MonoCode session ID") { copy(sessionId) }
         }
-        Button("MonoCode session ID") { UIPasteboard.general.string = sessionId }
+      } else {
+        // No harness id yet: one choice needs no submenu.
+        Button("Copy session ID", systemImage: "doc.on.doc") { copy(sessionId) }
       }
     }
+    .sensoryFeedback(.success, trigger: copied)
+  }
+
+  private func copy(_ id: String) {
+    UIPasteboard.general.string = id
+    copied += 1
   }
 }
 
-/// Jump to latest (16 §16.6.4): a 32 pt glass circle with `chevron.down`, or
-/// the amber-dotted "Waiting for approval" pill when an approval is below
-/// (M6). It enters and leaves with `ease.pop`, 170 ms.
-private struct JumpToLatest: View {
-  var visible: Bool
+/// Jump to latest (16 §16.6.4): a glass circle with `chevron.down`, 32 pt
+/// over the open composer and 44 pt beside the folded one, or the
+/// amber-dotted "Waiting for approval" pill when an approval is below (M6).
+struct JumpToLatest: View {
   var waiting: Bool
+  var size: CGFloat
   var action: () -> Void
   @Environment(\.palette) private var palette
-  @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
   /// `ease.pop` (11 §11.6), 170 ms. MonoDesign has no token for it yet.
   static let pop = CubicBezier(0.16, 1, 0.3, 1).animation(milliseconds: 170)
 
   var body: some View {
-    Group {
-      if visible {
-        Button(action: action) {
-          if waiting {
-            HStack(spacing: 6) {
-              Circle().fill(palette.status.attention.color).frame(width: 6, height: 6)
-              Text("Waiting for approval")
-                .font(.mono(Tokens.TypeScale.secondary, .medium))
-                .foregroundStyle(palette.content.color)
-              Image(systemName: "chevron.down").font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(palette.text.secondary.color)
-            }
-            .padding(.horizontal, 12)
-            .frame(height: 32)
-            .glassEffect(.regular.interactive(), in: .capsule)
-          } else {
-            Image(systemName: "chevron.down")
-              .font(.system(size: 13, weight: .semibold))
-              .foregroundStyle(palette.content.color)
-              .frame(width: 32, height: 32)
-              .glassEffect(.regular.interactive(), in: .circle)
-          }
+    Button(action: action) {
+      if waiting {
+        HStack(spacing: 6) {
+          Circle().fill(palette.status.attention.color).frame(width: 6, height: 6)
+          Text("Waiting for approval")
+            .font(.mono(Tokens.TypeScale.secondary, .medium))
+            .foregroundStyle(palette.content.color)
+          Image(systemName: "chevron.down").font(.system(size: 11, weight: .semibold))
+            .foregroundStyle(palette.text.secondary.color)
         }
-        .buttonStyle(.plain)
-        .accessibilityLabel(waiting ? "Waiting for approval. Jump to latest" : "Jump to latest")
-        .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.94)).combined(with: .offset(y: 8)))
+        .padding(.horizontal, 12)
+        .frame(height: 32)
+        .glassEffect(.regular.tint(palette.base.color).interactive(), in: .capsule)
+      } else {
+        Image(systemName: "chevron.down")
+          .font(.system(size: size > 32 ? 15 : 13, weight: .semibold))
+          .foregroundStyle(palette.content.color)
+          .frame(width: size, height: size)
+          .glassEffect(.regular.tint(palette.base.color).interactive(), in: .circle)
       }
     }
-    .animation(Self.pop, value: visible)
-    .animation(Self.pop, value: waiting)
+    .buttonStyle(.plain)
+    .accessibilityLabel(waiting ? "Waiting for approval. Jump to latest" : "Jump to latest")
+  }
+
+  /// The 32 pt jump 12 pt above the open composer, entering and leaving
+  /// with `ease.pop`.
+  struct Floating: View {
+    var visible: Bool
+    var waiting: Bool
+    var action: () -> Void
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    var body: some View {
+      Group {
+        if visible {
+          JumpToLatest(waiting: waiting, size: 32, action: action)
+            .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale(scale: 0.94)).combined(with: .offset(y: 8)))
+        }
+      }
+      .animation(JumpToLatest.pop, value: visible)
+      .animation(JumpToLatest.pop, value: waiting)
+    }
   }
 }

@@ -23,7 +23,13 @@ struct TranscriptHost: UIViewControllerRepresentable {
 final class TranscriptHostController: UIViewController {
   let transcript: MonoTranscriptView
   var bottomBars: CGFloat = 0 {
-    didSet { if bottomBars != oldValue { updateInsets() } }
+    didSet {
+      guard bottomBars != oldValue else { return }
+      // The composer folding or opening: the rows pinned to the end move
+      // with it on the same spring, not in one jump.
+      guard oldValue > 0, !UIAccessibility.isReduceMotionEnabled else { return updateInsets() }
+      UIView.animate(springDuration: ComposerMotion.duration, bounce: ComposerMotion.bounce) { self.updateInsets() }
+    }
   }
 
   init(transcript: MonoTranscriptView) {
