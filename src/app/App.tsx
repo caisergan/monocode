@@ -8878,22 +8878,36 @@ function Workspace({
   useEffect(() => {
     if (!autoContinueKey) return;
     const ids = autoContinueKey.split("\n");
+    let cancelled = false;
+    const eligible = (id: string) => {
+      const session = sessionsRef.current.find((entry) => entry.id === id);
+      return session &&
+        canAutoContinue(session) &&
+        isLiveHarness(session.harness)
+        ? session
+        : undefined;
+    };
     // Delay past React StrictMode's dev remount so Continue is not claimed
     // against a discarded tree (sessionStorage also survives Vite reloads).
     const timer = window.setTimeout(() => {
       for (const id of ids) {
-        const session = sessionsRef.current.find((entry) => entry.id === id);
-        if (
-          !session ||
-          !canAutoContinue(session) ||
-          !isLiveHarness(session.harness)
-        ) {
-          continue;
-        }
-        onSubmit(id, CONTINUE_PROMPT);
+        const session = eligible(id);
+        if (!session) continue;
+        // An orchestration run's agents wait for its Resume. Its saved run
+        // may still be loading this soon after launch, so ask once it is.
+        void orchestrator
+          .ownsTurns(session)
+          .then((owned) => {
+            if (!owned && !cancelled && eligible(id))
+              onSubmit(id, CONTINUE_PROMPT);
+          })
+          .catch(console.error);
       }
     }, 0);
-    return () => window.clearTimeout(timer);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
   }, [autoContinueKey, onSubmit]);
 
   const onCompactContext = useCallback(

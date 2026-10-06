@@ -325,6 +325,7 @@ export class Orchestrator {
   private runs: OrchestrationRun[] = [];
   private listeners = new Set<() => void>();
   private loaded = new Set<string>();
+  private hydrating = new Map<string, Promise<void>>();
   private deleted = new Set<string>();
   private persisted = new Map<string, OrchestrationRun>();
   private saves = Promise.resolve();
@@ -619,9 +620,33 @@ export class Orchestrator {
       return false;
     }
   }
-  async hydrate(id: string) {
-    if (this.loaded.has(id) || this.run(id)) return;
+  /** Load a lead's saved run once; concurrent callers share that load. */
+  hydrate(id: string): Promise<void> {
+    const pending = this.hydrating.get(id);
+    if (pending) return pending;
+    if (this.loaded.has(id) || this.run(id)) return Promise.resolve();
     this.loaded.add(id);
+    const loading = this.restore(id).finally(() => this.hydrating.delete(id));
+    this.hydrating.set(id, loading);
+    return loading;
+  }
+  /**
+   * Whether a run that can still resume owns this session's turns. Right
+   * after launch its run may not be loaded yet, so this loads it first.
+   */
+  async ownsTurns(
+    session: Pick<Session, "id" | "orchestrationLeadId">,
+  ): Promise<boolean> {
+    await Promise.all([
+      this.hydrate(session.id),
+      session.orchestrationLeadId
+        ? this.hydrate(session.orchestrationLeadId)
+        : undefined,
+    ]);
+    const run = this.forSession(session.id);
+    return !!run && (run.status === "active" || run.status === "paused");
+  }
+  private async restore(id: string) {
     try {
       const loaded = await this.store.load(id);
       if (!loaded || this.run(id) || this.deleted.has(id)) return;
@@ -919,6 +944,24 @@ export class Orchestrator {
       await this.store.disable(leadId);
       throw error;
     }
+    // Nothing else continues the lead after Resume until a worker reports,
+    // and a lead whose own turn was cut off would otherwise sit idle.
+    if (previous?.status === "paused" && !approved)
+      this.host!.submit(
+        leadId,
+        `The user resumed this orchestration run. It was paused because: ${
+          previous.error ?? previous.lastPauseReason ?? "the run was paused"
+        }\nInterrupted workers continue from their retained checkouts, and queued work starts as worker slots free up. Policy-blocked tasks stay stopped until you message, retry or cancel them. Run list to see where every task stands, then keep supervising the original request.`,
+        (outcome) => {
+          if (outcome.status !== "completed" && !outcome.usageLimited)
+            void this.pause(
+              leadId,
+              outcome.error ??
+                "The lead was interrupted. Its agents were stopped; review and resume the run.",
+            ).catch(console.error);
+          else this.sync();
+        },
+      );
     void this.pump();
     this.sync();
   }
@@ -933,6 +976,10 @@ export class Orchestrator {
       (own.status === "active" || own.tasks.some(activeTask))
     )
       return "This worker is managed by the orchestrator. Send instructions through its lead or stop the run first.";
+    // Resume continues a paused run's workers; a turn sent around it would
+    // run work the run believes is stopped.
+    if (own && own.leadId !== id && own.status === "paused")
+      return "This worker belongs to a paused orchestration run. Resume or stop the run before sending it a turn.";
     const other = this.runs.find(
       (run) =>
         (run.status === "active" || run.tasks.some(activeTask)) &&
