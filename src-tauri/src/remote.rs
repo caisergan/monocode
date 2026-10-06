@@ -391,6 +391,8 @@ fn supported_remote_method(method: &str) -> bool {
             | "git.index"
             | "git.fileDiff"
             | "git.action"
+            | "agentSessions.list"
+            | "agentSessions.import"
     )
 }
 
@@ -687,6 +689,8 @@ mod tests {
             "git.worktreeCreate",
             "attachments.upload",
             "attachments.read",
+            "agentSessions.list",
+            "agentSessions.import",
         ] {
             assert!(supported_remote_method(method), "{method}");
         }
