@@ -57,6 +57,10 @@ public protocol TranscriptViewDelegate: AnyObject {
   func transcript(_ view: MonoTranscriptView, didTapFile reference: String, rowId: String)
   /// Drives the jump-to-latest button.
   func transcript(_ view: MonoTranscriptView, atBottomChanged atBottom: Bool)
+  /// The person's own scrolling turned toward older rows (`true`) or back
+  /// toward the latest (`false`). Programmatic scrolls, tail following and
+  /// rubber-banding past either end never report.
+  func transcript(_ view: MonoTranscriptView, readingBackChanged readingBack: Bool)
   /// The reader reached the top; the owner loads an older page.
   func transcriptNeedsOlder(_ view: MonoTranscriptView)
   /// The first non-empty snapshot is on screen.
@@ -70,6 +74,7 @@ extension TranscriptViewDelegate {
   public func transcript(_ view: MonoTranscriptView, didTapLink href: String, rowId: String) {}
   public func transcript(_ view: MonoTranscriptView, didTapFile reference: String, rowId: String) {}
   public func transcript(_ view: MonoTranscriptView, atBottomChanged atBottom: Bool) {}
+  public func transcript(_ view: MonoTranscriptView, readingBackChanged readingBack: Bool) {}
   public func transcriptNeedsOlder(_ view: MonoTranscriptView) {}
   public func transcript(_ view: MonoTranscriptView, didBecomeReadyWith rows: Int) {}
   public func transcript(_ view: MonoTranscriptView, didFinishBenchmark result: BenchmarkResult) {}
@@ -137,6 +142,13 @@ public final class MonoTranscriptView: UIView, UIScrollViewDelegate {
   private var atBottom = true
   private var dragging = false
   private var lastOffset: CGFloat = 0
+  /// Travel in the current direction of a person's scroll, negative toward
+  /// older rows, and what was last reported from it.
+  private var travel: CGFloat = 0
+  private var readingBack = false
+  /// The view is moving the offset itself (following the tail, keeping a
+  /// row in place, new insets): not the person's scrolling.
+  private var adjusting = false
   private var olderRequested = false
   private var benchmark: BenchmarkRun?
   private var displayLink: CADisplayLink?
@@ -208,6 +220,8 @@ public final class MonoTranscriptView: UIView, UIScrollViewDelegate {
   }
 
   public func scrollToBottom(animated: Bool) {
+    // A jump during a fling stops it without `scrollViewDidEndDecelerating`.
+    dragging = false
     following = true
     let target = maxOffset()
     scrollView.setContentOffset(CGPoint(x: 0, y: target), animated: animated)
@@ -241,14 +255,20 @@ public final class MonoTranscriptView: UIView, UIScrollViewDelegate {
     scrollView.frame = bounds
     engine.setWidth(bounds.width)
     updateInsets()
-    if wasAtBottom { scrollView.contentOffset.y = maxOffset() }
+    if wasAtBottom { setOffset(maxOffset()) }
     realize()
   }
 
   private func updateInsets() {
     scrollView.contentInset = UIEdgeInsets(top: topInset, left: 0, bottom: bottomInset, right: 0)
     scrollView.verticalScrollIndicatorInsets = scrollView.contentInset
-    if following { scrollView.contentOffset.y = maxOffset() }
+    if following { setOffset(maxOffset()) }
+  }
+
+  private func setOffset(_ y: CGFloat) {
+    adjusting = true
+    scrollView.contentOffset.y = y
+    adjusting = false
   }
 
   private func maxOffset() -> CGFloat {
@@ -270,9 +290,9 @@ public final class MonoTranscriptView: UIView, UIScrollViewDelegate {
     canvas.frame = CGRect(x: 0, y: 0, width: bounds.width, height: next.total)
     scrollView.contentSize = CGSize(width: bounds.width, height: next.total)
     if following {
-      scrollView.contentOffset.y = maxOffset()
+      setOffset(maxOffset())
     } else if let (id, delta) = anchor, let i = next.index[id] {
-      scrollView.contentOffset.y = next.offsets[i] - delta
+      setOffset(next.offsets[i] - delta)
     }
     realize()
     CATransaction.commit()
@@ -440,6 +460,7 @@ public final class MonoTranscriptView: UIView, UIScrollViewDelegate {
     if dragging && y < lastOffset - 0.5 { following = false }
     if nearBottom && benchmark == nil { following = true }
     setAtBottom(nearBottom)
+    trackDirection(from: lastOffset, to: y)
     lastOffset = y
     realize()
     if y < 400 && !olderRequested && snapshot.count > 0 && benchmark == nil {
@@ -448,10 +469,42 @@ public final class MonoTranscriptView: UIView, UIScrollViewDelegate {
     }
   }
 
+  /// 24 pt toward older rows reads back; 12 pt toward the latest stops.
+  /// Offsets are clamped to the scrollable range, so a bounce off the end
+  /// doesn't count as a turn.
+  private func trackDirection(from old: CGFloat, to new: CGFloat) {
+    guard !adjusting else { return }
+    guard dragging, benchmark == nil else {
+      travel = 0
+      return
+    }
+    let top = -scrollView.contentInset.top
+    let bottom = maxOffset()
+    let delta = min(max(new, top), bottom) - min(max(old, top), bottom)
+    guard delta != 0 else { return }
+    travel = (delta < 0) == (travel < 0) ? travel + delta : delta
+    if travel <= -24 { setReadingBack(true) }
+    if travel >= 12 { setReadingBack(false) }
+  }
+
+  /// Forgets a reading-back turn the owner undid itself (a tap on the
+  /// collapsed composer), so the next scroll toward older rows reports again.
+  public func resetReadingBack() {
+    travel = 0
+    readingBack = false
+  }
+
+  private func setReadingBack(_ value: Bool) {
+    guard value != readingBack else { return }
+    readingBack = value
+    delegate?.transcript(self, readingBackChanged: value)
+  }
+
   private func setAtBottom(_ value: Bool) {
     guard value != atBottom else { return }
     atBottom = value
     delegate?.transcript(self, atBottomChanged: value)
+    if value { setReadingBack(false) }
   }
 
   // MARK: Touch
