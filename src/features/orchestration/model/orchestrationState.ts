@@ -84,6 +84,8 @@ export type OrchestrationTask = {
   recoveryPrompt?: string;
   /** A usage limit stopped the running turn; it continues at the reset. */
   usageLimit?: { resetsAt?: number };
+  /** Queued but never started automatically until the lead or user releases it. */
+  held?: boolean;
   delivered: boolean;
   /** Workspace selection is independent from task/dependency identity. */
   workspacePolicy?: WorkspacePolicy;

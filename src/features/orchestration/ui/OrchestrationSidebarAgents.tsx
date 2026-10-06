@@ -250,6 +250,30 @@ export function OrchestrationSidebarAgents({
                         See details
                       </button>
                     )}
+                    {live?.status === "queued" &&
+                      (run?.status === "active" || run?.status === "paused") && (
+                        <button
+                          type="button"
+                          className={solidAction}
+                          disabled={pending}
+                          title={
+                            live.held
+                              ? "Let this task start when a worker slot is free"
+                              : "Keep this task from starting until you release it"
+                          }
+                          onClick={() =>
+                            void perform(() =>
+                              orchestrator.setTaskHeld(
+                                leadId,
+                                live.id,
+                                !live.held,
+                              ),
+                            )
+                          }
+                        >
+                          {live.held ? "Release" : "Hold"}
+                        </button>
+                      )}
                     {live && ["queued", "running"].includes(live.status) && (
                       <button
                         type="button"

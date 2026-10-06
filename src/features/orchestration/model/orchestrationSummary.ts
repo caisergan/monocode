@@ -14,6 +14,8 @@ export type OrchestrationSummary = {
     needsInput?: boolean;
     /** Stopped by a usage limit; continues at the reset. */
     usageLimited?: boolean;
+    /** Queued, but held until the lead or user releases it. */
+    held?: boolean;
     /** Where the worker writes, once it has a checkout of its own. */
     branch?: string;
     worktreeCwd?: string;
@@ -29,7 +31,16 @@ export function summarizeOrchestration(
     status: run.status,
     live: true,
     tasks: run.tasks.map(
-      ({ sessionId, title, harness, model, status, usageLimit, workspace }) => ({
+      ({
+        sessionId,
+        title,
+        harness,
+        model,
+        status,
+        usageLimit,
+        workspace,
+        held,
+      }) => ({
         sessionId,
         title,
         harness,
@@ -38,6 +49,7 @@ export function summarizeOrchestration(
         needsInput:
           !!byId.get(sessionId) && sessionNeedsInput(byId.get(sessionId)!),
         ...(status === "running" && usageLimit ? { usageLimited: true } : {}),
+        ...(status === "queued" && held ? { held: true } : {}),
         ...(workspace?.branch ? { branch: workspace.branch } : {}),
         ...(workspace?.kind === "worktree"
           ? { worktreeCwd: workspace.checkoutCwd }
@@ -58,6 +70,7 @@ export function orchestrationTaskLabel(
   )
     return "Saved";
   if (task.usageLimited && task.status === "running") return "Usage limit";
+  if (task.held && task.status === "queued") return "Held";
   if (summary.status === "paused" && task.status === "queued") return "Paused";
   return {
     queued: "Queued",
