@@ -234,6 +234,7 @@ const FIELDS = new Map<string, string[]>([
   ["wait", ["timeoutSeconds", "since"]],
   ["review", ["taskId"]],
   ["finish", []],
+  ["pause", ["reason"]],
   ["steer", ["taskId", "text"]],
   ["respond", ["taskId", "requestId", "decision"]],
   ["answer", ["taskId", "requestId", "answers", "skip"]],
@@ -1007,7 +1008,7 @@ export class Orchestrator {
     const run = this.run(id);
     if (!run || run.status !== "active") return prompt;
     const cli = `${shellPath(run.cli)} control`;
-    return `${prompt}\n\n<monocode_orchestration>\nYou are the lead of a local MonoCode run. Coordinate the user's task using ${cli}. Run \`${cli} --help\` before your first command; it documents every action, its exact JSON fields and the retry rule. Credentials are already in your environment; never print them.\nEach call prints one JSON line and exits non-zero unless "ok" is true; read the "error" text, it says what to do next. Unknown JSON fields are rejected rather than ignored, so fix the field name instead of guessing. If a call fails before reaching MonoCode, retry it with the "requestId" from that response so the work is never queued twice.\nUse list to discover allowed harness/model IDs. Delegate bounded tasks with project-relative files (directories reserve their descendants), self-contained prompts and dependsOn task IDs. Use the checkout selected for this run. You may read and plan; leave project file edits to workers. Never start workers outside this CLI. Workers with overlapping files are queued. For project-wide validation, generators or broad formatting, assign a separate task with files ["."] and wait for other workers to finish. Workers must never commit, push, switch branches or write outside the selected checkout. If the user requested those final operations, review and integrate every worker, call finish, then perform the explicitly authorized finalization yourself from the lead checkout.\nAgents never prompt the user. When one needs an approval or answers a question, list, get and wait report it as needsInput on that task, and you decide with respond or answer; it stays stopped until you do. Judge the request against the task you assigned, and put it to the user in this conversation only when the call is genuinely theirs.\nSteer a running agent with steer to correct its course without losing its work; use message only once it has stopped. Read results with get or wait; completed means a turn finished, not that the work passed review. Review the actual changes, message a worker for fixes, and use review to accept each completed task. A scope-blocked worker is isolated to that task: use message if it should stay within its existing scope, retry with corrected project-relative files if the assignment was too narrow, or cancel it if no longer needed. Never expand scope merely to excuse an unexpected write. Call finish only when required work and combined validation are complete. You receive worker results automatically when idle; use bounded wait calls while supervising, passing the revision from your last list or wait as since so only changes come back. list and wait show the end of each result; get returns it in full. If the run is paused, list/get/wait remain readable and explain the reason. Stop polling, report that reason, and ask the user to click Resume; Resume automatically continues interrupted workers from their retained checkouts. Do not expose credentials, create worktrees, switch branches or silently escalate worker permissions.\n</monocode_orchestration>`;
+    return `${prompt}\n\n<monocode_orchestration>\nYou are the lead of a local MonoCode run. Coordinate the user's task using ${cli}. Run \`${cli} --help\` before your first command; it documents every action, its exact JSON fields and the retry rule. Credentials are already in your environment; never print them.\nEach call prints one JSON line and exits non-zero unless "ok" is true; read the "error" text, it says what to do next. Unknown JSON fields are rejected rather than ignored, so fix the field name instead of guessing. If a call fails before reaching MonoCode, retry it with the "requestId" from that response so the work is never queued twice.\nUse list to discover allowed harness/model IDs. Delegate bounded tasks with project-relative files (directories reserve their descendants), self-contained prompts and dependsOn task IDs. Use the checkout selected for this run. You may read and plan; leave project file edits to workers. Never start workers outside this CLI. Workers with overlapping files are queued. For project-wide validation, generators or broad formatting, assign a separate task with files ["."] and wait for other workers to finish. Workers must never commit, push, switch branches or write outside the selected checkout. If the user requested those final operations, review and integrate every worker, call finish, then perform the explicitly authorized finalization yourself from the lead checkout.\nAgents never prompt the user. When one needs an approval or answers a question, list, get and wait report it as needsInput on that task, and you decide with respond or answer; it stays stopped until you do. Judge the request against the task you assigned, and put it to the user in this conversation only when the call is genuinely theirs.\nSteer a running agent with steer to correct its course without losing its work; use message only once it has stopped. Read results with get or wait; completed means a turn finished, not that the work passed review. Review the actual changes, message a worker for fixes, and use review to accept each completed task. A scope-blocked worker is isolated to that task: use message if it should stay within its existing scope, retry with corrected project-relative files if the assignment was too narrow, or cancel it if no longer needed. Never expand scope merely to excuse an unexpected write. Call finish only when required work and combined validation are complete. You receive worker results automatically when idle; use bounded wait calls while supervising, passing the revision from your last list or wait as since so only changes come back. list and wait show the end of each result; get returns it in full. When the work must stop until the user weighs in, because the plan is wrong, a worker is doing damage or the user asked you to hold, call pause: every running agent stops with its work kept and queued tasks wait. Steer or cancel a single agent instead when only that one is off course. If the run is paused, list/get/wait remain readable and explain the reason. Stop polling, report that reason, and ask the user to click Resume; Resume automatically continues interrupted workers from their retained checkouts. Do not expose credentials, create worktrees, switch branches or silently escalate worker permissions.\n</monocode_orchestration>`;
   }
   async handle(
     leadId: string,
@@ -1626,6 +1627,33 @@ export class Orchestrator {
         await this.store.disable(run.leadId);
         return result;
       }
+      case "pause": {
+        const why =
+          input.reason === undefined
+            ? undefined
+            : text(input.reason, "reason", 2000);
+        const result = {
+          paused: true,
+          interrupted: run.tasks
+            .filter((entry) => entry.status === "running")
+            .map((entry) => entry.id),
+          next: "Tell the user why you paused. Only they can resume, with Resume in MonoCode; until then list, get and wait stay readable.",
+        };
+        // The receipt lands in the same snapshot as the pause, so a retry
+        // with this request ID reads it instead of failing on the paused run.
+        await this.pause(
+          run.leadId,
+          why ? `The lead paused this run: ${why}` : "The lead paused this run.",
+          (current) => ({
+            ...current,
+            requests: {
+              ...current.requests,
+              [requestId]: { signature, result },
+            },
+          }),
+        );
+        return result;
+      }
       default:
         throw new Error("Unknown action. Run control --help.");
     }
@@ -2214,6 +2242,22 @@ export class Orchestrator {
       (entry) => entry.status === "running",
     ))
       await this.interruptTask(leadId, task.id, error);
+  }
+  /**
+   * The user pauses the whole run: its agents stop with their checkouts kept,
+   * queued work waits, and the lead's turn stops too, since Resume needs an
+   * idle lead. Queued behind control actions so a review is never cut in half.
+   */
+  pauseRun(leadId: string): Promise<void> {
+    const result = this.actions
+      .catch(() => undefined)
+      .then(async () => {
+        if (this.run(leadId)?.status !== "active") return;
+        await this.pause(leadId, "The user paused this run.");
+        if (this.host?.session(leadId)?.busy) await this.host.stop(leadId);
+      });
+    this.actions = result.catch(() => undefined);
+    return result;
   }
   async stopRun(leadId: string) {
     const run = this.run(leadId);
