@@ -34,9 +34,10 @@ struct ProjectView: View {
         case .sessions:
           SessionsPane(env: env, projectId: projectId, key: key, query: query)
             // Attached to the pane, so the search field comes and goes with
-            // it without rebuilding the screen.
-            .searchable(text: $query, prompt: "Search conversations...")
-            .searchToolbarBehavior(.minimize)
+            // it without rebuilding the screen. In the bar's drawer, not
+            // minimised: a minimised search beside the bar's filter and plus
+            // buttons could not be closed (its close button left it open).
+            .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: "Search conversations...")
             .transition(paneTransition)
         case .explorer:
           placeholder("Explorer arrives with the workspace screens.").transition(paneTransition)
