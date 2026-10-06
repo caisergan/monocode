@@ -1,10 +1,16 @@
-//! `monocode-preview://` serves local HTML files to the in-app browser.
+//! `monocode-preview://` serves local HTML files to the in-app browser, and
+//! `monocode-remote://` serves files of projects on a connected machine.
 //!
 //! The URL keeps the real path as path segments
 //! (`monocode-preview://localhost/Users/me/site/index.html`) so a page's
 //! relative `./style.css` resolves next to it, the way it would from
 //! `file://`. Only files under a root the frontend registered — a project
 //! directory it is previewing — are served.
+//!
+//! A remote URL carries the `remote://` path's environment and host path
+//! (`monocode-remote://localhost/<environment>/home/me/site/index.html`). Each
+//! request, page and assets alike, is read from that machine's host, which
+//! only serves files inside its registered projects.
 //!
 //! The app treats a registered custom scheme as a local origin, so the IPC
 //! ACL does not protect against a previewed page. What does: the invoke key is
@@ -23,6 +29,7 @@ use tauri::{AppHandle, Manager, Runtime, State, UriSchemeContext, UriSchemeRespo
 use crate::fs::expand_home;
 
 pub const SCHEME: &str = "monocode-preview";
+pub const REMOTE_SCHEME: &str = "monocode-remote";
 
 /// Matches the frontend's iframe sandbox for preview pages.
 const SANDBOX: &str = "sandbox allow-scripts allow-forms allow-modals";
@@ -85,27 +92,106 @@ pub fn handle<R: Runtime>(
     });
 }
 
+pub fn handle_remote(
+    ctx: UriSchemeContext<'_, tauri::Wry>,
+    request: Request<Vec<u8>>,
+    responder: UriSchemeResponder,
+) {
+    let app = ctx.app_handle().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let origin = request
+            .headers()
+            .get(header::ORIGIN)
+            .map(|value| value.to_str().unwrap_or_default());
+        responder.respond(respond_remote(
+            request.uri().path(),
+            origin,
+            |environment, path| crate::remote::read_host_file(&app, environment, path),
+        ));
+    });
+}
+
 /// `origin` is the request's `Origin` header. Preview pages send `null`, and
 /// navigations and plain subresources send none. Anything else is a site in a
 /// browser tab, which keeps its own origin and would otherwise read project
 /// files through the `*` CORS grant.
+fn cross_origin(origin: Option<&str>) -> bool {
+    origin.is_some_and(|origin| origin != "null")
+}
+
 fn respond(roots: &PreviewRoots, url_path: &str, origin: Option<&str>) -> Response<Vec<u8>> {
-    let served = match origin {
-        Some(origin) if origin != "null" => Err(StatusCode::FORBIDDEN),
-        _ => resolve(roots, url_path).and_then(|path| read(&path)),
+    let served = if cross_origin(origin) {
+        Err(StatusCode::FORBIDDEN)
+    } else {
+        resolve(roots, url_path).and_then(|path| read(&path))
     };
     match served {
         Ok((bytes, mime)) => response(StatusCode::OK, mime, bytes),
-        Err(status) => response(
-            status,
-            "text/plain; charset=utf-8",
-            status
-                .canonical_reason()
-                .unwrap_or("Error")
-                .as_bytes()
-                .to_vec(),
-        ),
+        Err(status) => error_response(status, None),
     }
+}
+
+fn respond_remote(
+    url_path: &str,
+    origin: Option<&str>,
+    read_host: impl FnOnce(&str, &str) -> Result<Vec<u8>, String>,
+) -> Response<Vec<u8>> {
+    if cross_origin(origin) {
+        return error_response(StatusCode::FORBIDDEN, None);
+    }
+    let Some((environment, host_path)) = parse_remote_url_path(url_path) else {
+        return error_response(StatusCode::BAD_REQUEST, None);
+    };
+    match read_host(&environment, &host_path) {
+        Ok(bytes) => response(StatusCode::OK, mime_for(Path::new(&host_path)), bytes),
+        // The host's reason ("not connected", "too large", outside a project)
+        // is what the page area shows when the document itself fails.
+        Err(message) => error_response(StatusCode::BAD_GATEWAY, Some(&message)),
+    }
+}
+
+/// `/<environment>/home/me/a%20b.html` → (`<environment>`, `/home/me/a b.html`).
+/// Windows hosts keep their drive letter: `/<environment>/C:/site/index.html`.
+fn parse_remote_url_path(url_path: &str) -> Option<(String, String)> {
+    let (environment, rest) = url_path.strip_prefix('/')?.split_once('/')?;
+    let environment = decode_segment(environment)?;
+    let segments = rest
+        .split('/')
+        .map(decode_segment)
+        .collect::<Option<Vec<_>>>()?;
+    if environment.is_empty() || segments.iter().any(|segment| segment.is_empty()) {
+        return None;
+    }
+    let joined = segments.join("/");
+    let drive = joined.len() >= 2
+        && joined.as_bytes()[0].is_ascii_alphabetic()
+        && joined.as_bytes()[1] == b':'
+        && joined.as_bytes().get(2).is_none_or(|byte| *byte == b'/');
+    Some((
+        environment,
+        if drive { joined } else { format!("/{joined}") },
+    ))
+}
+
+/// One decoded path segment; one that decodes into a separator or `..` is refused.
+fn decode_segment(segment: &str) -> Option<String> {
+    let decoded = percent_encoding::percent_decode_str(segment)
+        .decode_utf8()
+        .ok()?
+        .into_owned();
+    if decoded.contains(['/', '\\', '\0']) || decoded == ".." || decoded == "." {
+        return None;
+    }
+    Some(decoded)
+}
+
+fn error_response(status: StatusCode, message: Option<&str>) -> Response<Vec<u8>> {
+    let body = message
+        .or(status.canonical_reason())
+        .unwrap_or("Error")
+        .as_bytes()
+        .to_vec();
+    response(status, "text/plain; charset=utf-8", body)
 }
 
 fn response(status: StatusCode, mime: &str, body: Vec<u8>) -> Response<Vec<u8>> {
@@ -265,6 +351,61 @@ mod tests {
         assert_eq!(
             respond(&roots, &page, Some("null")).status(),
             StatusCode::OK
+        );
+    }
+
+    #[test]
+    fn reads_remote_files_from_the_host_that_owns_them() {
+        let response = respond_remote("/env-1/home/me/my%20site/style.css", None, |env, path| {
+            assert_eq!((env, path), ("env-1", "/home/me/my site/style.css"));
+            Ok(b"p{}".to_vec())
+        });
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.body(), b"p{}");
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/css; charset=utf-8"
+        );
+        assert_eq!(
+            response.headers()[header::CONTENT_SECURITY_POLICY],
+            "sandbox allow-scripts allow-forms allow-modals"
+        );
+    }
+
+    #[test]
+    fn keeps_a_windows_host_drive_letter() {
+        assert_eq!(
+            parse_remote_url_path("/env-1/C:/site/index.html"),
+            Some(("env-1".into(), "C:/site/index.html".into()))
+        );
+    }
+
+    #[test]
+    fn refuses_malformed_or_cross_origin_remote_requests() {
+        let unreachable = |_: &str, _: &str| -> Result<Vec<u8>, String> { panic!("read") };
+        for path in [
+            "/env-1",
+            "/env-1/",
+            "/env-1/a/../b",
+            "/env-1/a%2Fb",
+            "/env-1/a//b",
+        ] {
+            let response = respond_remote(path, None, unreachable);
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+        }
+        let site = respond_remote("/env-1/a.html", Some("https://evil.example"), unreachable);
+        assert_eq!(site.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn shows_why_the_host_could_not_serve_a_file() {
+        let response = respond_remote("/env-1/a.html", Some("null"), |_, _| {
+            Err("This project’s machine isn’t connected on this computer.".into())
+        });
+        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            response.body(),
+            "This project’s machine isn’t connected on this computer.".as_bytes()
         );
     }
 

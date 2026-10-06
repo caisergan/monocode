@@ -4,6 +4,7 @@ import {
   browserPreviewUrl,
 } from "../../../platform/tauri/browserPreview";
 import { isEqualOrInside, parentPath } from "../../../shared/lib/paths";
+import { REMOTE_PATH_PREFIX } from "../../../shared/lib/remotePaths";
 import { BrowserFrame } from "./BrowserFrame";
 
 type Props = {
@@ -14,9 +15,11 @@ type Props = {
 };
 
 /**
- * Renders a local HTML file the way a browser would open it from disk:
- * relative assets load from beside it, inside the project it belongs to.
- * The page shows the saved file, so edits appear once autosave writes them.
+ * Renders an HTML file the way a browser would open it from disk: relative
+ * assets load from beside it, inside the project it belongs to. A file on a
+ * connected machine, page and assets alike, is read through that machine's
+ * host. The page shows the saved file, so edits appear once autosave writes
+ * them.
  */
 export function HtmlFilePreview({ path, cwd, version }: Props) {
   const root = usePreviewRoot(path, cwd);
@@ -40,14 +43,18 @@ type PreviewRootState =
   | { status: "error"; message: string };
 
 /**
- * Register the directory the preview protocol may serve `path` from. Pass
- * null for pages that aren't local files; they need nothing registered.
+ * Register the directory the preview protocol may serve `path` from. Pages
+ * that aren't local files need nothing registered: pass null for a site, and
+ * a `remote://` file's host already confines reads to its projects.
  */
 export function usePreviewRoot(
   path: string | null,
   cwd: string,
 ): PreviewRootState {
-  const root = path === null ? null : previewRoot(path, cwd);
+  const root =
+    path === null || path.startsWith(REMOTE_PATH_PREFIX)
+      ? null
+      : previewRoot(path, cwd);
   const [state, setState] = useState<{
     root: string;
     error?: string;

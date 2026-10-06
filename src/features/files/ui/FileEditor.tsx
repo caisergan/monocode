@@ -100,7 +100,6 @@ import { FilePreviewSearch } from "./FilePreviewSearch";
 import { HtmlFilePreview } from "../../browser/ui/HtmlFilePreview";
 import { isHtmlPath } from "../model/filePreview";
 import { browserPreviewUrl } from "../../../platform/tauri/browserPreview";
-import { isRemoteProjectPath } from "../../projects/model/recents";
 
 type EditorNavigationRequest = EditorNavigation & { token: number };
 
@@ -154,8 +153,7 @@ export function FileEditor({
   } | null>(null);
   const markdown = isMarkdownPath(path);
   const svg = isSvgPath(path);
-  // The local preview protocol can't serve a connected machine's files.
-  const html = isHtmlPath(path) && !isRemoteProjectPath(path);
+  const html = isHtmlPath(path);
   // Diff tabs open as source: the git gutter only renders in the editor.
   // HTML opens as source too, so a page's scripts run only once asked.
   const [mode, setMode] = useMarkdownMode(

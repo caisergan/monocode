@@ -40,3 +40,22 @@ it("maps a preview URL back to its file", () => {
   ).toBe("C:/site/index.html");
   expect(browserPreviewPath("http://localhost:5173/a.html")).toBeNull();
 });
+
+it("serves a connected machine's files through the remote protocol", () => {
+  const path = "remote://env-1/home/me/my site/index.html";
+  const url = browserPreviewUrl(path, false);
+  expect(url).toBe(
+    "monocode-remote://localhost/env-1/home/me/my%20site/index.html",
+  );
+  expect(new URL("./style.css", url).href).toBe(
+    "monocode-remote://localhost/env-1/home/me/my%20site/style.css",
+  );
+  expect(browserPreviewPath(url)).toBe(path);
+  expect(isBrowserPreviewUrl(url)).toBe(true);
+  expect(browserPreviewUrl("remote://env-1/C:/site/a.html", true)).toBe(
+    "http://monocode-remote.localhost/env-1/C:/site/a.html",
+  );
+  expect(
+    browserPreviewPath("http://monocode-remote.localhost/env-1/C:/site/a.html"),
+  ).toBe("remote://env-1/C:/site/a.html");
+});
