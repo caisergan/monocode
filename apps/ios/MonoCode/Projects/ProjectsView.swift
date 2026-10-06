@@ -92,6 +92,7 @@ struct ProjectsView: View {
       }
     }
     .listStyle(.plain)
+    .environment(\.defaultMinListRowHeight, 0)
     .scrollContentBackground(.hidden)
   }
 }

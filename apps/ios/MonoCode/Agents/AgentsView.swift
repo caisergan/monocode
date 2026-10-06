@@ -108,6 +108,7 @@ struct AgentsView: View {
       }
     }
     .listStyle(.plain)
+    .environment(\.defaultMinListRowHeight, 0)
     .scrollContentBackground(.hidden)
     .contentMargins(.bottom, 24, for: .scrollContent)
   }

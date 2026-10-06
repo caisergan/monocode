@@ -12,10 +12,12 @@ struct ProjectView: View {
   @Environment(Router.self) private var router
   @Environment(\.palette) private var palette
   @State private var segment: Segment = .sessions
+  /// +1 when the new segment is to the right of the old one, -1 to the left.
+  @State private var direction: CGFloat = 1
   @State private var archived: ArchivedFilter = .exclude
   @State private var query = ""
 
-  enum Segment: Hashable { case sessions, explorer, changes }
+  enum Segment: Int, Hashable { case sessions, explorer, changes }
 
   private var key: ProjectsStore.ListKey { .init(env: env, projectId: projectId, archived: archived) }
   private var project: HostProject? { engine.projects.project(env, projectId) }
@@ -23,15 +25,27 @@ struct ProjectView: View {
   var body: some View {
     VStack(spacing: 0) {
       if let notice = engine.hosts.notice(env) { NoticeBar(text: notice) }
-      Segmented(options: [(.sessions, "Sessions"), (.explorer, "Explorer"), (.changes, "Changes")], selection: $segment)
+      Segmented(options: [(.sessions, "Sessions"), (.explorer, "Explorer"), (.changes, "Changes")], selection: selection)
         .padding(.horizontal, 16)
         .padding(.top, 6)
         .padding(.bottom, 4)
-      switch segment {
-      case .sessions: SessionsPane(env: env, projectId: projectId, key: key, query: query)
-      case .explorer: placeholder("Explorer arrives with the workspace screens.")
-      case .changes: placeholder("Changes arrive with the workspace screens.")
+      ZStack {
+        switch segment {
+        case .sessions:
+          SessionsPane(env: env, projectId: projectId, key: key, query: query)
+            // Attached to the pane, so the search field comes and goes with
+            // it without rebuilding the screen.
+            .searchable(text: $query, prompt: "Search conversations...")
+            .searchToolbarBehavior(.minimize)
+            .transition(paneTransition)
+        case .explorer:
+          placeholder("Explorer arrives with the workspace screens.").transition(paneTransition)
+        case .changes:
+          placeholder("Changes arrive with the workspace screens.").transition(paneTransition)
+        }
       }
+      .frame(maxHeight: .infinity)
+      .clipped()
     }
     .screenBackground()
     .navigationBarTitleDisplayMode(.inline)
@@ -44,7 +58,6 @@ struct ProjectView: View {
         Button("New session", systemImage: "plus") { router.push(.newSession(env: env, projectId: projectId)) }
       }
     }
-    .modifier(SessionSearch(enabled: segment == .sessions, query: $query))
     .task(id: key) {
       guard let sync = engine.host(env) else { return }
       let interest = sync.openList(projectId, archived: archived)
@@ -75,6 +88,25 @@ struct ProjectView: View {
     }
   }
 
+  /// Records the direction, then switches with the panel slide (11 §11.6:
+  /// 260 ms, ease.out).
+  private var selection: Binding<Segment> {
+    Binding(
+      get: { segment },
+      set: { next in
+        direction = next.rawValue >= segment.rawValue ? 1 : -1
+        withAnimation(Self.slide) { segment = next }
+      })
+  }
+
+  static let slide = Tokens.Motion.easeOut.animation(milliseconds: 260)
+
+  /// The new pane fades in from 24 pt on the side it came from; the old one
+  /// fades out where it is.
+  private var paneTransition: AnyTransition {
+    .asymmetric(insertion: .opacity.combined(with: .offset(x: 24 * direction)), removal: .opacity)
+  }
+
   private func placeholder(_ text: String) -> some View {
     EmptyState(title: text).frame(maxHeight: .infinity)
   }
@@ -102,19 +134,6 @@ private struct WorkingCopyTitle: View {
       .foregroundStyle(palette.text.tertiary.color)
     }
     .accessibilityElement(children: .combine)
-  }
-}
-
-private struct SessionSearch: ViewModifier {
-  var enabled: Bool
-  @Binding var query: String
-
-  func body(content: Content) -> some View {
-    if enabled {
-      content.searchable(text: $query, prompt: "Search conversations...").searchToolbarBehavior(.minimize)
-    } else {
-      content
-    }
   }
 }
 
@@ -158,6 +177,7 @@ private struct SessionsPane: View {
       }
     }
     .listStyle(.plain)
+    .environment(\.defaultMinListRowHeight, 0)
     .scrollContentBackground(.hidden)
     .refreshable { engine.host(env)?.refreshSessions(key) }
   }

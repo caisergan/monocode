@@ -16,8 +16,8 @@ struct SectionLabel: View {
         .foregroundStyle(palette.text.secondary.color)
     }
     .padding(.horizontal, 16)
-    .padding(.top, 14)
-    .padding(.bottom, 6)
+    .padding(.top, 10)
+    .padding(.bottom, 2)
     .frame(maxWidth: .infinity, alignment: .leading)
     .accessibilityAddTraits(.isHeader)
   }

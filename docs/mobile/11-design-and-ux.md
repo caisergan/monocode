@@ -576,7 +576,8 @@ The phone's version of the desktop session sidebar (`Sidebar.tsx`).
 - The right side holds **+** (New session in this project and working copy).
 
 **Segmented control:** **Sessions**, **Explorer**, **Changes**, the desktop sidebar
-tabs. Changes shows `+N −N` instead of the word when there are changes.
+tabs. Switching slides the selection and brings the new pane in from 24 pt on the side
+it came from with a fade, 260 ms `ease.out` (`dur.slide`); the old pane fades out. Changes shows `+N −N` instead of the word when there are changes.
 
 **Sessions toolbar:**
 - The bar's search field with the placeholder "Search conversations...", shown while

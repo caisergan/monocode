@@ -15,7 +15,9 @@ struct Segmented<Value: Hashable>: View {
       ForEach(options, id: \.value) { option in
         let selected = option.value == selection
         Button {
-          withAnimation(Tokens.Motion.easeOut.animation(milliseconds: Tokens.Motion.feedbackMs)) { selection = option.value }
+          // The owner's binding may animate the switch itself; the pill
+          // slides on the panel-slide curve either way (11 §11.6).
+          withAnimation(Tokens.Motion.easeOut.animation(milliseconds: 260)) { selection = option.value }
         } label: {
           Text(option.label)
             .font(.mono(Tokens.TypeScale.secondary, .medium))
