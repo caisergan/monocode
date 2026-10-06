@@ -11,21 +11,28 @@ Usage: {exe} control ACTION [--json JSON | --input FILE|-] [--request-id ID]
 
 Actions, with the JSON object each one takes:
   list      {}
-            The run, every task with its status and latest result, and the
-            harness/model IDs you may assign.
+            The run, every task with its status and the end of its latest
+            result, the harness/model IDs you may assign with each model's
+            settings, and a "revision" to pass to wait as "since".
   delegate  {"title":"Short title","harness":"<id from list>",
-             "model":"<id from list>","prompt":"Self-contained instructions",
+             "model":"<id from list>","effort":"high",
+             "prompt":"Self-contained instructions",
              "files":["src/feature"],"dependsOn":["<taskId>"]}
             Queue a worker and return its taskId. "model" is optional and
             defaults to the first model list allows for that harness.
+            "effort" and "modelSettings" ({"<settingId>":"<value>"}) are
+            optional and must use values list shows for that model.
             "files" is the write scope: project-relative paths, where a
             directory covers its descendants and ["."] reserves the whole
             checkout. "dependsOn" holds taskIds that must be reviewed first.
   get       {"taskId":"..."}
-            One task, including its latest result.
-  wait      {"timeoutSeconds":20}
+            One task, including its full latest result.
+  wait      {"timeoutSeconds":20,"since":12}
             Block until a task changes state, or until the timeout (0-25).
-            Returns at once when paused, stopped, or nothing is running or queued.
+            Returns at once when paused, stopped, or nothing is running or
+            queued. With "since" set to the revision from your last list or
+            wait, it returns at once if anything changed after it and lists
+            only changed tasks and tasks waiting on you.
   respond   {"taskId":"...","requestId":7,"decision":"allow"|"deny"}
             Answer an approval an agent is blocked on. Agents never prompt the
             user; list, get and wait report the prompt as that task's
@@ -44,11 +51,21 @@ Actions, with the JSON object each one takes:
             Retry a stopped worker with corrected project-relative write
             scopes. Use this only when the additional files are required.
   cancel    {"taskId":"..."}
-            Cancel a task, whether it is running or still queued.
+            Cancel a task, whether it is running or still queued. A task you
+            already accepted cannot be cancelled: its changes are in your
+            checkout.
   review    {"taskId":"..."}
-            Accept a completed task's result.
+            Accept a completed task's result and apply its changes to your
+            checkout. Everything the worker changed counts, including edits
+            made by shell commands; a completed worker that changed files
+            outside its scope is held as blocked instead.
   finish    {}
             End the run, once every task is accepted or cancelled.
+
+A queued task whose dependency was cancelled is held as blocked: send it the
+full assignment with message to run it without that dependency, or cancel it.
+list and wait report "warnings" when you edit a file a started worker owns;
+that worker's review refuses the file until you restore it.
 
 Usual loop: list -> delegate ... -> wait or get -> steer an agent that drifts,
 unblock one with respond or answer -> inspect the changes yourself -> message
@@ -82,11 +99,15 @@ const ACTIONS: [&str; 12] = [
     "list", "delegate", "get", "steer", "message", "retry", "cancel", "wait", "review", "finish",
     "respond", "answer",
 ];
-const APP_ACTIONS: [&str; 13] = [
+const APP_ACTIONS: [&str; 17] = [
     "models.list",
     "sessions.list",
     "sessions.read",
     "sessions.send",
+    "sessions.wait",
+    "sessions.steer",
+    "sessions.respond",
+    "sessions.answer",
     "sessions.draft",
     "sessions.start",
     "worktrees.list",
@@ -101,22 +122,50 @@ const APP_USAGE: &str = r#"MonoCode app access — use in a thread enabled by /o
 
 Usage: {exe} app ACTION [--json JSON | --input FILE|-] [--request-id ID]
 
+Session state is one of idle, working, blocked (an approval or question is
+waiting; needsInput says which) or usageLimited. Wherever a sessionId is
+taken, a name you gave with sessions.start works too.
+
 Actions:
   models.list    {}  Available providers, models, settings and permission modes.
-  sessions.list  {}  Project sessions with IDs, busy status and hasDraft.
+  sessions.list  {}  Project sessions with IDs, names, state and hasDraft.
   sessions.read  {"sessionId":"...","before":"<turnId>","limit":3,"maxChars":1200}
                   Read up to 3 recent user/assistant exchanges. Tools and
                   reasoning are omitted. Omit before for the newest page;
                   pass nextBefore from a result for older exchanges. maxChars
-                  caps each message (200-6000, default 1200).
-  sessions.send  {"sessionId":"...","prompt":"..."}
-                  Submit a follow-up to an idle session in this project.
-                  A busy session is rejected. Reuse --request-id on retries.
+                  caps each message (200-20000, default 1200).
+                 {"sessionId":"...","turnId":"...","maxChars":8000}
+                  Read one turn: its prompt and the agent's final message.
+  sessions.send  {"sessionId":"...","prompt":"...","wait":true,"notify":false}
+                  Submit a follow-up to an idle session in this project and
+                  return its turnId. A working or blocked session is rejected
+                  with what to do instead. "wait" (true, or
+                  {"timeoutSeconds":20,"until":["idle"]}, up to 20s) returns
+                  once that turn settles, with its final message when idle.
+                  "notify":true wakes this thread with the result if the turn
+                  outlasts this one. Reuse --request-id on retries.
+  sessions.wait  {"sessionId":"...","turnId":"...","until":["idle","blocked"],
+                  "timeoutSeconds":20}
+                  Block until the session (or that turn) reaches a state in
+                  until (default idle, blocked, usageLimited), or the timeout
+                  (0-25). Use "sessionIds":[...] (up to 8) instead to return
+                  when any of them does. "matched":false means it timed out;
+                  call it again. A settled turnId includes its final message.
+  sessions.steer {"sessionId":"...","prompt":"..."}
+                  Redirect a working session's current turn without losing
+                  its progress.
+  sessions.respond {"sessionId":"...","requestId":7,"decision":"allow"|"deny"}
+  sessions.answer  {"sessionId":"...","requestId":9,"answers":{"<questionId>":["<optionId>"]}}
+                  Decide an approval or answer a question (or pass
+                  "skip":true) for a blocked session you started. Ask the user
+                  in this conversation when the decision is theirs. Sessions
+                  the user started are answered by the user in MonoCode.
   sessions.draft {"sessionId":"...","prompt":"..."}
                   Save an unsent draft in an idle project session. Existing
                   drafts are preserved; send or remove one in MonoCode first.
                   Reuse --request-id on retries.
-  sessions.start {"prompt":"...","harness":"codex","model":"codex:...",
+  sessions.start {"prompt":"...","name":"reviewer","notify":true,
+                  "harness":"codex","model":"codex:...",
                   "effort":"high","reveal":false,
                   "workspaceMode":"current","worktreeCwd":"<path>","draft":false,
                   "placement":"right",
@@ -128,7 +177,10 @@ Actions:
                   draft:true to save the prompt unsent; no agent turn runs.
                   Otherwise the turn is submitted.
                   Returns after creation/acceptance, not agent completion;
-                  use its ID with folders.move immediately. Optional model,
+                  use its ID with folders.move immediately. "name" (lowercase,
+                  up to 32 of a-z 0-9 - _) addresses it in later calls.
+                  "notify":true wakes this thread with its result when its
+                  turn settles; or follow it with sessions.wait. Optional model,
                   effort, modelSettings, permission mode and workspace choice
                   use composer values. Set worktreeCwd to a path from
                   worktrees.list to choose a specific existing checkout, or
@@ -525,7 +577,15 @@ mod tests {
             parse_args_for(&args(&["notes.list"]), true),
             Ok(Parsed::Call(_, _, _))
         ));
-        for action in ["sessions.read", "sessions.send", "sessions.draft"] {
+        for action in [
+            "sessions.read",
+            "sessions.send",
+            "sessions.wait",
+            "sessions.steer",
+            "sessions.respond",
+            "sessions.answer",
+            "sessions.draft",
+        ] {
             assert!(matches!(
                 parse_args_for(&args(&[action, "--json", r#"{"sessionId":"other"}"#]), true),
                 Ok(Parsed::Call(_, _, _))

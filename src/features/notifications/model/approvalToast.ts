@@ -39,6 +39,35 @@ export function pendingApprovalForSession(
   return null;
 }
 
+export type PendingInput = {
+  kind: "approval" | "question";
+  requestId: number;
+  label: string;
+  detail?: string;
+  questions?: NonNullable<Session["pendingQuestion"]>["questions"];
+};
+
+/**
+ * What an agent driving this session needs in order to decide for it: the
+ * approval's command or the question and its options.
+ */
+export function pendingInputForSession(
+  session: Session,
+): PendingInput | undefined {
+  const pending = pendingApprovalForSession(session);
+  if (!pending) return undefined;
+  return {
+    kind: pending.kind,
+    requestId: pending.requestId,
+    label: pending.label,
+    detail:
+      pending.kind === "approval"
+        ? (pending.block?.tool?.detail?.trim() ?? pending.block?.text)
+        : undefined,
+    questions: session.pendingQuestion?.questions,
+  };
+}
+
 /** True when the conversation pane for this session is focused and active. */
 export function isSessionConversationFocused(
   sessionId: string,

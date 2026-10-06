@@ -11,6 +11,10 @@ import {
   shellPath,
 } from "./orchestration";
 import { newSession } from "../../sessions/model/session";
+import {
+  resetHarnessModelOverlays,
+  setHarnessModels,
+} from "../../sessions/model/models";
 import { CONTINUE_PROMPT } from "../../sessions/model/inFlight";
 import type { OrchestrationProposal } from "./orchestrationPlan";
 import { normalizeOrchestrationRun } from "./orchestrationState";
@@ -59,6 +63,7 @@ function setup() {
         },
       };
     }),
+    captureWorker: vi.fn(async () => [] as string[]),
     integrateWorker: vi.fn(async () => ({ files: [], alreadyApplied: 0 })),
     cleanupWorker: vi.fn(async () => true),
     submit: vi.fn((id, _text, done) => {
@@ -636,6 +641,196 @@ describe("local orchestration", () => {
     expect(f.tasks()[1].status).toBe("queued");
     await f.call("review", { taskId: upstream.id });
     await vi.waitFor(() => expect(f.tasks()[1].status).toBe("running"));
+  });
+  it("holds a dependent whose dependency was cancelled until the lead resends it", async () => {
+    const f = setup();
+    await f.start();
+    await f.delegate(["src/types.ts"]);
+    await vi.waitFor(() => expect(f.host.submit).toHaveBeenCalledTimes(1));
+    const upstream = f.tasks()[0];
+    await f.delegate(["src/ui"], { dependsOn: [upstream.id] });
+    await f.call("cancel", { taskId: upstream.id });
+    await vi.waitFor(() => expect(f.tasks()[1].status).toBe("blocked"));
+    expect(f.tasks()[1].error).toContain("was cancelled");
+    expect(f.tasks()[1].delivered).toBe(false);
+    const dependent = f.tasks()[1];
+    await f.call("message", {
+      taskId: dependent.id,
+      text: "Build the UI without the shared types",
+    });
+    await vi.waitFor(() => expect(f.tasks()[1].status).toBe("running"));
+    expect(f.tasks()[1].dependsOn).toEqual([]);
+  });
+  it("checks a finished worker's whole checkout delta against its scope", async () => {
+    const f = setup();
+    await f.start();
+    await f.delegate(["src/a"]);
+    await f.delegate(["src/b"]);
+    await f.delegate(["src/c"]);
+    await vi.waitFor(() => expect(f.host.submit).toHaveBeenCalledTimes(2));
+    const [inScope, outside] = f.tasks();
+    // Shell edits leave no tool events; the settle-time capture still sees them.
+    vi.mocked(f.host.captureWorker)
+      .mockResolvedValueOnce(["src/a/one.ts", "src/a/two.ts"])
+      .mockResolvedValueOnce(["src/b/ok.ts", "package-lock.json"]);
+    f.completions.get(inScope.sessionId)!({ status: "completed", text: "A" });
+    await vi.waitFor(() => expect(f.tasks()[0].status).toBe("completed"));
+    f.completions.get(outside.sessionId)!({ status: "completed", text: "B" });
+    await vi.waitFor(() => expect(f.tasks()[1].status).toBe("blocked"));
+    expect(f.tasks()[1].error).toContain(
+      "changed files outside its assignment: package-lock.json",
+    );
+    expect(f.tasks()[1].result).toBe("B");
+    await vi.waitFor(() => expect(f.host.submit).toHaveBeenCalledTimes(3));
+    vi.mocked(f.host.captureWorker).mockRejectedValueOnce(
+      new Error("This worker has no recoverable change checkpoint"),
+    );
+    f.completions.get(f.tasks()[2].sessionId)!({
+      status: "completed",
+      text: "C",
+    });
+    await vi.waitFor(() => expect(f.tasks()[2].status).toBe("blocked"));
+    expect(f.tasks()[2].error).toContain("Could not record");
+    expect(f.tasks()[2].error).toContain("/worktrees/");
+  });
+  it("warns the lead when it edits a file a started worker owns, until that work is accepted", async () => {
+    const f = setup();
+    await f.start();
+    await f.delegate(["src"]);
+    await vi.waitFor(() => expect(f.host.submit).toHaveBeenCalledTimes(1));
+    const task = f.tasks()[0];
+    const edit = (path: string) =>
+      f.manager.observe("lead", {
+        type: "tool.started",
+        callId: path,
+        title: "Edit",
+        preview: { kind: "write", path },
+      });
+    edit("README.md");
+    edit("src/app.ts");
+    const warned = async () =>
+      ((await f.call("list")) as { run: { warnings?: string[] } }).run
+        .warnings;
+    await vi.waitFor(async () =>
+      expect(await warned()).toEqual([
+        expect.stringContaining('You edited src/app.ts, which "Task"'),
+      ]),
+    );
+    f.completions.get(task.sessionId)!({ status: "completed", text: "Done" });
+    await vi.waitFor(() => expect(f.tasks()[0].status).toBe("completed"));
+    await f.call("review", { taskId: task.id });
+    expect(await warned()).toBeUndefined();
+  });
+  it("refuses to cancel a task whose changes were already accepted", async () => {
+    const f = setup();
+    await f.start();
+    await f.delegate(["a"]);
+    await vi.waitFor(() => expect(f.host.submit).toHaveBeenCalledTimes(1));
+    const task = f.tasks()[0];
+    f.completions.get(task.sessionId)!({ status: "completed", text: "Done" });
+    await vi.waitFor(() => expect(f.tasks()[0].status).toBe("completed"));
+    await f.call("review", { taskId: task.id });
+    await expect(f.call("cancel", { taskId: task.id })).rejects.toThrow(
+      "already accepted",
+    );
+    expect(f.tasks()[0].status).toBe("completed");
+  });
+  it("holds a cancelled task's dependent even while every worker slot is busy", async () => {
+    const f = setup();
+    await f.start();
+    await f.delegate(["a"]);
+    await f.delegate(["b"]);
+    await vi.waitFor(() => expect(f.host.submit).toHaveBeenCalledTimes(2));
+    await f.delegate(["d"]);
+    const upstream = f.tasks()[0];
+    await f.delegate(["c"], { dependsOn: [upstream.id] });
+    await f.call("cancel", { taskId: upstream.id });
+    // The freed slot goes to the next ready task; the dependent is held.
+    await vi.waitFor(() => expect(f.tasks()[2].status).toBe("running"));
+    await vi.waitFor(() => expect(f.tasks()[3].status).toBe("blocked"));
+  });
+  it("waits from a revision cursor and previews long results", async () => {
+    const f = setup();
+    await f.start();
+    await f.delegate(["a"]);
+    await f.delegate(["b"]);
+    await vi.waitFor(() => expect(f.host.submit).toHaveBeenCalledTimes(2));
+    const listed = (await f.call("list")) as {
+      run: { revision: number; dispatches?: unknown };
+    };
+    expect(listed.run.dispatches).toBeUndefined();
+    const first = f.tasks()[0];
+    f.completions.get(first.sessionId)!({
+      status: "completed",
+      text: `start ${"x".repeat(3000)} end`,
+    });
+    await vi.waitFor(() => expect(f.tasks()[0].status).toBe("completed"));
+    const changed = (await f.call("wait", {
+      since: listed.run.revision,
+      timeoutSeconds: 0,
+    })) as {
+      revision: number;
+      unchangedTasks: number;
+      tasks: { id: string; result: string; resultTruncated?: boolean }[];
+    };
+    expect(changed.tasks.map((task) => task.id)).toEqual([first.id]);
+    expect(changed.unchangedTasks).toBe(1);
+    expect(changed.tasks[0].result).toHaveLength(2000);
+    expect(changed.tasks[0].result.endsWith(" end")).toBe(true);
+    expect(changed.tasks[0].resultTruncated).toBe(true);
+    const quiet = (await f.call("wait", {
+      since: changed.revision,
+      timeoutSeconds: 0,
+    })) as { tasks: unknown[] };
+    expect(quiet.tasks).toEqual([]);
+    const full = (await f.call("get", { taskId: first.id })) as {
+      result: string;
+    };
+    expect(full.result.startsWith("start ")).toBe(true);
+    // A cursor from before a restart cannot be trusted, so it reads in full.
+    const stale = (await f.call("wait", {
+      since: changed.revision + 100,
+      timeoutSeconds: 0,
+    })) as { tasks: unknown[] };
+    expect(stale.tasks).toHaveLength(2);
+  });
+  it("delegates with a validated effort and lists the settings a model accepts", async () => {
+    setHarnessModels("codex", [
+      {
+        id: "codex:test",
+        harness: "codex",
+        name: "Test",
+        settings: [
+          {
+            id: "effort",
+            label: "Effort",
+            kind: "select",
+            value: "medium",
+            options: [
+              { value: "medium", label: "Medium" },
+              { value: "high", label: "High" },
+            ],
+          },
+        ],
+      },
+    ]);
+    try {
+      const f = setup();
+      await f.start();
+      const listed = (await f.call("list")) as {
+        harnesses: { models: { settings?: { id: string; options: string[] }[] }[] }[];
+      };
+      expect(listed.harnesses[0].models[0].settings).toEqual([
+        { id: "effort", label: "Effort", options: ["medium", "high"] },
+      ]);
+      await expect(f.delegate(["a"], { effort: "ultra" })).rejects.toThrow(
+        "Invalid model setting effort",
+      );
+      await f.delegate(["a"], { effort: "high" });
+      expect(f.tasks()[0].modelSettings).toEqual({ effort: "high" });
+    } finally {
+      resetHarnessModelOverlays();
+    }
   });
   it("deduplicates command retries and rejects foreign tasks or unapproved harnesses", async () => {
     const f = setup();

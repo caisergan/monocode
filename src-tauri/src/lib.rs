@@ -487,6 +487,8 @@ pub fn run() {
             checkpoint::session_checkpoint_ensure,
             checkpoint::session_checkpoint_prepare,
             checkpoint::session_checkpoint_capture,
+            checkpoint::session_checkpoint_capture_checkout,
+            checkpoint::session_checkpoint_base_intact,
             checkpoint::session_checkpoint_status,
             checkpoint::session_checkpoint_apply,
             checkpoint::session_checkpoint_cleanup_safe,

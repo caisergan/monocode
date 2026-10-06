@@ -185,6 +185,62 @@ impl CheckpointStore {
         Ok(())
     }
 
+    /// Attribute every change in an isolated worker's checkout to that worker,
+    /// measured from the baseline its first turn recorded. Shell edits leave
+    /// no tool events, but nothing else writes to this checkout, so its whole
+    /// delta is the worker's. Returns the changed paths.
+    fn capture_checkout(&self, session_id: &str, cwd: &str) -> Result<Vec<String>, String> {
+        let root = project_root(cwd)?;
+        let dir = self.session_dir(session_id);
+        let mut manifest = match read_manifest(&dir)? {
+            Some(manifest) if same_cwd(&manifest.cwd, cwd) => manifest,
+            _ => return Err("This worker has no recoverable change checkpoint".into()),
+        };
+        let mut candidates: BTreeSet<String> = manifest.files.keys().cloned().collect();
+        for file in git_diff_files_for(&root).files {
+            if let Ok(relative) = resolve_repo_path(&root, &file.relative) {
+                candidates.insert(relative);
+            }
+        }
+        if candidates.len() > MAX_SNAPSHOT_FILES {
+            return Err(format!(
+                "The worker changed more than {MAX_SNAPSHOT_FILES} files, too many to integrate safely"
+            ));
+        }
+        for relative in &candidates {
+            if !manifest.files.contains_key(relative) {
+                // Clean when the baseline was taken, so HEAD held its content.
+                let kind = snapshot_head_file(&dir, &root, relative)?;
+                manifest.files.insert(relative.clone(), kind);
+            }
+            if in_head(&root, relative) {
+                manifest.tracked.insert(relative.clone());
+            }
+            let before = manifest.files[relative];
+            let after = snapshot_after_file(&dir, &root, relative)?;
+            if stored_snapshot(&dir, relative, before, false)
+                == stored_snapshot(&dir, relative, after, true)
+            {
+                manifest.touched.remove(relative);
+                manifest.prepared.remove(relative);
+                manifest.after.remove(relative);
+                manifest.stats.remove(relative);
+                continue;
+            }
+            manifest.touched.insert(relative.clone());
+            manifest.prepared.insert(relative.clone());
+            manifest.after.insert(relative.clone(), after);
+            if let Some(stats) = calculate_session_stats(&dir, &manifest, relative) {
+                manifest.stats.insert(relative.clone(), stats);
+            }
+        }
+        // Divergence guards edits shared with other sessions; this checkout
+        // has no other writer.
+        manifest.diverged.clear();
+        write_manifest(&dir, &manifest)?;
+        Ok(manifest.touched.iter().cloned().collect())
+    }
+
     fn status(&self, session_id: &str, cwd: &str) -> Result<CheckpointStatus, String> {
         let Some(manifest) = self.load_matching(session_id, cwd)? else {
             return Ok(CheckpointStatus { files: Vec::new() });
@@ -213,11 +269,8 @@ impl CheckpointStore {
         if same_cwd(from_cwd, to_cwd) {
             return Err("An isolated worker cannot be integrated into itself".into());
         }
-        if git_head(&from_root)? != git_head(&to_root)? {
-            return Err(
-                "The worker or lead branch moved while this task was running. The worker worktree was kept for manual review."
-                    .into(),
-            );
+        if !base_intact(&from_root, &to_root)? {
+            return Err(BASE_MOVED.into());
         }
         let dir = self.session_dir(session_id);
         let changed = verified_worker_delta(&dir, &from_root, &manifest)?;
@@ -625,6 +678,35 @@ pub async fn session_checkpoint_capture(
 }
 
 #[tauri::command]
+pub async fn session_checkpoint_capture_checkout(
+    store: State<'_, CheckpointStore>,
+    session_id: String,
+    cwd: String,
+) -> Result<Vec<String>, String> {
+    validate_id(&session_id, "session")?;
+    let store = store.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        store.exclusive(|store| store.capture_checkout(&session_id, &cwd))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Whether a worker checkout can still be integrated into or removed from
+/// its lead: see [`base_intact`].
+#[tauri::command]
+pub async fn session_checkpoint_base_intact(
+    from_cwd: String,
+    to_cwd: String,
+) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        base_intact(&project_root(&from_cwd)?, &project_root(&to_cwd)?)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 pub async fn session_checkpoint_status(
     store: State<'_, CheckpointStore>,
     session_id: String,
@@ -886,6 +968,103 @@ fn git_head(root: &Path) -> Result<Vec<u8>, String> {
         return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
     }
     Ok(output.stdout)
+}
+
+const BASE_MOVED: &str = "The worker committed, or the lead's branch no longer contains the worker's starting commit. The worker worktree was kept for manual review.";
+
+/// The worker's commit is still the lead's HEAD or one of its ancestors: the
+/// worker made no commit of its own, though the lead may have committed since.
+/// File contents are checked separately, so a lead commit is safe.
+fn base_intact(from_root: &Path, to_root: &Path) -> Result<bool, String> {
+    let head = git_head(from_root)?;
+    let head = String::from_utf8_lossy(&head).trim().to_string();
+    // A commit the lead's repository has never seen cannot be in its history.
+    if git_checked(to_root, &["cat-file", "-e", &format!("{head}^{{commit}}")]).is_err() {
+        return Ok(false);
+    }
+    let mut command = Command::new("git");
+    crate::hide_window_console(&mut command);
+    let output = command
+        .arg("-C")
+        .arg(to_root)
+        .args(["merge-base", "--is-ancestor", &head, "HEAD"])
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .output()
+        .map_err(|e| e.to_string())?;
+    match output.status.code() {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(String::from_utf8_lossy(&output.stderr).trim().to_string()),
+    }
+}
+
+/// Mode and contents of a HEAD entry, or None when HEAD has no such file.
+fn head_entry(root: &Path, relative: &str) -> Result<Option<(String, Vec<u8>)>, String> {
+    let git = |args: &[&str]| {
+        let mut command = Command::new("git");
+        crate::hide_window_console(&mut command);
+        command
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .env("GIT_LITERAL_PATHSPECS", "1")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .map_err(|e| e.to_string())
+    };
+    let listing = git(&["ls-tree", "-z", "HEAD", "--", relative])?;
+    if !listing.status.success() {
+        return Err(String::from_utf8_lossy(&listing.stderr).trim().to_string());
+    }
+    let entry = listing
+        .stdout
+        .split(|byte| *byte == 0)
+        .map(|line| String::from_utf8_lossy(line).into_owned())
+        .find(|line| line.split_once('\t').map(|(_, path)| path) == Some(relative));
+    let Some(entry) = entry else {
+        return Ok(None);
+    };
+    let mode = entry
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    if mode != "100644" && mode != "100755" {
+        return Ok(Some((mode, Vec::new())));
+    }
+    let blob = git(&["cat-file", "blob", &format!("HEAD:{relative}")])?;
+    if !blob.status.success() {
+        return Err(String::from_utf8_lossy(&blob.stderr).trim().to_string());
+    }
+    Ok(Some((mode, blob.stdout)))
+}
+
+/// Store a file as HEAD has it. With no worktree file to copy a mode from,
+/// the blob gets the mode a checkout would: the process umask, plus execute
+/// bits for an executable entry.
+fn snapshot_head_file(dir: &Path, root: &Path, relative: &str) -> Result<SnapshotKind, String> {
+    let blob = state_blob_path(&dir.join("files"), relative)?;
+    if let Some(parent) = blob.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    // A fresh file takes the umask; rewriting an old one would keep its mode.
+    let _ = std::fs::remove_file(&blob);
+    let Some((mode, bytes)) = head_entry(root, relative)? else {
+        std::fs::write(&blob, []).map_err(|e| e.to_string())?;
+        return Ok(SnapshotKind::Missing);
+    };
+    if (mode != "100644" && mode != "100755") || bytes.len() as u64 > MAX_TEXT_FILE_BYTES {
+        return Ok(SnapshotKind::Skipped);
+    }
+    std::fs::write(&blob, bytes).map_err(|e| e.to_string())?;
+    if mode == "100755" {
+        if let Some(current) = file_mode(&blob) {
+            set_file_mode(&blob, Some(current | ((current & 0o444) >> 2)))?;
+        }
+    }
+    Ok(SnapshotKind::Contents)
 }
 
 fn diff_from_manifest(
@@ -2062,6 +2241,126 @@ mod tests {
             .apply("worker", &from, &to)
             .unwrap_err()
             .contains("not captured"));
+    }
+
+    /// A worker checkout and a lead clone that start from the same files.
+    fn worker_and_lead(label: &str, files: &[(&str, &str)]) -> Option<(Tmp, Tmp)> {
+        let source = tmp(&format!("{label}-worker"));
+        let target = tmp(&format!("{label}-lead"));
+        if !init_git_commit(&source.0, files) {
+            return None;
+        }
+        let source_path = source.0.to_string_lossy().into_owned();
+        let target_path = target.0.to_string_lossy().into_owned();
+        if !git(&source.0, &["clone", &source_path, &target_path]) {
+            return None;
+        }
+        Some((source, target))
+    }
+
+    #[test]
+    fn capture_checkout_integrates_shell_edits_from_the_baseline() {
+        let Some((source, target)) = worker_and_lead(
+            "shell",
+            &[
+                ("a.txt", "head a\n"),
+                ("b.txt", "head b\n"),
+                ("c.txt", "head c\n"),
+            ],
+        ) else {
+            return;
+        };
+        // The lead had an uncommitted change that was seeded into the worker.
+        std::fs::write(source.0.join("c.txt"), "seeded c\n").unwrap();
+        std::fs::write(target.0.join("c.txt"), "seeded c\n").unwrap();
+        let from = source.0.to_string_lossy().into_owned();
+        let to = target.0.to_string_lossy().into_owned();
+        let (_root, store) = store();
+        store.ensure("worker", &from).unwrap();
+
+        // Shell edits: no prepare or capture events at all.
+        std::fs::write(source.0.join("a.txt"), "worker a\n").unwrap();
+        std::fs::remove_file(source.0.join("b.txt")).unwrap();
+        std::fs::write(source.0.join("c.txt"), "worker c\n").unwrap();
+        std::fs::write(source.0.join("new.txt"), "created\n").unwrap();
+        assert!(store.apply("worker", &from, &to).is_err());
+
+        let changed = store.capture_checkout("worker", &from).unwrap();
+        assert_eq!(changed, ["a.txt", "b.txt", "c.txt", "new.txt"]);
+        let applied = store.apply("worker", &from, &to).unwrap();
+        assert_eq!(applied.files, ["a.txt", "b.txt", "c.txt", "new.txt"]);
+        let read = |name: &str| std::fs::read_to_string(target.0.join(name)).ok();
+        assert_eq!(read("a.txt").as_deref(), Some("worker a\n"));
+        assert_eq!(read("b.txt"), None);
+        assert_eq!(read("c.txt").as_deref(), Some("worker c\n"));
+        assert_eq!(read("new.txt").as_deref(), Some("created\n"));
+
+        // Reverting a change drops it from the delta again.
+        std::fs::write(source.0.join("a.txt"), "head a\n").unwrap();
+        let changed = store.capture_checkout("worker", &from).unwrap();
+        assert_eq!(changed, ["b.txt", "c.txt", "new.txt"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn capture_checkout_baseline_matches_an_executable_lead_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let Some((source, target)) = worker_and_lead("exec", &[("run.sh", "echo a\n")]) else {
+            return;
+        };
+        // The lead's copy gets its execute bit from git, as a checkout would.
+        let path = source.0.join("run.sh");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode | 0o111)).unwrap();
+        assert!(git(&source.0, &["add", "run.sh"]));
+        assert!(git(&source.0, &["commit", "-m", "exec"]));
+        assert!(git(&target.0, &["pull", "-q"]));
+        let lead_mode = std::fs::metadata(target.0.join("run.sh"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_ne!(lead_mode & 0o111, 0);
+        let from = source.0.to_string_lossy().into_owned();
+        let to = target.0.to_string_lossy().into_owned();
+        let (_root, store) = store();
+        store.ensure("worker", &from).unwrap();
+        std::fs::write(source.0.join("run.sh"), "echo b\n").unwrap();
+        store.capture_checkout("worker", &from).unwrap();
+        store.apply("worker", &from, &to).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(target.0.join("run.sh")).unwrap(),
+            "echo b\n"
+        );
+    }
+
+    #[test]
+    fn integration_survives_a_lead_commit_but_not_a_worker_commit() {
+        let Some((source, target)) = worker_and_lead("commits", &[("a.txt", "head\n")]) else {
+            return;
+        };
+        let from = source.0.to_string_lossy().into_owned();
+        let to = target.0.to_string_lossy().into_owned();
+        let (_root, store) = store();
+        store.ensure("worker", &from).unwrap();
+        std::fs::write(source.0.join("a.txt"), "worker\n").unwrap();
+        store.capture_checkout("worker", &from).unwrap();
+
+        std::fs::write(target.0.join("other.txt"), "lead\n").unwrap();
+        if !git(&target.0, &["add", "other.txt"]) || !git(&target.0, &["commit", "-m", "lead"]) {
+            return;
+        }
+        assert!(base_intact(&source.0, &target.0).unwrap());
+        store.apply("worker", &from, &to).unwrap();
+
+        std::fs::write(source.0.join("b.txt"), "worker commit\n").unwrap();
+        if !git(&source.0, &["add", "b.txt"]) || !git(&source.0, &["commit", "-m", "worker"]) {
+            return;
+        }
+        assert!(!base_intact(&source.0, &target.0).unwrap());
+        assert!(store
+            .apply("worker", &from, &to)
+            .unwrap_err()
+            .contains("worker committed"));
     }
 
     #[test]

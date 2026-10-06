@@ -151,6 +151,30 @@ export function applySessionCheckpoint(
   );
 }
 
+/**
+ * Record an isolated worker's whole checkout delta since its baseline,
+ * including shell edits, and return the changed project-relative paths.
+ */
+export function captureWorkerCheckout(
+  sessionId: string,
+  cwd: string,
+): Promise<string[]> {
+  return enqueueCheckpoint(sessionId, () =>
+    invoke<string[]>("session_checkpoint_capture_checkout", { sessionId, cwd }),
+  );
+}
+
+/**
+ * True while the worker has made no commit of its own and the lead's branch
+ * still contains the worker's starting commit, even if the lead committed.
+ */
+export function workerBaseIntact(
+  fromCwd: string,
+  toCwd: string,
+): Promise<boolean> {
+  return invoke<boolean>("session_checkpoint_base_intact", { fromCwd, toCwd });
+}
+
 /** True only when the checkout still matches its seeded, pre-worker state. */
 export function sessionCheckpointCleanupSafe(
   sessionId: string,

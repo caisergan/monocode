@@ -549,6 +549,46 @@ export function modelEffortSetting(
   );
 }
 
+/**
+ * Model settings an agent asked for, validated against the model's own
+ * options. `effort` is shorthand for whichever setting holds reasoning effort.
+ */
+export function requestedModelSettings(
+  model: AgentModel,
+  settings: unknown,
+  effort: unknown,
+  listCommand: string,
+): Record<string, string> {
+  if (
+    settings !== undefined &&
+    (!settings || typeof settings !== "object" || Array.isArray(settings))
+  )
+    throw new Error(
+      "modelSettings must be an object of setting IDs and values",
+    );
+  const requested = { ...((settings ?? {}) as Record<string, unknown>) };
+  if (effort !== undefined) {
+    const setting = modelEffortSetting(model);
+    if (!setting)
+      throw new Error(`${model.id} does not expose an effort setting`);
+    if (typeof effort !== "string" || !effort.trim() || effort.length > 128)
+      throw new Error("effort must be a non-empty string under 128 characters");
+    requested[setting.id] = effort.trim();
+  }
+  for (const [key, value] of Object.entries(requested)) {
+    const setting = model.settings?.find((entry) => entry.id === key);
+    if (
+      !setting ||
+      typeof value !== "string" ||
+      !setting.options.some((option) => option.value === value)
+    )
+      throw new Error(
+        `Invalid model setting ${key}; ${listCommand} shows allowed values`,
+      );
+  }
+  return requested as Record<string, string>;
+}
+
 export function modelEffortLabel(
   model: AgentModel,
   values?: Record<string, string>,
