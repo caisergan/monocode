@@ -19,6 +19,8 @@ extension ThemeSpec {
         "border": t.border.default.css,
         "borderDashed": t.border.dashed.css,
         "rail": t.contentAlpha(0.14).css,
+        "rule": t.border.default.css,
+        "tableDivider": t.border.subtle.css,
         "chevron": t.contentAlpha(0.45).css,
         "quoteBar": t.contentAlpha(0.2).css,
         "primary": t.primary.css,
@@ -50,6 +52,15 @@ extension ThemeSpec {
         "buttonLabel": text(T.row, t.contentAlpha(0.85), weight: "500"),
         "primaryLabel": text(T.row, t.primaryText, weight: "500"),
         "dangerLabel": text(T.row, MonoColor(252, 165, 165), weight: "500"),
+        // The desktop's own markdown styles (index.css `.agent-markdown`),
+        // beyond the Expo app's theme: struck text, quotes at prose colour,
+        // and table cells at 13 / 18 (cells 12 px on the desktop).
+        "del": text(T.prose, t.text.prose),
+        // List markers take the item's colour, as `::marker` does.
+        "listMarker": text(T.prose, t.text.prose),
+        "quote": text(T.prose, t.text.prose, italic: true),
+        "tableCell": text(T.secondary, t.contentAlpha(0.85)),
+        "tableHeader": text(T.secondary, t.content, weight: "600"),
       ])
   }
 }

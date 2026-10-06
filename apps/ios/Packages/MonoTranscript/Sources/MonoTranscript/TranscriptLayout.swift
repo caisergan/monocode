@@ -13,6 +13,8 @@ private let linkKey = NSAttributedString.Key("MonoLink")
 /// A file chip's reference (its text) and its icon placeholder's icon name.
 private let fileKey = NSAttributedString.Key("MonoFile")
 private let iconKey = NSAttributedString.Key("MonoIcon")
+/// Struck text (`~~…~~`): CoreText draws no strikethrough, so the layout does.
+private let strikeKey = NSAttributedString.Key("MonoStrike")
 /// File-type icons in chips (11 §11.16): 16 pt, then a 3 pt gap.
 private let iconSize: CGFloat = 16
 
@@ -37,11 +39,13 @@ final class TextBlock: @unchecked Sendable {
   let files: [(CGRect, String)]
   /// File-type icons to draw over the chips' placeholders.
   let icons: [(CGRect, String)]
+  /// Strikethrough lines, 1 pt tall, and their colour.
+  let strikes: [(CGRect, CGColor)]
   let usedWidth: CGFloat
   let lineCount: Int
 
   init(frame: CTFrame, size: CGSize, pathHeight: CGFloat, chips: [(CGRect, Int)], links: [(CGRect, String)],
-       files: [(CGRect, String)], icons: [(CGRect, String)], usedWidth: CGFloat, lineCount: Int) {
+       files: [(CGRect, String)], icons: [(CGRect, String)], strikes: [(CGRect, CGColor)] = [], usedWidth: CGFloat, lineCount: Int) {
     self.frame = frame
     self.size = size
     self.pathHeight = pathHeight
@@ -49,6 +53,7 @@ final class TextBlock: @unchecked Sendable {
     self.links = links
     self.files = files
     self.icons = icons
+    self.strikes = strikes
     self.usedWidth = usedWidth
     self.lineCount = lineCount
   }
@@ -121,6 +126,10 @@ final class RowLayout: @unchecked Sendable {
         CTFrameDraw(block.frame, ctx)
         ctx.restoreGState()
         for (rect, name) in block.icons { Self.drawIcon(name, in: rect.offsetBy(dx: origin.x, dy: origin.y), ctx: ctx) }
+        for (rect, color) in block.strikes {
+          ctx.setFillColor(color)
+          ctx.fill(rect.offsetBy(dx: origin.x, dy: origin.y))
+        }
       case let .line(line, baseline):
         ctx.saveGState()
         ctx.translateBy(x: baseline.x, y: baseline.y)
@@ -170,6 +179,7 @@ enum RowLayouter {
         NSAttributedString.Key(kCTParagraphStyleAttributeName as String): paragraph,
       ]
       if let link = run.link { attributes[linkKey] = link }
+      if run.style == "del" { attributes[strikeKey] = style.color }
       if run.chip == 2 {
         // A file chip: the icon's placeholder, then the name, all one chip
         // that opens the file.
@@ -240,6 +250,7 @@ enum RowLayouter {
     var links: [(CGRect, String)] = []
     var files: [(CGRect, String)] = []
     var icons: [(CGRect, String)] = []
+    var strikes: [(CGRect, CGColor)] = []
     var used: CGFloat = 0
     for (index, line) in lines.enumerated() {
       let origin = origins[index]
@@ -249,6 +260,14 @@ enum RowLayouter {
         let attributes = CTRunGetAttributes(run) as NSDictionary
         let chip = attributes[chipKey] as? Int
         let link = attributes[linkKey] as? String
+        if let strike = attributes[strikeKey], let font = attributes[NSAttributedString.Key(kCTFontAttributeName as String)] {
+          let range = CTRunGetStringRange(run)
+          let start = CTLineGetOffsetForStringIndex(line, range.location, nil)
+          let end = CTLineGetOffsetForStringIndex(line, range.location + range.length, nil)
+          let baseline = pathHeight - origin.y
+          let y = baseline - CTFontGetXHeight(font as! CTFont) / 2
+          strikes.append((CGRect(x: origin.x + start, y: y.rounded() - 0.5, width: end - start, height: 1), strike as! CGColor))
+        }
         if chip == nil && link == nil { continue }
         let range = CTRunGetStringRange(run)
         let start = CTLineGetOffsetForStringIndex(line, range.location, nil)
@@ -283,7 +302,7 @@ enum RowLayouter {
       }
     }
     return TextBlock(frame: frame, size: CGSize(width: width, height: height), pathHeight: pathHeight,
-                     chips: chips, links: links, files: files, icons: icons, usedWidth: ceil(used), lineCount: lines.count)
+                     chips: chips, links: links, files: files, icons: icons, strikes: strikes, usedWidth: ceil(used), lineCount: lines.count)
   }
 
   /// One line, truncated with an ellipsis at `width`.
@@ -344,7 +363,9 @@ enum RowLayouter {
       height += 4
 
     case "codeBlock":
-      let box = CGRect(x: gutter, y: height, width: inner, height: 0)
+      // Under a list item, the card lines up with the item's text.
+      let indent = CGFloat(spec.depth) * 24
+      let box = CGRect(x: gutter + indent, y: height, width: inner - indent, height: 0)
       var y = height
       var codeElements: [Element] = []
       if spec.first {
@@ -361,7 +382,7 @@ enum RowLayouter {
         y += codeStyle.lineHeight
       }
       if spec.last { y += 10 }
-      let full = CGRect(x: box.minX, y: height, width: inner, height: y - height)
+      let full = CGRect(x: box.minX, y: height, width: box.width, height: y - height)
       let path = chunkPath(full, first: spec.first, last: spec.last, radius: 10)
       elements.append(.fill(path.fill, theme.color("code")))
       elements.append(.stroke(path.stroke, theme.color("border"), 1, nil))
@@ -370,6 +391,14 @@ enum RowLayouter {
         hits.append(Hit(rect: CGRect(x: full.maxX - 56, y: height, width: 56, height: 36), action: "copy", link: nil))
       }
       height = y
+
+    case "rule":
+      // The desktop's `<hr>`: 1 pt of content α .10, 24 pt around it.
+      elements.append(.fill(CGPath(rect: CGRect(x: gutter, y: height, width: inner, height: 1), transform: nil), theme.color("rule")))
+      height += 1 + 8
+
+    case "table":
+      height = tableLayout(spec, top: height, inner: inner, theme: theme, elements: &elements, hits: &hits)
 
     case "trailRow", "thinkingRow", "turnFooter":
       let rowHeight: CGFloat = spec.kind == "turnFooter" ? 30 : 30
@@ -499,7 +528,8 @@ enum RowLayouter {
       }
       if let marker = spec.marker {
         let style = theme.style(spec.runs.first?.style ?? "prose")
-        let (line, _) = singleLine([TextRun(text: marker, style: "marker")], theme: theme, width: 24)
+        let markerStyle = theme.styles["listMarker"] == nil ? "marker" : "listMarker"
+        let (line, _) = singleLine([TextRun(text: marker, style: markerStyle)], theme: theme, width: 24)
         elements.append(.line(line, CGPoint(x: x + 4, y: baseline(for: line, top: height, height: style.lineHeight))))
         x += 24
       }
@@ -511,6 +541,65 @@ enum RowLayouter {
 
     let ms = (CACurrentMediaTime() - started) * 1000
     return RowLayout(spec: spec, width: width, height: height, theme: theme, elements: elements, hits: hits, measureMs: ms)
+  }
+
+  /// A GFM table as the desktop's card (11 §11.16): `fill.code`, a 1 pt
+  /// border, 10 pt corners, cells padded 8 / 10, the header row semibold,
+  /// α .05 dividers between rows. Columns take their natural width; wider
+  /// tables share the line and their cells wrap.
+  private static func tableLayout(
+    _ spec: RowSpec, top: CGFloat, inner: CGFloat, theme: TranscriptTheme, elements: inout [Element], hits: inout [Hit]
+  ) -> CGFloat {
+    let rows = spec.cells
+    let columns = rows.map(\.count).max() ?? 0
+    guard columns > 0 else { return top }
+    let padX: CGFloat = 10
+    let padY: CGFloat = 8
+    let strings = rows.map { row in (0..<columns).map { c in attributed(c < row.count ? row[c] : [], theme: theme) } }
+    var natural = [CGFloat](repeating: 0, count: columns)
+    for row in strings {
+      for (c, string) in row.enumerated() {
+        let line = CTLineCreateWithAttributedString(string as CFAttributedString)
+        natural[c] = max(natural[c], ceil(CGFloat(CTLineGetTypographicBounds(line, nil, nil, nil))) + padX * 2)
+      }
+    }
+    var widths = natural
+    let total = natural.reduce(0, +)
+    if total < inner {
+      let extra = (inner - total) / CGFloat(columns)
+      widths = natural.map { $0 + extra }
+    } else if total > inner {
+      // Narrow columns keep their width; the wide ones share what is left.
+      let fair = inner / CGFloat(columns)
+      let narrow = natural.filter { $0 <= fair }.reduce(0, +)
+      let wide = natural.filter { $0 > fair }.reduce(0, +)
+      let room = max(0, inner - narrow)
+      widths = natural.map { $0 <= fair ? $0 : max(48, $0 / max(1, wide) * room) }
+    }
+    var y = top
+    var cellElements: [Element] = []
+    for (r, row) in strings.enumerated() {
+      let blocks = row.enumerated().map { c, string in textBlock(string, width: max(1, widths[c] - padX * 2)) }
+      let rowHeight = (blocks.map(\.size.height).max() ?? 0) + padY * 2
+      var x = gutter
+      for (c, block) in blocks.enumerated() {
+        let origin = CGPoint(x: x + padX, y: y + padY)
+        cellElements.append(.text(block, origin))
+        appendLinkHits(block, origin: origin, into: &hits)
+        x += widths[c]
+      }
+      if r < strings.count - 1 {
+        cellElements.append(.fill(CGPath(rect: CGRect(x: gutter, y: y + rowHeight - 0.5, width: inner, height: 1), transform: nil),
+                                  theme.color(r == 0 ? "border" : "tableDivider")))
+      }
+      y += rowHeight
+    }
+    let card = CGRect(x: gutter, y: top, width: inner, height: y - top)
+    elements.append(.fill(CGPath(roundedRect: card, cornerWidth: 10, cornerHeight: 10, transform: nil), theme.color("code")))
+    elements.append(.stroke(CGPath(roundedRect: card.insetBy(dx: 0.5, dy: 0.5), cornerWidth: 10, cornerHeight: 10, transform: nil),
+                            theme.color("border"), 1, nil))
+    elements.append(contentsOf: cellElements)
+    return y
   }
 
   private static func appendLinkHits(_ block: TextBlock, origin: CGPoint, into hits: inout [Hit]) {

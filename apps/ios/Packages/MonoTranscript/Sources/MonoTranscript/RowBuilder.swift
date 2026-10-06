@@ -18,6 +18,8 @@ public struct RowOptions: Sendable, Equatable {
   public var canBuild = false
   /// The zone footers print completion times in.
   public var timeZone: TimeZone = .current
+  /// Whose markdown rules: the desktop's, or the Expo app's for parity tests.
+  public var markdown: MarkdownFlavor = .desktop
 
   public init() {}
 }
@@ -35,7 +37,8 @@ public final class RowBuilder {
   public static let draftAction = "draft:"
 
   private var turnCache: [String: (blocks: [Block], key: String, rows: [RowSpec])] = [:]
-  private var markdownCache: [String: (text: String, base: String, rows: [RowSpec])] = [:]
+  private var markdownCache: [String: (text: String, base: String, flavor: MarkdownFlavor, rows: [RowSpec])] = [:]
+  private var flavor: MarkdownFlavor = .desktop
 
   public init() {}
 
@@ -57,9 +60,11 @@ public final class RowBuilder {
   }
 
   private func markdown(_ block: Block, text: String, base: String = "prose") -> [RowSpec] {
-    if let cached = markdownCache[block.id], cached.text == text, cached.base == base { return cached.rows }
-    let rows = Markdown.rows(text, idPrefix: block.id, base: base)
-    markdownCache[block.id] = (text, base, rows)
+    if let cached = markdownCache[block.id], cached.text == text, cached.base == base, cached.flavor == flavor { return cached.rows }
+    let rows =
+      flavor == .desktop
+      ? DesktopMarkdown.rows(text, idPrefix: block.id, base: base) : Markdown.rows(text, idPrefix: block.id, base: base)
+    markdownCache[block.id] = (text, base, flavor, rows)
     return rows
   }
 
@@ -242,6 +247,7 @@ public final class RowBuilder {
   /// blocks, so only the live turn is rebuilt while it streams.
   public func rows(_ blocks: [Block], _ options: RowOptions) -> [RowSpec] {
     let turns = Transcript.groupTurns(blocks)
+    flavor = options.markdown
     var rows: [RowSpec] = []
     if options.hasOlder {
       var older = RowSpec(id: "older", version: options.loadingOlder ? 2 : 1, kind: "loadOlder")
@@ -253,7 +259,7 @@ public final class RowBuilder {
       let live = options.live && index == turns.count - 1
       guard let head = turn.first else { continue }
       seen.insert(head.id)
-      let key = "\(live)|\(options.open.contains("\(head.id):fold"))|\(options.sending.sorted())|\(options.canBuild)|\(options.cwd ?? "")"
+      let key = "\(live)|\(options.open.contains("\(head.id):fold"))|\(options.sending.sorted())|\(options.canBuild)|\(options.cwd ?? "")|\(options.markdown)"
       if let cached = turnCache[head.id], cached.key == key, cached.blocks == turn {
         rows.append(contentsOf: cached.rows)
         continue

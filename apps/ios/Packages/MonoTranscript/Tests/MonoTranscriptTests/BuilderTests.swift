@@ -50,6 +50,8 @@ private func fixture(_ name: String) throws -> Data {
     options.loadingOlder = item.options.loadingOlder
     options.canBuild = item.options.canBuild
     options.timeZone = TimeZone(identifier: "UTC")!
+    // The goldens are the Expo app's rows; the app draws the desktop's markdown.
+    options.markdown = .expo
     let builder = RowBuilder()
     let rows = builder.rows(item.blocks, options)
     #expect(rows.map(\.id) == item.rows.map(\.id))
@@ -99,9 +101,9 @@ private func fixture(_ name: String) throws -> Data {
       return c.map { Int(($0 * 255).rounded()) }
     }
     #expect(rgba(made.background) == rgba(expected.background))
-    #expect(Set(made.colors.keys) == Set(expected.colors.keys))
+    #expect(Set(expected.colors.keys).isSubset(of: Set(made.colors.keys)))
     for (name, css) in expected.colors { #expect(rgba(made.colors[name] ?? "") == rgba(css), "\(name)") }
-    #expect(Set(made.styles.keys) == Set(expected.styles.keys))
+    #expect(Set(expected.styles.keys).isSubset(of: Set(made.styles.keys)))
     for (name, style) in expected.styles {
       let mine = try #require(made.styles[name])
       #expect(mine.size == style.size && mine.line == style.line, "\(name)")

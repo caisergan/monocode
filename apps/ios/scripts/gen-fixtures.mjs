@@ -199,6 +199,35 @@ function seeded(seed) {
   };
 }
 
+const SHOWCASE = [
+  "The transcript now scrolls smoothly at 1,000 turns. `scripts/check.sh` passes, and nothing is pushed.",
+  "",
+  "**What changed:**",
+  "",
+  "- **Layout cache:** rows keep their measured height, so a fling never re-measures.",
+  "- **Streaming:**",
+  "  - The tail row is re-laid out off the main thread in `src/transcript/layout.ts`.",
+  "  - Ops reach the view once per display frame.",
+  "- **Raster:** images are drawn ahead of the viewport on a background queue.",
+  "",
+  "| Check | Before | After |",
+  "| --- | --- | --- |",
+  "| Hitches per 10 s | 7 | 0 |",
+  "| Tail re-layout p95 | 3.1 ms | 0.9 ms |",
+  "| Cold first screen | 41 ms | 9 ms |",
+  "",
+  "---",
+  "",
+  "Next:",
+  "",
+  "1. Measure on the iPhone 13.",
+  "2. Profile ~~the old path~~ the fold animation.",
+  "   - [x] Simulator benchmark",
+  "   - [ ] Device run",
+  "",
+  "The full trace is at https://example.com/traces/scroll.",
+].join("\n");
+
 const sessions = [...demo.sessions.values()].map((entry) => clone(entry.value));
 const replyRandom = seeded(2026);
 const demoState = {
@@ -209,8 +238,10 @@ const demoState = {
   worktrees: Object.fromEntries([...demo.worktrees.entries()].map(([id, trees]) => [id, clone(trees)])),
   sessions,
   models: await demo.handle("models.list", {}),
-  /** Answers the Swift demo streams, one per simulated turn. */
-  replies: Array.from({ length: 6 }, (_, i) => answer(replyRandom, i % 2 === 0)),
+  /** Answers the Swift demo streams, one per simulated turn. The first is a
+   * report in the shape agents write (bold labels, nested lists, a table, a
+   * rule, a task list), so the desktop's markdown rules show. */
+  replies: [SHOWCASE, ...Array.from({ length: 6 }, (_, i) => answer(replyRandom, i % 2 === 0))],
   /** demoRepo.ts's working trees, by working-copy path, for `files.read`:
    * text, or the size of a binary or oversized file. */
   repos: Object.fromEntries(

@@ -71,13 +71,15 @@ public struct RowSpec: Hashable, Sendable, Codable, Identifiable {
   public var id: String
   /// Bumps on any change; the view re-measures only changed rows.
   public var version: Int
-  /// markdown, userBubble, codeBlock, trailRow, thinkingRow, foldLine,
-  /// approvalControls, notice, turnFooter, loadOlder, spacer.
+  /// markdown, userBubble, codeBlock, table, rule, trailRow, thinkingRow,
+  /// foldLine, approvalControls, notice, turnFooter, loadOlder, spacer.
   public var kind: String
   public var runs: [TextRun] = []
   public var sub: [TextRun] = []
   /// Code or preview lines, one run list per line.
   public var lines: [[TextRun]] = []
+  /// A table's rows, each a list of cells; the first row is the header.
+  public var cells: [[[TextRun]]] = []
   public var label: String?
   /// Code blocks are cut into chunks; only the first has the header.
   public var first = true
@@ -102,7 +104,7 @@ public struct RowSpec: Hashable, Sendable, Codable, Identifiable {
   }
 
   enum CodingKeys: String, CodingKey {
-    case id, v, k, runs, sub, lines, label, first, last, marker, depth, quote, status, open, actions, anim, gap, h, a11y
+    case id, v, k, runs, sub, lines, cells, label, first, last, marker, depth, quote, status, open, actions, anim, gap, h, a11y
   }
 
   struct Anim: Codable {
@@ -117,6 +119,7 @@ public struct RowSpec: Hashable, Sendable, Codable, Identifiable {
     runs = try c.decodeIfPresent([TextRun].self, forKey: .runs) ?? []
     sub = try c.decodeIfPresent([TextRun].self, forKey: .sub) ?? []
     lines = try c.decodeIfPresent([[TextRun]].self, forKey: .lines) ?? []
+    cells = try c.decodeIfPresent([[[TextRun]]].self, forKey: .cells) ?? []
     label = try c.decodeIfPresent(String.self, forKey: .label)
     first = try c.decodeIfPresent(Bool.self, forKey: .first) ?? true
     last = try c.decodeIfPresent(Bool.self, forKey: .last) ?? true
@@ -140,6 +143,7 @@ public struct RowSpec: Hashable, Sendable, Codable, Identifiable {
     if !runs.isEmpty { try c.encode(runs, forKey: .runs) }
     if !sub.isEmpty { try c.encode(sub, forKey: .sub) }
     if !lines.isEmpty { try c.encode(lines, forKey: .lines) }
+    if !cells.isEmpty { try c.encode(cells, forKey: .cells) }
     try c.encodeIfPresent(label, forKey: .label)
     if !first { try c.encode(first, forKey: .first) }
     if !last { try c.encode(last, forKey: .last) }

@@ -139,17 +139,39 @@ enum Markdown {
   private static let linkPattern = JSRegex("^\\[([^\\]]+)\\]\\(([^)\\s]+)(?:\\s+\"[^\"]*\")?\\)")
   private static let imagePattern = JSRegex("^!\\[([^\\]]*)\\]\\(([^)]+)\\)")
 
-  /// Inline markdown: `code`, **strong**, *em*, [links](url).
-  static func inlineRuns(_ text: String, base: String = "prose") -> [TextRun] {
+  private static let url = try! NSRegularExpression(pattern: "https?://[^\\s<]*[^\\s<.,:;\"')\\]]")
+
+  /// Bare URLs in plain text as links (GFM autolink literals).
+  private static func autolinked(_ text: String, style: String) -> [TextRun] {
+    let ns = text as NSString
+    var runs: [TextRun] = []
+    var start = 0
+    for m in url.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+      if m.range.location > start { runs.append(TextRun(text: ns.substring(with: NSRange(location: start, length: m.range.location - start)), style: style)) }
+      let href = ns.substring(with: m.range)
+      runs.append(TextRun(text: href, style: "link", link: href))
+      start = m.range.location + m.range.length
+    }
+    if start < ns.length { runs.append(TextRun(text: ns.substring(from: start), style: style)) }
+    return runs
+  }
+
+  /// Inline markdown: `code`, **strong**, *em*, [links](url). With `gfm`,
+  /// also ~~strikethrough~~ and bare URLs, as the desktop's Streamdown does.
+  static func inlineRuns(_ text: String, base: String = "prose", gfm: Bool = false) -> [TextRun] {
     var runs: [TextRun] = []
     // UTF-16 units, so a surrogate pair collected one unit at a time decodes
     // whole.
     var plain: [UInt16] = []
     var strong = false
     var em = false
-    func style() -> String { strong ? "strong" : em ? "em" : base }
+    var struck = false
+    func style() -> String { strong ? "strong" : em ? "em" : struck ? "del" : base }
     func push() {
-      if !plain.isEmpty { runs.append(TextRun(text: String(decoding: plain, as: UTF16.self), style: style())) }
+      if !plain.isEmpty {
+        let text = String(decoding: plain, as: UTF16.self)
+        if gfm && text.contains("://") { runs.append(contentsOf: autolinked(text, style: style())) } else { runs.append(TextRun(text: text, style: style())) }
+      }
       plain = []
     }
     let units = Array(text.utf16)
@@ -173,6 +195,12 @@ enum Markdown {
           i = end + run.jsLength
           continue
         }
+      }
+      if gfm && char == "~" && next == "~" {
+        push()
+        struck.toggle()
+        i += 2
+        continue
       }
       if (char == "*" || char == "_") && next == char {
         push()
