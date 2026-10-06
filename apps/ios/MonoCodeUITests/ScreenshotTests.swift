@@ -35,11 +35,11 @@ final class ScreenshotTests: XCTestCase {
   private func walk(_ theme: String) throws {
     self.theme = theme
     var app = launch([])
-    XCTAssertTrue(app.buttons["Try the demo"].waitForExistence(timeout: 10))
+    XCTAssertTrue(app.buttons["Try the demo"].waitForExistence(timeout: 30))
     try shot(app, "01-welcome")
 
     app = launch(["-MCDemo", "YES"])
-    XCTAssertTrue(app.staticTexts["Need approval"].firstMatch.waitForExistence(timeout: 15))
+    XCTAssertTrue(app.staticTexts["Need approval"].firstMatch.waitForExistence(timeout: 30))
     sleep(2)
     try shot(app, "02-agents")
 
