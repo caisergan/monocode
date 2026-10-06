@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { listAgentSessions } from "../../../platform/tauri/agentSessions";
+import { listRemoteAgentSessions } from "../../connections/model/remoteAgentSessions";
+import { isRemoteProjectPath } from "../../projects/model/recents";
 
 /** Past this the hint just says "20+". */
 const HINT_LIMIT = 20;
@@ -9,7 +11,8 @@ export type ImportableSessionCount = { count: number; more: boolean };
 const NONE: ImportableSessionCount = { count: 0, more: false };
 
 /**
- * Terminal sessions in `cwd` that MonoCode does not have yet. Re-checks when
+ * Terminal sessions in `cwd` that MonoCode does not have yet, on the
+ * project's machine for a remote project. Re-checks when
  * `refreshKey` changes (an import adds a session) and when the window regains
  * focus, since new sessions appear while the user is in the terminal.
  */
@@ -34,7 +37,11 @@ export function useImportableSessionCount(
   useEffect(() => {
     if (!cwd || cwd === "~") return;
     let active = true;
-    void listAgentSessions({ cwd, limit: HINT_LIMIT })
+    void (
+      isRemoteProjectPath(cwd)
+        ? listRemoteAgentSessions(cwd, { limit: HINT_LIMIT })
+        : listAgentSessions({ cwd, limit: HINT_LIMIT })
+    )
       .then((listing) => {
         if (!active) return;
         const count = listing.sessions.filter(

@@ -134,12 +134,16 @@ export function ConnectionsSettings() {
                 throw new Error("Host identity changed");
               if (!host.providers.length)
                 label = "Connected · install a supported provider on the host";
-              const update =
+              const workspace =
                 !host.capabilities?.includes("workspace.run") ||
                 !host.capabilities?.includes("git.worktreeCreate");
+              const update =
+                workspace ||
+                !host.capabilities?.includes("agentSessions.import");
               if (update)
-                label =
-                  "Connected · host update needed for Explorer and Changes";
+                label = workspace
+                  ? "Connected · host update needed for Explorer and Changes"
+                  : "Connected · host update needed to import terminal sessions";
               if (!disposed)
                 setNeedsUpdate((current) => ({
                   ...current,

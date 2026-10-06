@@ -18,6 +18,15 @@ const api = vi.hoisted(() => ({
         session: AgentSessionSummary,
       ) => Promise<{ sessionId: string; cwd: string; existing: boolean }>
     >(),
+  listRemoteAgentSessions:
+    vi.fn<(project: string, query: unknown) => Promise<AgentSessionListing>>(),
+  importRemoteAgentSession:
+    vi.fn<
+      (
+        project: string,
+        session: AgentSessionSummary,
+      ) => Promise<{ sessionId: string; existing: boolean }>
+    >(),
 }));
 
 vi.mock("../../../platform/tauri/agentSessions", async (actual) => ({
@@ -29,7 +38,17 @@ vi.mock("../model/agentSessionImport", async (actual) => ({
   importAgentSession: api.importAgentSession,
 }));
 
+vi.mock("../../connections/model/remoteAgentSessions", async (actual) => ({
+  ...(await actual<
+    typeof import("../../connections/model/remoteAgentSessions")
+  >()),
+  listRemoteAgentSessions: api.listRemoteAgentSessions,
+  importRemoteAgentSession: api.importRemoteAgentSession,
+}));
+
 import { ImportSessionDialog } from "./ImportSessionDialog";
+
+const REMOTE_PROJECT = "remote://env-1/home/me/app";
 
 const NOW = new Date("2026-09-29T12:00:00Z").getTime();
 const HOUR = 60 * 60 * 1000;
@@ -115,6 +134,8 @@ beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
   api.listAgentSessions.mockReset();
   api.importAgentSession.mockReset();
+  api.listRemoteAgentSessions.mockReset();
+  api.importRemoteAgentSession.mockReset();
   container = document.createElement("div");
   document.body.append(container);
   root = createRoot(container);
@@ -498,5 +519,58 @@ describe("ImportSessionDialog", () => {
     const dialog = document.querySelector('[role="dialog"]');
     expect(menu).not.toBeNull();
     expect(layerOf(menu)).toBeGreaterThan(layerOf(dialog));
+  });
+
+  it("lists and imports a remote project's sessions on its machine", async () => {
+    const open = vi.fn();
+    api.listRemoteAgentSessions.mockResolvedValue(
+      listing(
+        [
+          summary({ id: "r1", cwd: "/home/me/app", title: "Host work" }),
+          summary({
+            id: "r2",
+            cwd: "/home/me/app",
+            title: "Already there",
+            monocodeSessionId: "host-2",
+          }),
+        ],
+        1,
+      ),
+    );
+    api.importRemoteAgentSession.mockResolvedValue({
+      sessionId: "host-1",
+      existing: false,
+    });
+    await render({ cwd: REMOTE_PROJECT, onOpen: open });
+
+    expect(api.listAgentSessions).not.toHaveBeenCalled();
+    expect(api.listRemoteAgentSessions).toHaveBeenCalledWith(REMOTE_PROJECT, {
+      query: undefined,
+      limit: 15,
+      includeImported: false,
+    });
+    expect(dialogText()).toContain("this machine’s terminal");
+    // A machine's project lists only its own sessions.
+    expect(document.querySelector('[aria-label="Which sessions"]')).toBeNull();
+
+    await act(async () => row("Host work").click());
+    expect(api.importRemoteAgentSession).toHaveBeenCalledWith(
+      REMOTE_PROJECT,
+      expect.objectContaining({ id: "r1", cwd: "/home/me/app" }),
+    );
+    expect(open).toHaveBeenCalledWith("host-1", REMOTE_PROJECT);
+
+    await act(async () => row("Already there").click());
+    expect(api.importRemoteAgentSession).toHaveBeenCalledTimes(1);
+    expect(open).toHaveBeenLastCalledWith("host-2", REMOTE_PROJECT);
+  });
+
+  it("says when a machine's host is too old to import", async () => {
+    const { RemoteImportUnsupported } = await import(
+      "../../connections/model/remoteAgentSessions"
+    );
+    api.listRemoteAgentSessions.mockRejectedValue(new RemoteImportUnsupported());
+    await render({ cwd: REMOTE_PROJECT });
+    expect(dialogText()).toContain("Update this machine's host");
   });
 });

@@ -16,8 +16,17 @@ import {
   listAgentSessions,
   type AgentSessionListing,
   type AgentSessionSummary,
+  type ImportableHarness,
 } from "../../../platform/tauri/agentSessions";
-import { sameProjectPath } from "../../projects/model/recents";
+import {
+  isRemoteProjectPath,
+  sameProjectPath,
+} from "../../projects/model/recents";
+import {
+  importRemoteAgentSession,
+  listRemoteAgentSessions,
+  REMOTE_IMPORTABLE_HARNESSES,
+} from "../../connections/model/remoteAgentSessions";
 import { ProjectMascot } from "../../projects/ui/ProjectMascot";
 import {
   loadTabGroupColors,
@@ -45,7 +54,10 @@ import { SessionsHeaderButton, SessionsSearchField } from "./SessionsSearchBar";
 import { TerminalSpinner } from "./TerminalSpinner";
 
 type Props = {
-  /** Start on this project's sessions; the sheet can widen to every folder. */
+  /**
+   * Start on this project's sessions; the sheet can widen to every folder.
+   * A project on another machine lists that machine's sessions, and only its.
+   */
   cwd?: string;
   /** Folders already in the project rail. */
   projects: readonly string[];
@@ -75,8 +87,9 @@ function errorText(error: unknown): string {
 /**
  * Lists sessions started in a terminal with Claude Code, Pi or omp, and
  * imports the chosen one as a MonoCode session that resumes the same
- * conversation. Reads like the sessions list: same search box, filter menu,
- * row and empty states.
+ * conversation. A project on another machine lists that machine's Claude
+ * Code sessions and imports them there. Reads like the sessions list: same
+ * search box, filter menu, row and empty states.
  */
 export function ImportSessionDialog({
   cwd: initialCwd,
@@ -84,6 +97,10 @@ export function ImportSessionDialog({
   onClose,
   onOpen,
 }: Props) {
+  const remote = !!initialCwd && isRemoteProjectPath(initialCwd);
+  const harnesses: readonly ImportableHarness[] = remote
+    ? REMOTE_IMPORTABLE_HARNESSES
+    : IMPORTABLE_HARNESSES;
   const [scope, setScope] = useState(initialCwd);
   // Only sessions that import as chats without a project.
   const [chatsOnly, setChatsOnly] = useState(false);
@@ -100,7 +117,7 @@ export function ImportSessionDialog({
   const [reload, setReload] = useState(0);
   const [listing, setListing] = useState<AgentSessionListing | null>(null);
   const [fetching, setFetching] = useState(true);
-  const [loadError, setLoadError] = useState(false);
+  const [loadError, setLoadError] = useState("");
   const [importing, setImporting] = useState<string | null>(null);
   const [confirming, setConfirming] = useState<string | null>(null);
   const [importError, setImportError] = useState("");
@@ -128,30 +145,41 @@ export function ImportSessionDialog({
     // A search is looking for one conversation, so it also finds the ones
     // MonoCode already has; picking one opens it rather than importing again.
     const withImported = includeImported || !!search;
-    void listAgentSessions({
+    const common = {
       ...(hiddenHarnessesKey
-        ? {
-            harnesses: IMPORTABLE_HARNESSES.filter(
-              (harness) => !hidden.has(harness),
-            ),
-          }
+        ? { harnesses: harnesses.filter((harness) => !hidden.has(harness)) }
         : {}),
-      cwd: chatsOnly ? undefined : scope,
-      ...(chatsOnly ? { projectless: true } : {}),
       query: search || undefined,
       limit: PAGE_LIMITS[page],
       includeImported: withImported,
-      owner,
       ...(since > 0 ? { since } : {}),
-    })
+    };
+    void (
+      remote
+        ? listRemoteAgentSessions(initialCwd, common)
+        : listAgentSessions({
+            ...common,
+            cwd: chatsOnly ? undefined : scope,
+            ...(chatsOnly ? { projectless: true } : {}),
+            owner,
+          })
+    )
       .then((next) => {
         if (!active) return;
         if (!withImported) setHiddenCount(next.importedCount);
         setListing(next);
-        setLoadError(false);
+        setLoadError("");
       })
-      .catch(() => {
-        if (active) setLoadError(true);
+      .catch((reason: unknown) => {
+        if (!active) return;
+        // Host errors arrive as text; ours (no machine, old host) as Errors.
+        setLoadError(
+          !remote
+            ? "Couldn’t load terminal sessions"
+            : reason instanceof Error
+              ? reason.message
+              : "Couldn’t load this machine’s terminal sessions",
+        );
       })
       .finally(() => {
         if (active) setFetching(false);
@@ -169,6 +197,9 @@ export function ImportSessionDialog({
     owner,
     filters.time,
     hiddenHarnessesKey,
+    remote,
+    initialCwd,
+    harnesses,
   ]);
 
   const canLoadMore =
@@ -193,7 +224,10 @@ export function ImportSessionDialog({
   const pick = (session: AgentSessionSummary) => {
     if (importing) return;
     if (session.monocodeSessionId) {
-      onOpen(session.monocodeSessionId, agentImportPlan(session).cwd);
+      onOpen(
+        session.monocodeSessionId,
+        remote ? initialCwd : agentImportPlan(session).cwd,
+      );
       return;
     }
     if (now - session.updatedAt < RECENT_MS && confirming !== session.id) {
@@ -202,7 +236,14 @@ export function ImportSessionDialog({
     }
     setImporting(session.id);
     setImportError("");
-    void importAgentSession(session)
+    void (
+      remote
+        ? importRemoteAgentSession(initialCwd, session).then((result) => ({
+            sessionId: result.sessionId,
+            cwd: initialCwd,
+          }))
+        : importAgentSession(session)
+    )
       .then((result) => onOpen(result.sessionId, result.cwd))
       .catch((reason: unknown) => setImportError(errorText(reason)))
       .finally(() => {
@@ -265,7 +306,11 @@ export function ImportSessionDialog({
   return (
     <Modal
       title="Import session"
-      description="Pick up a session you started in the terminal"
+      description={
+        remote
+          ? "Pick up a Claude Code session you started in this machine’s terminal"
+          : "Pick up a session you started in the terminal"
+      }
       onClose={onClose}
       className="h-[min(72vh,640px)]"
     >
@@ -308,38 +353,43 @@ export function ImportSessionDialog({
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-none">
-          <div
-            role="group"
-            aria-label="Which sessions"
-            className="flex items-center gap-1 px-3 pt-2 text-[12px]"
-          >
-            {views.map((view, index) => (
-              <span key={view.id} className="flex items-center gap-1">
-                {index > 0 ? <span className="text-content/30">·</span> : null}
-                <button
-                  type="button"
-                  aria-pressed={view.active}
-                  title={
-                    view.id === "chats"
-                      ? "Sessions without a project: started in your home folder, or in a folder that no longer exists"
-                      : undefined
-                  }
-                  onClick={() => {
-                    if (view.active) return;
-                    view.pick();
-                    setPage(0);
-                  }}
-                  className={
-                    view.active
-                      ? "text-content"
-                      : "text-content/50 hover:text-content"
-                  }
-                >
-                  {view.label}
-                </button>
-              </span>
-            ))}
-          </div>
+          {/* A machine's project only lists its own folder's sessions. */}
+          {remote ? null : (
+            <div
+              role="group"
+              aria-label="Which sessions"
+              className="flex items-center gap-1 px-3 pt-2 text-[12px]"
+            >
+              {views.map((view, index) => (
+                <span key={view.id} className="flex items-center gap-1">
+                  {index > 0 ? (
+                    <span className="text-content/30">·</span>
+                  ) : null}
+                  <button
+                    type="button"
+                    aria-pressed={view.active}
+                    title={
+                      view.id === "chats"
+                        ? "Sessions without a project: started in your home folder, or in a folder that no longer exists"
+                        : undefined
+                    }
+                    onClick={() => {
+                      if (view.active) return;
+                      view.pick();
+                      setPage(0);
+                    }}
+                    className={
+                      view.active
+                        ? "text-content"
+                        : "text-content/50 hover:text-content"
+                    }
+                  >
+                    {view.label}
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
 
           {importError ? (
             <p role="alert" className="px-3 pt-2 text-[12px] text-red-400">
@@ -353,7 +403,7 @@ export function ImportSessionDialog({
         */}
           {loadError ? (
             <p role="alert" className="px-3 pt-2 text-[12px] text-content/50">
-              Couldn’t load terminal sessions
+              {loadError}
             </p>
           ) : null}
 
@@ -376,7 +426,13 @@ export function ImportSessionDialog({
               </p>
             ) : (
               <div className="flex-1">
-                <SessionsEmpty message="Sessions you start in the terminal will show up here" />
+                <SessionsEmpty
+                  message={
+                    remote
+                      ? "Claude Code sessions you start in this machine’s terminal will show up here"
+                      : "Sessions you start in the terminal will show up here"
+                  }
+                />
               </div>
             )
           ) : (
@@ -422,7 +478,7 @@ export function ImportSessionDialog({
         <SessionFiltersMenu
           x={filterMenu.x}
           y={filterMenu.y}
-          harnesses={[...IMPORTABLE_HARNESSES]}
+          harnesses={[...harnesses]}
           filters={filters}
           onChange={(next) => {
             setFilters(next);
