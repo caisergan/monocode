@@ -283,6 +283,20 @@ public final class HostSync {
     store.publish(value, window)
   }
 
+  /// One block in full (`sessions.block`), for the tool sheet: the
+  /// window's copy may be truncated in transit (06 §6.7).
+  public func block(_ sessionId: String, _ blockId: String) async throws -> Block {
+    struct Params: Encodable, Sendable {
+      var sessionId: String
+      var blockId: String
+    }
+    struct Result: Decodable, Sendable {
+      var block: Block
+    }
+    let result: Result = try await runtime.request("sessions.block", Params(sessionId: sessionId, blockId: blockId), timeout: .seconds(60))
+    return result.block
+  }
+
   /// Prepends the turns before the window; the first returned block becomes
   /// the anchor the next watch carries.
   public func loadOlder(_ store: SessionStore) async {

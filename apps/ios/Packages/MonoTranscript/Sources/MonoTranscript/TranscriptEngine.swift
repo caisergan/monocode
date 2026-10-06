@@ -74,13 +74,11 @@ final class TranscriptEngine: @unchecked Sendable {
   /// Called on the main queue with every new snapshot.
   var publish: (@MainActor @Sendable (Snapshot) -> Void)?
 
-  /// `json` is the theme object (colours, styles, scale), parsed on the queue.
-  func setTheme(_ json: String) {
+  /// The theme's colours, styles and scale; fonts are resolved on the queue.
+  func setTheme(_ spec: ThemeSpec) {
     queue.async {
-      guard let data = json.data(using: .utf8),
-            let value = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
       self.themeRevision += 1
-      self.theme = TranscriptTheme.parse(value, revision: self.themeRevision)
+      self.theme = TranscriptTheme.parse(spec, revision: self.themeRevision)
       self.relayoutAll()
     }
   }
@@ -107,45 +105,44 @@ final class TranscriptEngine: @unchecked Sendable {
     }
   }
 
-  /// `json` is an array of ops: reset, insert, append, update, remove.
-  func apply(_ json: String) {
+  /// One frame's batch of ops: reset, insert, append, update, remove.
+  func apply(_ ops: [TranscriptOp]) {
     queue.async {
-      guard let data = json.data(using: .utf8),
-            let ops = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]]
-      else { return }
       var structural = false
-      var changed: [Int] = []
+      var reset = false
       for op in ops {
-        switch op["op"] as? String {
-        case "reset":
-          self.specs = (op["rows"] as? [Any])?.compactMap(RowSpec.init) ?? []
-          self.layouts = Array(repeating: nil, count: self.specs.count)
+        switch op {
+        case let .reset(rows):
+          // Ops after a reset in the same batch still apply; the whole
+          // transcript is laid out once at the end.
+          self.specs = rows
+          self.layouts = Array(repeating: nil, count: rows.count)
           self.rebuildIndex()
-          self.coldLayout()
-          return
-        case "insert", "append":
-          let rows = (op["rows"] as? [Any])?.compactMap(RowSpec.init) ?? []
-          var at = self.specs.count
-          if op["op"] as? String == "insert" {
-            if let after = op["after"] as? String, let i = self.index[after] { at = i + 1 } else if op["after"] is NSNull || op["after"] == nil { at = 0 }
-          }
+          reset = true
+        case let .insert(after, rows):
+          var at = 0
+          if let after { at = self.index[after].map { $0 + 1 } ?? self.specs.count }
           self.specs.insert(contentsOf: rows, at: at)
           self.layouts.insert(contentsOf: Array(repeating: nil, count: rows.count), at: at)
           structural = true
           self.rebuildIndex()
-        case "update":
-          for row in (op["rows"] as? [Any])?.compactMap(RowSpec.init) ?? [] {
+        case let .append(rows):
+          self.specs.append(contentsOf: rows)
+          self.layouts.append(contentsOf: Array(repeating: nil, count: rows.count))
+          structural = true
+          self.rebuildIndex()
+        case let .update(rows):
+          for row in rows {
             guard let i = self.index[row.id] else { continue }
             self.specs[i] = row
             self.layouts[i] = nil
-            changed.append(i)
           }
-        case "remove":
-          let ids = Set((op["ids"] as? [String]) ?? [])
-          guard !ids.isEmpty else { continue }
+        case let .remove(ids):
+          let gone = Set(ids)
+          guard !gone.isEmpty else { continue }
           var keptSpecs: [RowSpec] = []
           var keptLayouts: [RowLayout?] = []
-          for (i, spec) in self.specs.enumerated() where !ids.contains(spec.id) {
+          for (i, spec) in self.specs.enumerated() where !gone.contains(spec.id) {
             keptSpecs.append(spec)
             keptLayouts.append(self.layouts[i])
           }
@@ -153,9 +150,11 @@ final class TranscriptEngine: @unchecked Sendable {
           self.layouts = keptLayouts
           structural = true
           self.rebuildIndex()
-        default:
-          continue
         }
+      }
+      if reset {
+        self.coldLayout()
+        return
       }
       guard self.width > 0 else { return }
       let started = CACurrentMediaTime()
@@ -167,7 +166,6 @@ final class TranscriptEngine: @unchecked Sendable {
       if !structural && measured > 0 && measured <= 2 {
         self.stats.record(update: (CACurrentMediaTime() - started) * 1000)
       }
-      _ = changed
       self.emit()
     }
   }

@@ -24,6 +24,21 @@ final class Router {
   var agents: [Destination] = []
   var projects: [Destination] = []
   var settings: [Destination] = []
+  #if DEBUG
+  /// A block whose tool sheet the next session screen opens (debug links).
+  var debugTool: String?
+  #endif
+
+  /// The session screen hides the tab bar (M16), and the accessory with it.
+  var sessionOnTop: Bool {
+    let path: [Destination] = switch tab {
+    case .agents: agents
+    case .projects: projects
+    case .settings: settings
+    }
+    if case .session? = path.last { return true }
+    return false
+  }
 
   /// Pushes onto the stack of the selected tab.
   func push(_ destination: Destination) {
@@ -45,7 +60,7 @@ final class Router {
   }
 
   /// The debug links: `<scheme>://lab?run=…`, `<scheme>://scroll-edge`,
-  /// `<scheme>://fling-cards`.
+  /// `<scheme>://fling-cards`, `<scheme>://session?id=…&tool=…`.
   func open(_ url: URL) {
     #if DEBUG
     switch url.host() {
@@ -54,6 +69,13 @@ final class Router {
       open(.settings, [.transcriptLab(run.flatMap(LabRun.init(rawValue:)))])
     case "scroll-edge":
       open(.settings, [.scrollEdgeControl])
+    case "session":
+      // `<scheme>://session?env=…&id=…`; the demo machine when env is absent.
+      let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+      guard let id = items.first(where: { $0.name == "id" })?.value else { return }
+      let env = items.first(where: { $0.name == "env" })?.value ?? "00000000-0000-4000-8000-00000000d3e0"
+      debugTool = items.first(where: { $0.name == "tool" })?.value
+      open(.agents, [.session(env: env, sessionId: id)])
     case "fling-cards":
       open(.settings, [.cardFling(run: url.query()?.contains("run=1") == true)])
     default:

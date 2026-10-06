@@ -101,5 +101,33 @@ final class ScreenshotTests: XCTestCase {
     app = launch(["-MCDemo", "YES", "-MCDemoOffline", "YES"])
     sleep(4)
     try shot(app, "14-agents-offline-notice")
+
+    app = launch(["-MCDemo", "YES", "-MCOpen", "monocode-dev://session?id=s-auth"])
+    XCTAssertTrue(app.navigationBars["Fix flaky auth test"].waitForExistence(timeout: 30))
+    sleep(2)
+    try shot(app, "15-session")
+    app.buttons["Session menu"].tap()
+    sleep(1)
+    try shot(app, "16-session-menu")
+    app.buttons["Session info"].tap()
+    sleep(1)
+    try shot(app, "17-session-info")
+
+    app = launch(["-MCDemo", "YES", "-MCOpen", "monocode-dev://session?id=s-auth&tool=t-log"])
+    XCTAssertTrue(app.navigationBars["Fix flaky auth test"].waitForExistence(timeout: 30))
+    sleep(3)
+    try shot(app, "18-tool-sheet")
+
+    app = launch(["-MCDemo", "YES", "-MCOpen", "monocode-dev://session?id=s-perf"])
+    XCTAssertTrue(app.navigationBars["Profile the transcript scroll"].waitForExistence(timeout: 30))
+    sleep(6)
+    try shot(app, "19-session-streaming")
+
+    app = launch(["-MCDemo", "YES", "-MCOpen", "monocode-dev://session?id=s-api"])
+    XCTAssertTrue(app.navigationBars["Add pagination to /sessions"].waitForExistence(timeout: 30))
+    sleep(5)
+    app.swipeDown(velocity: .fast)
+    sleep(2)
+    try shot(app, "20-session-jump-waiting-for-approval")
   }
 }

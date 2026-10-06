@@ -180,23 +180,27 @@ public final class MonoTranscriptView: UIView, UIScrollViewDelegate {
 
   // MARK: API
 
-  /// Applies one frame's batch of ops, a JSON array in the shape of the Expo
-  /// app's spec.ts: reset, insert, append, update, remove.
-  public func apply(_ json: String) {
-    engine.apply(json)
+  /// Applies one frame's batch of ops (15 §15.4): reset, insert, append,
+  /// update, remove. Rows are measured on the layout queue.
+  public func apply(_ ops: [TranscriptOp]) {
+    guard !ops.isEmpty else { return }
+    engine.apply(ops)
   }
 
-  /// Sets colours and text styles: a JSON object of background, scale,
-  /// colors and styles, as `transcriptTheme()` in the Expo app made it.
-  public func setTheme(_ json: String) {
-    guard let data = json.data(using: .utf8),
-          let value = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
-    let parsed = TranscriptTheme.parse(value, revision: theme.revision + 1)
+  /// Replaces every row, for example when a session opens.
+  public func reset(rows: [RowSpec]) {
+    engine.apply([.reset(rows)])
+  }
+
+  /// Sets colours and text styles (`ThemeSpec.make(palette:)`).
+  public func setTheme(_ spec: ThemeSpec) {
+    let parsed = TranscriptTheme.parse(spec, revision: theme.revision + 1)
     theme = parsed
     backgroundColor = UIColor(cgColor: parsed.background)
     scrollView.backgroundColor = backgroundColor
     cache.removeAll()
-    engine.setTheme(json)
+    for (_, layer) in visible { layer.backgroundColor = parsed.background; layer.layout = nil }
+    engine.setTheme(spec)
   }
 
   public func scrollToBottom(animated: Bool) {

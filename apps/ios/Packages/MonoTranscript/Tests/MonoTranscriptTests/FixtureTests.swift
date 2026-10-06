@@ -5,8 +5,8 @@ import Testing
 @Suite @MainActor struct FixtureTests {
   @Test func rowFixturesLayOut() async throws {
     let harness = EngineHarness()
-    harness.engine.setTheme(try TranscriptFixture.themeDark.text())
-    harness.send(try TranscriptFixture.rows120.resetOps())
+    harness.engine.setTheme(try TranscriptFixture.themeDark.theme())
+    harness.send([.reset(try TranscriptFixture.rows120.rows())])
     let snapshot = try #require(await harness.settle())
     #expect(snapshot.count == 855)
     #expect(snapshot.layouts.allSatisfy { $0.height > 0 || $0.kind == "spacer" })
@@ -24,18 +24,18 @@ import Testing
   /// Streaming equals final on the recorded run: replaying every frame on the
   /// 1,000-turn base ends at the layout of the final rows laid out at once.
   @Test func replayedStreamEqualsFinal() async throws {
-    let theme = try TranscriptFixture.themeDark.text()
+    let theme = try TranscriptFixture.themeDark.theme()
     let stream = try StreamRecording.load()
     let streamed = EngineHarness()
     streamed.engine.setTheme(theme)
-    streamed.send(try TranscriptFixture.rows1000.resetOps())
+    let base = try TranscriptFixture.rows1000.rows()
+    streamed.send([.reset(base)])
     for frame in stream.frames { streamed.send(frame.ops) }
     let replayed = try #require(await streamed.settle())
 
     let settled = EngineHarness()
     settled.engine.setTheme(theme)
-    settled.send(try TranscriptFixture.rows1000.resetOps())
-    settled.send(#"[{"op":"insert","after":"\#(stream.anchor ?? "")","rows":"# + stream.finalRows + "}]")
+    settled.send([.reset(base), .insert(after: stream.anchor, stream.finalRows)])
     let final = try #require(await settled.settle())
 
     #expect(replayed.ids == final.ids)

@@ -7,8 +7,9 @@ public enum TranscriptFixture: String, CaseIterable, Sendable {
   case rows120 = "rows-120"
   /// 1,000 settled turns (`huge`).
   case rows1000 = "rows-1000"
-  /// The dark theme object for `setTheme(_:)`.
+  /// The dark and light themes `transcriptTheme()` made, for parity tests.
   case themeDark = "theme-dark"
+  case themeLight = "theme-light"
   /// A live turn streamed on top of `rows1000`.
   case stream
 
@@ -19,54 +20,40 @@ public enum TranscriptFixture: String, CaseIterable, Sendable {
     return url
   }
 
-  public func text() throws -> String {
-    try String(contentsOf: url, encoding: .utf8)
+  /// The rows of a rows fixture.
+  public func rows() throws -> [RowSpec] {
+    try JSONDecoder().decode([RowSpec].self, from: Data(contentsOf: url))
   }
 
-  /// A `reset` op for a rows fixture, ready for `apply(_:)`.
-  public func resetOps() throws -> String {
-    #"[{"op":"reset","rows":"# + (try text()) + "}]"
+  /// The theme of a theme fixture.
+  public func theme() throws -> ThemeSpec {
+    try JSONDecoder().decode(ThemeSpec.self, from: Data(contentsOf: url))
   }
 }
 
 /// The recorded stream: one batch of ops per 60 Hz frame, replayed by time so
 /// it runs at 90 chars/s whatever the display rate.
-public struct StreamRecording: Sendable {
-  public struct Frame: Sendable {
+public struct StreamRecording: Sendable, Decodable {
+  public struct Frame: Sendable, Decodable {
     /// Milliseconds since the stream started.
     public let t: Double
     /// Characters of the reply streamed so far.
     public let chars: Int
-    /// The frame's ops, as JSON for `apply(_:)`.
-    public let ops: String
+    /// The frame's ops.
+    public let ops: [TranscriptOp]
   }
 
   public let frames: [Frame]
   public let charsPerSecond: Double
-  /// The rows after the last frame that are not in the base, as JSON.
-  public let finalRows: String
-  /// The base row the recording inserts after.
-  public let anchor: String?
+  /// The rows after the last frame that are not in the base.
+  public let finalRows: [RowSpec]
+  let baseRowsTouched: [String]
 
+  /// The base row the recording inserts after.
+  public var anchor: String? { baseRowsTouched.first }
   public var duration: Double { frames.last?.t ?? 0 }
 
   public static func load() throws -> StreamRecording {
-    let data = try Data(contentsOf: TranscriptFixture.stream.url)
-    guard let root = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-          let frames = root["frames"] as? [[String: Any]] else {
-      throw CocoaError(.fileReadCorruptFile)
-    }
-    let json = { (value: Any) throws -> String in
-      String(decoding: try JSONSerialization.data(withJSONObject: value), as: UTF8.self)
-    }
-    return StreamRecording(
-      frames: try frames.map { frame in
-        Frame(t: (frame["t"] as? NSNumber)?.doubleValue ?? 0,
-              chars: (frame["chars"] as? NSNumber)?.intValue ?? 0,
-              ops: try json(frame["ops"] ?? []))
-      },
-      charsPerSecond: (root["charsPerSecond"] as? NSNumber)?.doubleValue ?? 90,
-      finalRows: try json(root["finalRows"] ?? []),
-      anchor: (root["baseRowsTouched"] as? [String])?.first)
+    try JSONDecoder().decode(StreamRecording.self, from: Data(contentsOf: TranscriptFixture.stream.url))
   }
 }

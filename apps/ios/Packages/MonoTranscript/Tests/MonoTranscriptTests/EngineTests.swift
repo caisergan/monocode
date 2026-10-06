@@ -24,9 +24,9 @@ final class EngineHarness {
     }
   }
 
-  /// Sends `json` ops without waiting.
-  func send(_ json: String) {
-    engine.apply(json)
+  /// Sends ops without waiting.
+  func send(_ ops: [TranscriptOp]) {
+    engine.apply(ops)
   }
 
   /// The snapshot after every op sent so far: the stats callback is queued
@@ -39,11 +39,13 @@ final class EngineHarness {
   }
 
   /// Applies `ops` and returns the next snapshot with `rows` rows.
+  /// `ops` in the JSON shape, decoded as the fixtures are.
   func apply(_ ops: [[String: Any]], expecting rows: Int) async -> Snapshot {
     let data = try! JSONSerialization.data(withJSONObject: ops)
+    let typed = try! JSONDecoder().decode([TranscriptOp].self, from: data)
     return await withCheckedContinuation { continuation in
       waiting.append((rows, continuation))
-      engine.apply(String(decoding: data, as: UTF8.self))
+      engine.apply(typed)
     }
   }
 }
@@ -55,12 +57,9 @@ private func markdown(_ id: String, _ text: String, version: Int = 1) -> [String
 private let paragraph = "The session host keeps the channel open while the phone measures each row with CoreText at the viewport width, then paints the same objects it measured with."
 
 @Suite @MainActor struct EngineTests {
-  @Test func parsesTheSpecShape() throws {
-    let spec = try #require(RowSpec([
-      "id": "a1", "v": 3, "k": "codeBlock", "label": "ts", "first": true, "last": false,
-      "lines": [[["t": "const a = 1", "s": "code"]]],
-      "actions": [["id": "copy", "label": "Copy"]], "anim": ["pulse": true], "gap": 12,
-    ] as [String: Any]))
+  @Test func decodesTheSpecShape() throws {
+    let json = #"{"id":"a1","v":3,"k":"codeBlock","label":"ts","first":true,"last":false,"lines":[[{"t":"const a = 1","s":"code"}]],"actions":[{"id":"copy","label":"Copy"}],"anim":{"pulse":true},"gap":12}"#
+    let spec = try JSONDecoder().decode(RowSpec.self, from: Data(json.utf8))
     #expect(spec.id == "a1")
     #expect(spec.version == 3)
     #expect(spec.kind == "codeBlock")
@@ -69,7 +68,8 @@ private let paragraph = "The session host keeps the channel open while the phone
     #expect(spec.actions.first?.variant == "secondary")
     #expect(spec.pulse)
     #expect(spec.gap == 12)
-    #expect(RowSpec(["k": "markdown"]) == nil)
+    #expect(try JSONDecoder().decode(RowSpec.self, from: JSONEncoder().encode(spec)) == spec)
+    #expect(throws: (any Error).self) { try JSONDecoder().decode(RowSpec.self, from: Data(#"{"k":"markdown"}"#.utf8)) }
   }
 
   @Test func laysOutRowsWithExactPrefixSums() async {
@@ -130,5 +130,25 @@ private let paragraph = "The session host keeps the channel open while the phone
     let final = await settled.apply([["op": "reset", "rows": [markdown("u", "Question"), markdown("a", text, version: version)]]], expecting: 2)
     #expect(last?.layouts.map(\.height) == final.layouts.map(\.height))
     #expect(last?.total == final.total)
+  }
+}
+
+/// R0's known bug: inline code chips wrapped across lines.
+@Suite @MainActor struct ChipTests {
+  @Test func aChipNeverSplitsAcrossLines() async {
+    let harness = EngineHarness(width: 260)
+    var row = RowSpec(id: "a", version: 1, kind: "markdown")
+    row.runs = [
+      TextRun(text: "The failure comes from the session store in ", style: "prose"),
+      TextRun(text: "packages/channel/src/noise.ts", style: "inlineCode", chip: 2),
+      TextRun(text: " and the token write.", style: "prose"),
+    ]
+    let snapshot = await harness.apply([["op": "reset", "rows": [try! JSONSerialization.jsonObject(with: JSONEncoder().encode(row))]]], expecting: 1)
+    let chips = snapshot.layouts[0].elements.compactMap { element -> [CGRect]? in
+      if case let .text(block, _) = element { return block.chips.map(\.0) }
+      return nil
+    }.flatMap { $0 }
+    #expect(chips.count == 1, "the chip split into \(chips.count) pieces")
+    #expect(RowLayouter.unbreakable("a b") == "\u{202F}a\u{2060}\u{00A0}\u{2060}b\u{202F}")
   }
 }

@@ -25,7 +25,7 @@ struct RootView: View {
       }
     }
     .tabBarMinimizeBehavior(.onScrollDown)
-    .modifier(BottomAccessory(enabled: model.hasMachines))
+    .modifier(BottomAccessory(enabled: model.hasMachines && !router.sessionOnTop))
     .modifier(MonoTheme())
     .onOpenURL { router.open($0) }
     #if DEBUG

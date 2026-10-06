@@ -43,7 +43,11 @@ final class ShellUITests: XCTestCase {
     XCTAssertFalse(app.buttons["Pair with a computer"].isEnabled)
     demo.tap()
     XCTAssertTrue(app.staticTexts["Fix flaky auth test"].waitForExistence(timeout: 10))
+    app.staticTexts["Fix flaky auth test"].tap()
+    XCTAssertTrue(app.navigationBars["Fix flaky auth test"].waitForExistence(timeout: 10))
+    XCTAssertTrue(app.buttons["Session menu"].exists)
+    app.navigationBars.buttons.element(boundBy: 0).tap()
     app.tabBars.buttons["Projects"].tap()
-    XCTAssertTrue(app.staticTexts["my-app"].waitForExistence(timeout: 10))
+    XCTAssertTrue(app.staticTexts["my-app"].firstMatch.waitForExistence(timeout: 10))
   }
 }

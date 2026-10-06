@@ -19,6 +19,9 @@
 //   MonoWire  wire-samples.json   inbox.list, sessions.page, projects.list,
 //                                 models.list results to decode and re-encode
 //             sync-cases.json     applySessionSync before / sync / after cases
+//   MonoTranscript builder.json  buildRows over edge cases, demo sessions and
+//                                markdown, with folds, older pages and builds
+//             diff.json          diffRows over a streamed, folded and paged session
 //             grouping.json       groupTurns, groupTurnItems, foldableWork,
 //                                 workSummaryLine and the per-block tool
 //                                 helpers over demo sessions and edge cases
@@ -44,6 +47,7 @@ const packages = join(here, "../Packages");
 const transcriptDir = join(packages, "MonoTranscript/Sources/MonoTranscript/Resources/Fixtures");
 const demoDir = join(packages, "MonoDemo/Sources/MonoDemo/Resources");
 const wireTests = join(packages, "MonoWire/Tests/MonoWireTests/Fixtures");
+const transcriptTests = join(packages, "MonoTranscript/Tests/MonoTranscriptTests/Fixtures");
 const demoTests = join(packages, "MonoDemo/Tests/MonoDemoTests/Fixtures");
 
 /** The fixtures' clock: 2026-10-01 09:00 UTC. */
@@ -527,6 +531,129 @@ function grouping() {
   return { cases };
 }
 
+// ── Row builder and diff ────────────────────────────────────────────────────
+
+/** Markdown the fixtures never write: every block kind and inline rule. */
+const MARKDOWN = [
+  "# Heading one",
+  "## Heading *two* with `code`",
+  "### Three",
+  "#### Four ####",
+  "",
+  "A paragraph with **strong**, *em*, _under_, snake_case_name, `inline code`, `src/auth/session.ts:42`, `Makefile`,",
+  "`not a file.`, ``double `ticks` code``, a [safe link](https://example.com \"title\"), an [unsafe one](javascript:alert(1)),",
+  "a [relative](./docs/README.md), ![alt text](https://example.com/a.png), ![](x.png), and \\*escaped\\* \\`ticks\\`.",
+  "",
+  "- one",
+  "- two",
+  "  continued line",
+  "  - nested **item**",
+  "    - deeper",
+  "1. first",
+  "2) second",
+  "10. tenth",
+  "",
+  "> quoted *line*",
+  "> second quoted line",
+  "",
+  "---",
+  "***",
+  "",
+  "| Name | Value |",
+  "| --- | :---: |",
+  "| a | `1` |",
+  "| b | 2 |",
+  "",
+  "```swift",
+  "let a = 1",
+  "\tlet b = 2",
+  "```",
+  "",
+  "~~~",
+  "plain fence",
+  "~~~",
+  "",
+  "```ts",
+  ...Array.from({ length: 95 }, (_, i) => `const line${i} = ${i};`),
+  "```",
+  "",
+  "Trailing text with a ```fence that never closes",
+  "```py",
+  "print('open')",
+].join("\n");
+
+function builderCases() {
+  const cases = [];
+  const add = (name, blocks, options = {}) => {
+    const opts = { live: false, cwd: CWD, open: [], sending: [], hasOlder: false, loadingOlder: false, canBuild: false, ...options };
+    const rows = buildRows(clone(blocks), { ...opts, open: new Set(opts.open), sending: new Set(opts.sending) });
+    cases.push({ name, blocks, options: opts, rows: clone(rows) });
+  };
+  for (const [name, blocks] of Object.entries(EDGE_CASES)) {
+    add(`${name}, settled`, blocks);
+    add(`${name}, live`, blocks, { live: true });
+  }
+  add("pending edit approval, sending", EDGE_CASES["pending edit approval"], { live: true, sending: [3] });
+  const demo = (id) => sessions.find((item) => item.session.id === id);
+  const auth = demo("s-auth");
+  add("demo s-auth", auth.session.blocks, { cwd: auth.session.cwd });
+  add("demo s-auth, folds open", auth.session.blocks, { cwd: auth.session.cwd, open: ["u0:fold", "u3:fold"] });
+  add("demo s-perf, older", demo("s-perf").session.blocks, { hasOlder: true });
+  add("demo s-perf, loading older", demo("s-perf").session.blocks, { hasOlder: true, loadingOlder: true });
+  add("demo s-api", demo("s-api").session.blocks);
+  add("demo s-old-5", demo("s-old-5").session.blocks);
+  add("fixture 40", fixtureSession(40, 3), { cwd: undefined });
+  add("markdown", [user("u1", "Show every block"), say("a1", MARKDOWN)]);
+  add("markdown, streaming", [user("u1", "Show every block"), say("a1", MARKDOWN.slice(0, 1400), { streaming: true })], { live: true });
+  add("live turn before any text", [user("u1", "Go")], { live: true });
+  add("live turn with only reasoning", [user("u1", "Go"), think("r1", "Planning", { streaming: true })], { live: true });
+  const plan = [user("u1", "Plan the fix"), { id: "p1", role: "plan", text: "## Serialise the refresh\n\n1. Lock\n2. Test", plan: { status: "ready" } }];
+  add("plan, buildable", plan, { canBuild: true });
+  add("plan, not buildable", plan);
+  add("plan, building", [plan[0], { ...plan[1], plan: { status: "building" } }], { canBuild: true });
+  add("plan, streaming", [plan[0], { ...plan[1], streaming: true }], { canBuild: true, live: true });
+  add("attachments and drafts", [
+    user("u1", "Look at this", { attachments: [{ id: "img1", name: "failing-test.png", mimeType: "image/png", kind: "image", size: 501 }, { id: "f1", name: "log.txt", mimeType: "text/plain", kind: "file", size: 10 }] }),
+    say("a1", "Seen."),
+    user("u2", "Later", { draft: true }),
+  ]);
+  add("unicode", [user("u1", "Ünïcödé — “quotes” 🚀 and 日本語"), say("a1", "Emoji 👩‍💻 in **bold 🚀** and `code 🚀` with ü.")]);
+  return { cases };
+}
+
+/** Consecutive row lists from one session: streamed, settled, folded, paged. */
+function diffCases() {
+  const base = sessions.find((item) => item.session.id === "s-auth").session.blocks.filter((block) => block.id !== "t-log");
+  const reply = answer(seeded(11), true);
+  const states = [];
+  const rows = (blocks, options = {}) => buildRows(clone(blocks), { live: false, cwd: CWD, open: new Set(options.open ?? []), hasOlder: options.hasOlder, loadingOlder: options.loadingOlder });
+  states.push(["empty", []]);
+  states.push(["settled", rows(base)]);
+  const turn = [user("n-u", "And the refresh test?")];
+  states.push(["sent", buildRows(clone([...base, ...turn]), { live: true, cwd: CWD, open: new Set() })]);
+  for (const end of [0, 40, 160, 600, reply.length]) {
+    const blocks = [...base, ...turn, think("n-r", "Checking the refresh path."), tool("n-t", "Read src/auth/refresh.ts", { kind: "read", preview: { kind: "read", path: `${CWD}/src/auth/refresh.ts` } }), say("n-a", reply.slice(0, end), { streaming: end < reply.length })];
+    states.push([`streamed ${end}`, buildRows(clone(blocks), { live: true, cwd: CWD, open: new Set() })]);
+  }
+  const full = [...base, { ...turn[0], durationMs: 42_000 }, think("n-r", "Checking the refresh path."), tool("n-t", "Read src/auth/refresh.ts", { kind: "read", preview: { kind: "read", path: `${CWD}/src/auth/refresh.ts` } }), say("n-a", reply)];
+  states.push(["settled again", rows(full)]);
+  states.push(["fold open", rows(full, { open: ["n-u:fold"] })]);
+  states.push(["fold closed", rows(full)]);
+  states.push(["older available", rows(full, { hasOlder: true })]);
+  states.push(["older loading", rows(full, { hasOlder: true, loadingOlder: true })]);
+  const older = fixtureSession(2, 77).map((block) => ({ ...block, id: `old-${block.id}` }));
+  states.push(["older prepended", rows([...older, ...full])]);
+  states.push(["turns reordered", rows([...full.slice(-4), ...full.slice(0, -4)])]);
+  states.push(["cleared", []]);
+  const cases = [];
+  for (let i = 1; i < states.length; i++) {
+    const [name, after] = states[i];
+    const before = states[i - 1][1];
+    cases.push({ name: `${states[i - 1][0]} → ${name}`, before, after, ops: clone(diffRows(before, after)) });
+  }
+  return { cases };
+}
+
 // ── Output ──────────────────────────────────────────────────────────────────
 
 const huge = fixtureSession(1000);
@@ -548,6 +675,8 @@ const outputs = {
   },
   [join(wireTests, "sync-cases.json")]: syncCases(),
   [join(wireTests, "grouping.json")]: grouping(),
+  [join(transcriptTests, "builder.json")]: builderCases(),
+  [join(transcriptTests, "diff.json")]: diffCases(),
 };
 
 const check = process.argv.includes("--check");

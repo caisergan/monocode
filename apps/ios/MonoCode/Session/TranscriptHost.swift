@@ -1,4 +1,3 @@
-#if DEBUG
 import MonoTranscript
 import SwiftUI
 import UIKit
@@ -64,7 +63,5 @@ final class TranscriptHostController: UIViewController {
   private func updateInsets() {
     transcript.topInset = view.safeAreaInsets.top
     transcript.bottomInset = view.safeAreaInsets.bottom + bottomBars + 12
-    NSLog("[Lab] safe area insets top %.1f bottom %.1f, bottom bars %.1f", view.safeAreaInsets.top, view.safeAreaInsets.bottom, bottomBars)
   }
 }
-#endif

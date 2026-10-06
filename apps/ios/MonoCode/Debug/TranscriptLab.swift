@@ -1,4 +1,5 @@
 #if DEBUG
+import MonoDesign
 import MonoTranscript
 import Observation
 import QuartzCore
@@ -32,19 +33,17 @@ final class TranscriptLab: TranscriptViewDelegate {
 
   init() {
     transcript.delegate = self
-    if let theme = try? TranscriptFixture.themeDark.text() {
-      transcript.setTheme(theme)
-    }
+    transcript.setTheme(ThemeSpec.make(Tokens.dark))
   }
 
   func load(_ fixture: TranscriptFixture) async {
     stopStream()
     let started = CACurrentMediaTime()
-    guard let ops = await Task.detached(operation: { try? fixture.resetOps() }).value else {
+    guard let rows = await Task.detached(operation: { try? fixture.rows() }).value else {
       scenario = "Couldn't read \(fixture.rawValue).json"
       return
     }
-    transcript.apply(ops)
+    transcript.reset(rows: rows)
     base = fixture
     result = nil
     streamStatus = ""
@@ -99,18 +98,17 @@ final class TranscriptLab: TranscriptViewDelegate {
   private func tick(_ link: CADisplayLink) {
     guard let recording else { return }
     let elapsed = (link.timestamp - streamStart) * 1000
-    var batch: [Substring] = []
+    var batch: [TranscriptOp] = []
     var chars = 0
     while cursor < recording.frames.count, recording.frames[cursor].t <= elapsed {
       let frame = recording.frames[cursor]
-      let ops = frame.ops.dropFirst().dropLast()
-      if !ops.isEmpty { batch.append(ops) }
+      batch.append(contentsOf: frame.ops)
       chars = frame.chars
       cursor += 1
     }
     if !batch.isEmpty {
       let started = CACurrentMediaTime()
-      transcript.apply("[" + batch.joined(separator: ",") + "]")
+      transcript.apply(batch)
       applyMs.append((CACurrentMediaTime() - started) * 1000)
       if applyMs.count % 30 == 1 {
         streamStatus = "Streaming \(chars) chars · main per frame p95 \(Self.format(Self.percentile(applyMs, 0.95), 3)) ms"

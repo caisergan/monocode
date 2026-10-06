@@ -38,7 +38,7 @@ struct DemoError: Error {
 /// path the way `host/` does, from the Expo demo's initial state.
 ///
 /// - Methods: `inbox.list`, `projects.list`, `sessions.page`, `sessions.sync`,
-///   `sessions.blocks`, `watch.set`, `models.list`. Anything else is
+///   `sessions.blocks`, `sessions.block`, `watch.set`, `models.list`. Anything else is
 ///   `method_not_found`, so the app hides it.
 /// - Events, coalesced as the host does (06 §6.6): `session.sync` at most
 ///   every 100 ms per session, `inbox.changed` and `project.sessions` at most
@@ -198,6 +198,20 @@ public actor DemoHost {
         OlderBlocks(
           blocks: older.blocks.map { SessionWindow.truncate($0, max: max) }, hasOlder: older.olderTurns > 0,
           olderTurns: older.olderTurns, revision: entry.value.revision))
+    case "sessions.block":
+      struct BlockParams: Decodable {
+        var sessionId: String
+        var blockId: String
+      }
+      struct BlockResult: Encodable {
+        var block: Block
+        var revision: Int
+      }
+      let p = try decoder.decode(BlockParams.self, from: params)
+      guard let entry = sessions[p.sessionId], let block = entry.value.session.blocks.first(where: { $0.id == p.blockId }) else {
+        throw DemoError(code: "not_found", message: "Session not found on this machine")
+      }
+      return try encoder.encode(BlockResult(block: block, revision: entry.value.revision))
     case "watch.set":
       setWatch(try decoder.decode(WatchSet.self, from: params))
       return Data("{}".utf8)

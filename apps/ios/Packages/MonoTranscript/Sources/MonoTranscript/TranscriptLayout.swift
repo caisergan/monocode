@@ -143,12 +143,20 @@ enum RowLayouter {
       var text = run.text
       if run.chip > 0 {
         attributes[chipKey] = run.chip
-        // Thin spaces pad the chip inside the line layout.
-        text = "\u{2009}\(text)\u{2009}"
+        text = unbreakable(text)
       }
       out.append(NSAttributedString(string: text, attributes: attributes))
     }
     return out
+  }
+
+  /// A chip never splits across lines (15 §15.4): narrow no-break spaces pad
+  /// it, its spaces become no-break spaces, and word joiners sit between its
+  /// characters, so CoreText moves it to the next line whole. A chip wider
+  /// than the line still breaks; truncating it in the middle is not built.
+  static func unbreakable(_ text: String) -> String {
+    let glued = text.map { $0 == " " ? "\u{00A0}" : String($0) }.joined(separator: "\u{2060}")
+    return "\u{202F}\(glued)\u{202F}"
   }
 
   static func textBlock(_ string: NSAttributedString, width: CGFloat) -> TextBlock {
