@@ -1,4 +1,5 @@
 import MonoDesign
+import MonoSync
 import SwiftUI
 
 /// Welcome (11 §11.11): the desktop's empty-session composition, a centred
@@ -26,12 +27,17 @@ struct WelcomeView: View {
         .foregroundStyle(palette.text.tertiary.color)
         .multilineTextAlignment(.center)
         .padding(.top, 8)
+      if let notice = model.engine.pairingNotice {
+        Text(notice)
+          .font(.mono(Tokens.TypeScale.secondary))
+          .foregroundStyle(palette.text.secondary.color)
+          .multilineTextAlignment(.center)
+          .padding(.top, 16)
+      }
       Spacer()
       VStack(spacing: 8) {
-        // Pairing arrives with R2 (16 §16.7): the button is there, disabled.
-        Button("Pair with a computer") {}
+        Button("Pair with a computer") { model.presentPairing() }
           .buttonStyle(MonoButtonStyle(variant: .primary))
-          .disabled(true)
         Button("Try the demo") { model.tryDemo() }
           .buttonStyle(MonoButtonStyle(variant: .ghost))
       }

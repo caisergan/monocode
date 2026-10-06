@@ -12,6 +12,9 @@ enum Destination: Hashable {
   /// A file in a project's folder or a session's worktree (`cwd`), at
   /// `path` relative to it, scrolled to `line` when given.
   case file(env: String, projectId: String, cwd: String?, path: String, line: Int?)
+  /// Settings → Machines and one machine's details (11 §11.21).
+  case machines
+  case machine(env: String)
   #if DEBUG
   case transcriptLab(LabRun?)
   case scrollEdgeControl
@@ -62,6 +65,16 @@ final class Router {
     case .agents: agents = path
     case .projects: projects = path
     case .settings: settings = path
+    }
+  }
+
+  /// `<scheme>://pair#o=…` and `https://<linkDomain>/pair#o=…` (16 §16.6.2).
+  /// The offer travels in the fragment, which `onOpenURL` keeps.
+  static func isPairingLink(_ url: URL) -> Bool {
+    switch url.scheme?.lowercased() {
+    case "https"?: url.path() == "/pair" || url.path() == "/pair/"
+    case let scheme?: scheme.hasPrefix("monocode") && url.host() == "pair"
+    case nil: false
     }
   }
 

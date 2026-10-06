@@ -64,7 +64,7 @@ nonisolated(unsafe) let welcomeJSON: [String: Any] = [
         break  // never answered
       }
     }
-    let runtime = HostRuntime(env: "e", label: "Test", transport: ScriptedTransport(socket: socket), hello: Hello(env: "e", app: "t", providers: []))
+    let runtime = HostRuntime(env: "e", label: "Test", transport: ScriptedTransport(socket: socket), hello: PlainHello(env: "e", app: "t", providers: []))
     await runtime.connect()
     for await event in runtime.events {
       if case let .state(state) = event, state.isOnline { break }

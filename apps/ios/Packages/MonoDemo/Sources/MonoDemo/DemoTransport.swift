@@ -54,5 +54,5 @@ final class DemoSocket: FrameSocket, @unchecked Sendable {
 
 extension HostRecord {
   /// The demo machine's record (11 §11.11: a `Demo` tag marks it).
-  public static let demo = HostRecord(env: DemoHost.env, label: "Demo", colorIndex: 1, isDemo: true)
+  public static let demo = HostRecord.demo(env: DemoHost.env, label: "Demo", colorIndex: 1)
 }

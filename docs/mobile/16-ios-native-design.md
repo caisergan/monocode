@@ -104,7 +104,7 @@ with a reason.
 | Record compression (deflate-raw) | Apple `Compression` (`COMPRESSION_ZLIB` is raw deflate, RFC 1951), streaming, with the bounded-output rule of [03 §3.5](03-identity-and-crypto.md#35-record-layer) |
 | WebSocket | `URLSessionWebSocketTask`. Network.framework `NWProtocolWebSocket` if spike S23 needs it |
 | Network status | Network.framework `NWPathMonitor` |
-| Cache | SQLite through GRDB, encrypted per spike S18 |
+| Cache | SQLite through GRDB, under Data Protection `completeUntilFirstUserAuthentication` (spike S18: no SQLCipher) |
 | Secrets | Keychain Services, with an access group shared with the notification extension |
 | QR scanning | VisionKit `DataScannerViewController`, QR only |
 | Photos and camera | PhotosUI `PhotosPicker`; the camera through `UIImagePickerController`; ImageIO to downsample and strip EXIF |
@@ -115,7 +115,7 @@ with a reason.
 | Markdown | A Swift port of the app's own block and inline parser (`src/transcript/markdown.ts`) |
 | Code highlighting | Decided by spike S21 |
 
-**Third-party packages (SwiftPM):** GRDB (and SQLCipher if S18 keeps encryption), and
+**Third-party packages (SwiftPM):** GRDB (without SQLCipher, S18), and
 the highlighter S21 picks. Nothing else in v1.
 
 ## 16.3 Architecture
@@ -612,9 +612,9 @@ has the detail.
 |---|---|---|
 | R1-1 | The demo host starts two turns of its own once the app connects: "Profile the transcript scroll" streams an answer, settles and starts again every few seconds, and "Add pagination to /sessions" stops at an `npm test -- auth` approval. The Expo demo is still at rest until the phone sends a command. The Swift demo also answers `sessions.sync` as a request, which the Expo demo only pushed from `watch.set`; it follows 06 §6.7's host algorithm | Without the write path (R3) nothing would ever run, so Working, Need approval, the spinner and shimmer could not be reviewed. The turns copy the Expo demo's own `beginTurn` steps and timing |
 | R1-2 | Wire enumerations (`BlockRole`, `SessionStatus`, `RuntimeMode`, attention kinds, preview kinds) are open string types (`Open<Tag>`) rather than Swift enums with an `unknown` case. An unknown value decodes, compares unequal to every known case, reports `isKnown == false` and re-encodes unchanged | Same tolerance as §16.5 asks for, and values a newer host sends round-trip instead of collapsing to one `unknown` |
-| R1-3 | `HostRuntime` implements connect, `request`, the event stream, the debounced watch, reconnects with backoff and the 15 s offline wait. `verify`, ping and pong, presence, `scenePhaseChanged` and `pathChanged` are not built. In R1 frames are plain JSON envelopes: the phone sends a hello, the host answers with its welcome | They belong to the channel (MonoChannel, R2). The demo transport skips Noise anyway (§16.5) |
-| R1-4 | The seen and project-pin stores live in memory, and there is no host registry: every launch starts at Welcome | Persistence is MonoStore's (R2) |
-| R1-5 | Welcome shows "Pair with a computer" disabled. "New session" (the accessory, the bars' `plus`) pushes a placeholder page with the empty-session heading | Pairing is R2 and the composer R3; the entry points stay where the design puts them |
+| R1-3 | `HostRuntime` implements connect, `request`, the event stream, the debounced watch, reconnects with backoff and the 15 s offline wait. `verify`, ping and pong, presence, `scenePhaseChanged` and `pathChanged` are not built. In R1 frames are plain JSON envelopes: the phone sends a hello, the host answers with its welcome | They belong to the channel (MonoChannel, R2). The demo transport skips Noise anyway (§16.5). **Resolved in R2:** a real host speaks the Noise channel; `verify`, the 15 s ping with presence, `scenePhaseChanged` and `pathChanged` (`NWPathMonitor`) are built; the demo keeps the plain envelopes (R2-2) |
+| R1-4 | The seen and project-pin stores live in memory, and there is no host registry: every launch starts at Welcome | Persistence is MonoStore's (R2). **Resolved in R2:** the host registry and seen marks are in the cache, pins in the defaults (R2-12); launches start at Agents once a machine is paired |
+| R1-5 | Welcome shows "Pair with a computer" disabled. "New session" (the accessory, the bars' `plus`) pushes a placeholder page with the empty-session heading | Pairing is R2 and the composer R3; the entry points stay where the design puts them. **Pair with a computer resolved in R2**; New session stays a placeholder until R3 |
 | R1-6 | The theme has no Appearance page: it is Dark, the default, unless the `-MCTheme light\|dark\|system` launch argument says otherwise. Type sizes are fixed at the 11 §11.3 scale, without Dynamic Type | Appearance settings and the Dynamic Type pass belong to R7 |
 | R1-7 | The bottom accessory is hidden until a machine exists, with `tabViewBottomAccessory(isEnabled:)`, which needs iOS 26.1; on 26.0 it shows on Welcome too | Nothing to start or count before a machine is paired |
 | R1-8 | The Project screen's title is the project name over "Workspace · {machine}" with the ChevronsUpDown glyph, but the working-copy sheet does not open | It needs `git.worktrees`, which the demo host does not answer in R1 |
@@ -628,6 +628,29 @@ has the detail.
 | R1-16 | The app's markdown is not parsed by the Swift port of `markdown.ts` that 12 §12.9 names. `DesktopMarkdown` (`MarkdownFlavor.desktop`, the default) follows the desktop chat's rules: Streamdown with GFM, and `.agent-markdown`'s spacing. It adds `rule` and `table` row kinds, task list markers and strikethrough. The port, `Markdown` (`MarkdownFlavor.expo`), is kept only so the 48 `builder.json` goldens can check the builder's other rows against the TypeScript. The desktop flavour has no generated golden; its 8 tests are written by hand from `AgentMarkdown.tsx` and index.css. Its theme styles (`del`, `listMarker`, `tableCell`, `tableHeader`, and `quote` at prose colour) go beyond `transcriptTheme()`, so the theme parity test checks a subset. Both flavours re-parse a streaming reply's whole text on each delta (the builder rebuilds only the live turn); 12 §12.9 re-parses only the trailing block | The phone should show what the desktop shows (11 §11.16). The Expo parser draws tables as code lines and rules as blank space, and keeps soft line breaks as breaks. Streamdown is React, so gen-fixtures cannot run it for goldens |
 | R1-17 | The demo's live session streams a fixed report before its six seeded replies: bold labels, a nested list, a table, a rule, struck text, an ordered list with task items and a bare URL. `gen-fixtures.mjs` writes it into `demo-state.json` (`SHOWCASE`); the TypeScript demo has no such reply | It shows the desktop markdown rules on the demo host, for review and for screenshot 22 |
 
+### R2 deviations
+
+Recorded as R2 is built; [14 "As built, R2"](14-roadmap.md#as-built-r2-2026-10-06-branch-featios-native-design)
+has the detail.
+
+| # | Deviation from this plan | Reason |
+|---|---|---|
+| R2-1 | One `HostRecord`: MonoStore's (12 §12.6). The demo machine is a `HostRecord` whose fingerprint is `demo`, never saved; its colour is the index in `color`. MonoSync re-exports MonoStore (`@_exported import`), so the app reads records without a project reference to MonoStore. MonoChannel's `Welcome`, `ChannelError` and `Hello` keep their names; MonoSync's R1 plain hello is now `PlainHello`, and MonoWire's types are `WireWelcome` and `WireError` in files that import MonoChannel | The app target builds with `MemberImportVisibility`, so record members need MonoStore visible; re-exporting avoids a project file edit. MonoChannel and MonoStore are accepted work and stay unchanged |
+| R2-2 | The demo stays on R1's plain JSON link (`PlainLink`): no Noise, and its pings are answered on the phone. A real host gets MonoChannel's `Channel` (`NoiseLink`) | §16.5: the demo transport skips Noise |
+| R2-3 | The race has direct candidates only: no relay at 1,200 ms, no 4404 fast failure, no "last 3 on the relay" rule | The relay is R5 |
+| R2-4 | Going to the background sends `presence{visible:false}` and then `bye{background}` at once, not after an outbox flush or 30 s. There is no `BGAppRefreshTask` | The outbox is R3 |
+| R2-5 | The scan stage cannot run on the iPhone 17 simulator: `DataScannerViewController.isSupported` is false there, so the start stage shows "This device can’t scan codes. Copy the link on your computer, then paste it here." instead of Scan code, and there is no scan screenshot. The scanner's code (`QRScanner`, QR only, the 240 pt frame and a torch toggle) is built but unrun | The simulator has no camera; the device run is the owner's |
+| R2-6 | The local network explainer (11 §11.11) shows once per install, before the first connect to an offer with a `lan` candidate, not only while the permission is undetermined | iOS has no API that reports the local network permission |
+| R2-7 | Connecting shows a system `ProgressView`, not the pixel ring loader, and never "Trying the relay…". Paired has no colour row, no "Use the same look" question and no Notifications step: Continue opens Agents (first machine) or Projects | The loader is a design asset not yet drawn in Swift; the relay is R5, appearance R7, push R6 |
+| R2-8 | A failed pairing keeps the title "Pair a computer" over the message, with Try again and Use a new code | 16 §16.6.9 names no title for it |
+| R2-9 | Machine details has Connection (status, transport, version, last seen), This phone (paired, role) and Advanced (fingerprint, environment, endpoints), a Rename alert and Remove. There is no Notifications or Providers group, no relay URL, no Test connection or Copy diagnostics, and the colour is shown, not chosen. The phone name and device rename are not shown | Notifications are R6, diagnostics (05 §5.12) R7; providers need `models.list` per project |
+| R2-10 | A pairing found waiting at launch (04 §4.7, resuming) completes silently when approved; when it was denied, Welcome shows the message under its body text rather than in a sheet | The pairing sheet opens only from a user action |
+| R2-11 | The cache keeps projects, the inbox, the first page of each project list (`sessions.page` items of the open filter), session windows (saved 1 s after their last change) and seen marks. Model catalogs, older pages and drafts are not written yet | Catalogs are per project on the host and the composer that needs them is R3; drafts are R3 |
+| R2-12 | Project pins live in `UserDefaults` under the Expo app's key `mc.projects.pinned`, not in SQLite | 12 §12.6 has no pins table; the Expo app kept them in its key-value store too |
+| R2-13 | `-MCReset YES` (debug builds) deletes the cache file, the app's defaults and every Keychain item under the service `mc` before launch, for unattended runs | UI tests need a fresh install without reinstalling |
+| R2-14 | The interop test (§16.5 check 3) runs a handshake, `projects.open` and `projects.list`, a watch (`inbox.list`, `sessions.page`), a host restart with reconnect, a revoke, and a pairing with a wrong host key. It pairs with `pair --mobile --yes --json` rather than a test hook, and has no fake providers, turn, approval, sync deltas or outbox | The brief for R2; turns and the outbox are R3 |
+
+
 ## 16.8 Spikes
 
 These extend [14 §14.2](14-roadmap.md#142-m0-spikes).
@@ -635,12 +658,12 @@ These extend [14 §14.2](14-roadmap.md#142-m0-spikes).
 | # | Question | How to answer it | If it fails |
 |---|---|---|---|
 | S11 | Carried over: 0 hitches flinging 1,000 turns while streaming on the iPhone 13; tail re-layout ≤ 1 ms; streaming equals final | R0, Transcript Lab on the device | As in 14 §14.2: reduce the animated row kinds, or move layout to a shared core |
-| S18 | Cache encryption: GRDB with SQLCipher through SwiftPM (build size, open time, migration speed), against plain SQLite under Data Protection `completeUntilFirstUserAuthentication` | R2, day one | Data Protection only. 03 §3.9 and 12 §12.6 are amended |
+| S18 | Cache encryption: GRDB with SQLCipher through SwiftPM (build size, open time, migration speed), against plain SQLite under Data Protection `completeUntilFirstUserAuthentication`. **Decided provisionally in R2: Data Protection only.** GRDB with SQLCipher builds only from a patched copy of GRDB's `Package.swift` plus a 1.5 MB dynamic framework, and on the Mac it was about 1.6× slower to write and 3.7× slower on first read. 03 §3.9 and 12 §12.6 are amended; the iPhone 13 numbers are still to come | R2, day one | Data Protection only. 03 §3.9 and 12 §12.6 are amended |
 | S19 | A SwiftUI `List` of MonoCode cards with swipe actions and context menus: 0 hitches flinging 500 cards on the iPhone 13. **iPhone 17 simulator, 2026-10-06: 0 to 3 single-frame hitches per 10 s, usually 1 or 2, cold or warm; not yet passed**, see 14 "As built, R1" | R1 | A `UICollectionView` list layout in a representable, with the same cards hosted by `UIHostingConfiguration` |
 | S20 | Keyboard: does the composer in `safeAreaBar` follow interactive dismissal frame by frame, with the UIKit transcript's bottom inset following, with no double offset? | R3, day one | A UIKit session controller: transcript plus a hosted composer pinned to `keyboardLayoutGuide` |
 | S21 | Highlighting: tree-sitter (SwiftTreeSitter with the language grammars) against highlight.js in JavaScriptCore. A 400-line TypeScript file within 50 ms on the iPhone 13, with the desktop's `github-dark` and `github-light` colours | R4, day one | highlight.js in JavaScriptCore, which matches the Expo app's output |
 | S22 | Can the Cloudflare Worker send to APNs directly (HTTP/2, ES256 token auth)? This replaces S5's Expo Push question | Before R6, with S5 | A small APNs forwarder outside Workers, called by the gateway |
-| S23 | `URLSessionWebSocketTask` to `ws://` LAN, Tailscale `100.x` and `*.ts.net` addresses with `NSAllowsLocalNetworking`. When does the local network prompt fire? This takes over S4 for Swift | R2 | Network.framework `NWConnection` with `NWProtocolWebSocket` |
+| S23 | `URLSessionWebSocketTask` to `ws://` LAN, Tailscale `100.x` and `*.ts.net` addresses with `NSAllowsLocalNetworking`. When does the local network prompt fire? This takes over S4 for Swift. **iPhone 17 simulator, 2026-10-06: connects to 127.0.0.1, the Mac's LAN address, its Tailscale `100.x` address and its `*.ts.net` name (with the `ts.net` ATS exception), each alone; URLSession sends no `Origin` header. The prompt never fires on the simulator, so when it fires is still open for the iPhone 13**, see 14 "As built, R2" | R2 | Network.framework `NWConnection` with `NWProtocolWebSocket` |
 
 Spikes closed by D19: S1 (Hermes performance), S3 (Android background), S6 (Expo
 workspaces), S9 (Hugeicons in React Native), S10 (Android glass), S12 (React Native

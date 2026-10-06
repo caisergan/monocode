@@ -1,16 +1,20 @@
 import Foundation
+import MonoStore
 import MonoWire
 
 /// The read-path sync for one host (12 §12.7): it consumes the runtime's
 /// events, fetches the inbox, projects, session pages and windows, and writes
-/// the stores. Session syncs decode and apply off the main actor.
+/// the stores. Session syncs decode and apply off the main actor. The cache
+/// paints first (12 §12.6): projects, the inbox, session lists and windows
+/// come from SQLite before the host answers, and every answer is written
+/// back.
 @MainActor
 public final class HostSync {
   public static let pageSize = 50
   public static let tailTurns = 20
   public static let olderTurns = 20
 
-  public let record: HostRecord
+  public let env: String
   public let runtime: HostRuntime
   public let watch: WatchManager
   private unowned let engine: SyncEngine
@@ -22,11 +26,13 @@ public final class HostSync {
   private var refreshAgain: Set<ProjectsStore.ListKey> = []
   private var openLists: [ProjectsStore.ListKey: Int] = [:]
   private var windows: [String: (store: SessionStore, count: Int)] = [:]
+  private var windowSaves: [String: Task<Void, Never>] = [:]
+  /// Window saves wait this long after the last sync, coalescing a stream.
+  static let windowSaveDelay: Duration = .seconds(1)
 
-  init(record: HostRecord, transport: any Transport, hello: Hello, engine: SyncEngine) {
-    self.record = record
+  init(env: String, runtime: HostRuntime, engine: SyncEngine) {
+    self.env = env
     self.engine = engine
-    let runtime = HostRuntime(env: record.env, label: record.label, transport: transport, hello: hello)
     self.runtime = runtime
     watch = WatchManager { set, immediately in
       Task { await runtime.setWatch(set, immediately: immediately) }
@@ -38,15 +44,42 @@ public final class HostSync {
     }
   }
 
-  var env: String { record.env }
+  public var record: HostRecord? { engine.hosts.record(env) }
+
+  private var database: CacheDatabase? {
+    record?.isDemo == false ? engine.database : nil
+  }
 
   func start() {
-    Task { await runtime.connect() }
+    Task {
+      await paintFromCache()
+      await runtime.connect(.launch)
+    }
   }
 
   func stop() {
     events?.cancel()
+    for task in windowSaves.values { task.cancel() }
     Task { await runtime.shutdown() }
+  }
+
+  /// Projects, the inbox and seen marks from the cache, before any answer.
+  private func paintFromCache() async {
+    guard let database else { return }
+    if let projects = try? await database.loadProjects(env: env), !projects.isEmpty,
+      engine.projects.hosts[env]?.projects.isEmpty ?? true
+    {
+      engine.projects.patchHost(env) {
+        $0.projects = projects
+        $0.freshness = .cached
+      }
+    }
+    if let cached = try? await database.loadInbox(env: env), engine.inbox.hosts[env] == nil {
+      engine.inbox.hosts[env] = InboxStore.HostInbox(
+        boot: cached.inbox.boot, revision: cached.inbox.revision, items: cached.inbox.items, fetchedAt: cached.fetchedAt)
+      engine.inbox.cachedHosts.insert(env)
+    }
+    if let seen = try? await database.loadSeen(env: env) { engine.seen.restore(env, seen) }
   }
 
   // ── Events ────────────────────────────────────────────────────────────────
@@ -60,6 +93,7 @@ public final class HostSync {
       switch await store.pipeline.apply(payload.sync) {
       case let .applied(value, window):
         await store.publish(value, window)
+        await saveWindow(store)
       case let .mismatch(anchor):
         await resync(store, anchor: anchor)
       case .ignored:
@@ -79,7 +113,9 @@ public final class HostSync {
     case let .state(state):
       engine.hosts.states[env] = state
       if state.isOnline {
-        engine.hosts.lastOnline[env] = Date()
+        let now = Date()
+        engine.hosts.lastOnline[env] = now
+        engine.update(env) { $0.lastOnlineAt = now }
         watch.refresh()
         if watch.watchesInbox { refreshInbox() }
         loadProjects()
@@ -87,9 +123,15 @@ public final class HostSync {
         for key in openLists.keys { refreshSessions(key) }
       } else {
         for (_, entry) in windows { entry.store.freshness = .cached }
+        // A blocked host's cached rows will not refresh: no "Updating…".
+        if case .blocked = state { engine.inbox.cachedHosts.remove(env) }
       }
     case let .welcome(welcome):
       engine.hosts.welcomes[env] = welcome
+      engine.update(env) { $0.lastWelcome = HostRecord.WelcomeSummary(welcome) }
+    case let .endpoints(endpoints):
+      // The host's addresses move with DHCP and Tailscale (05 §5.2).
+      if !endpoints.isEmpty { engine.update(env) { $0.endpoints = endpoints } }
     case let .event(name, frame):
       switch name {
       case "inbox.changed":
@@ -119,6 +161,8 @@ public final class HostSync {
         inboxAgain = false
         if let inbox: InboxList = try? await runtime.request("inbox.list", ["limit": 200]) {
           engine.inbox.hosts[env] = InboxStore.HostInbox(boot: inbox.boot, revision: inbox.revision, items: inbox.items, fetchedAt: Date())
+          engine.inbox.cachedHosts.remove(env)
+          if let database { Task { try? await database.saveInbox(env: env, inbox) } }
         }
       } while inboxAgain
       inboxLoading = false
@@ -148,6 +192,7 @@ public final class HostSync {
           $0.loading = false
           $0.error = nil
         }
+        if let database { Task { [env] in try? await database.saveProjects(env: env, projects) } }
       } catch {
         engine.projects.patchHost(env) {
           $0.loading = false
@@ -170,6 +215,14 @@ public final class HostSync {
     let key = ProjectsStore.ListKey(env: env, projectId: projectId, archived: archived)
     openLists[key, default: 0] += 1
     let watching = watch.watchProject(projectId)
+    if engine.projects.lists[key]?.list == nil, let database {
+      Task { [env] in
+        guard let items = try? await database.loadSessionItems(env: env, projectId: projectId), !items.isEmpty,
+          self.engine.projects.lists[key]?.list == nil
+        else { return }
+        self.engine.projects.patchList(key) { $0.list = Paging.cachedList(items, archived: archived) }
+      }
+    }
     refreshSessions(key)
     return Interest { [weak self] in
       watching.release()
@@ -198,6 +251,12 @@ public final class HostSync {
             $0.list = merged.list
             $0.loading = false
             $0.error = nil
+          }
+          if let database {
+            Task { [env] in
+              try? await database.saveSessionItems(env: env, projectId: key.projectId, page.items)
+              try? await database.deleteSessionItems(env: env, ids: merged.removed)
+            }
           }
         } catch {
           engine.projects.patchList(key) {
@@ -246,6 +305,7 @@ public final class HostSync {
     } else {
       store = SessionStore(env: env, sessionId: sessionId)
       windows[sessionId] = (store, 1)
+      if let database { paintWindow(store, from: database) }
     }
     let watching = watch.watchSession(sessionId) { [weak store] in
       (store?.value?.revision, Self.syncWindow(store?.window))
@@ -266,6 +326,31 @@ public final class HostSync {
     return (store, interest)
   }
 
+  /// The cached window paints before the watch's answer; the watch then
+  /// carries its revision, so the host sends a delta or `unchanged`.
+  private func paintWindow(_ store: SessionStore, from database: CacheDatabase) {
+    Task { [env] in
+      guard let cached = try? await database.loadWindow(env: env, id: store.sessionId), store.value == nil else { return }
+      await store.pipeline.replace(cached.value, cached.window)
+      guard store.value == nil else { return }
+      store.paint(cached.value, cached.window)
+    }
+  }
+
+  /// Saves a window 1 s after its last change (12 §12.7 step 4).
+  private func saveWindow(_ store: SessionStore) {
+    guard let database else { return }
+    let id = store.sessionId
+    windowSaves[id]?.cancel()
+    windowSaves[id] = Task { [env] in
+      try? await Task.sleep(for: Self.windowSaveDelay)
+      guard !Task.isCancelled else { return }
+      let (value, window) = await store.pipeline.current()
+      guard let value else { return }
+      _ = try? await database.saveWindow(env: env, id: id, CachedWindow(revision: value.revision, value: value, window: window))
+    }
+  }
+
   static func syncWindow(_ meta: WindowMeta?) -> SyncWindow {
     if let anchor = meta?.anchor { return SyncWindow(anchor: anchor) }
     return SyncWindow(tailTurns: tailTurns)
@@ -281,6 +366,7 @@ public final class HostSync {
     else { return }
     await store.pipeline.replace(value, window)
     store.publish(value, window)
+    saveWindow(store)
   }
 
   /// One block in full (`sessions.block`), for the tool sheet: the

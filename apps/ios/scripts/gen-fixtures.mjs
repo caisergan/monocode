@@ -37,7 +37,7 @@ process.env.TZ = "UTC";
 import { build } from "esbuild";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -108,6 +108,8 @@ async function loadExpoCode() {
     write: false,
     logLevel: "error",
     plugins: [stubPlugin],
+    // Honour NODE_PATH as Node does; empty, the repo's node_modules resolve.
+    nodePaths: process.env.NODE_PATH ? process.env.NODE_PATH.split(delimiter) : [],
   });
   const file = join(tmpdir(), `monocode-fixtures-${process.pid}.mjs`);
   await writeFile(file, result.outputFiles[0].text);

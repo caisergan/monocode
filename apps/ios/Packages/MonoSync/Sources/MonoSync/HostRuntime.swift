@@ -1,10 +1,15 @@
 import Foundation
+import MonoChannel
+import MonoStore
 import MonoWire
 
 /// What a runtime reports, in order (12 §12.4).
 public enum RuntimeEvent: Sendable {
   case state(HostConnState)
-  case welcome(Welcome)
+  case welcome(WireWelcome)
+  /// A real host's endpoints from its welcome or `host.endpoints`, for the
+  /// registry.
+  case endpoints([HostEndpoint])
   /// A host event (06 §6.6). `frame` is the whole envelope; decode `d` with
   /// `RuntimeEvent.payload(_:from:)`.
   case event(name: String, frame: Data)
@@ -31,6 +36,16 @@ public enum RuntimeError: Error, Equatable, Sendable, LocalizedError {
   }
 }
 
+/// Why the runtime is asked to connect: the user and the OS skip backoff.
+public enum ConnectReason: Sendable {
+  case launch, user, foreground, network, retry
+}
+
+/// The scene phases the runtime acts on (05 §5.10), without SwiftUI.
+public enum AppPhase: Sendable {
+  case active, inactive, background
+}
+
 /// Accepts any JSON, for results nobody reads (`watch.set` answers `{}`).
 public struct Ignored: Decodable, Sendable {
   public init(from decoder: any Decoder) throws {}
@@ -44,64 +59,58 @@ private struct ResultEnvelope<R: Decodable>: Decodable {
   let r: R
 }
 
-private struct ErrorEnvelope: Decodable {
-  let e: ChannelError
-}
-
-/// The fields every host message has: `t`, and `id`/`ok` on responses.
-private struct Header: Decodable {
-  let t: String
-  let id: Int?
-  let ok: Bool?
-}
-
-private struct EventName: Decodable {
-  let e: String
-}
-
-private struct Request<P: Encodable>: Encodable {
-  let t = "req"
-  let id: Int
-  let m: String
-  let p: P
-}
-
-/// One connection to one paired host (12 §12.4). It owns the transport, the
-/// request matching, the watch set and the reconnect timers; it knows
-/// nothing about SwiftUI or storage. Stores read it through `events`.
+/// One connection to one paired host (12 §12.4). It owns the connector (the
+/// race over direct candidates, or the demo's transport), the link, the watch
+/// set, the keepalive and the reconnect timers; it knows nothing about
+/// SwiftUI or storage. Stores read it through `events`.
 public actor HostRuntime {
   public nonisolated let env: String
   public nonisolated let label: String
   public nonisolated let events: AsyncStream<RuntimeEvent>
   public private(set) var state: HostConnState = .idle
-  public private(set) var welcome: Welcome?
-  /// hostNow − localNow, from the welcome's clock.
+  public private(set) var welcome: WireWelcome?
+  /// hostNow − localNow, from the welcome's clock and each pong.
   public private(set) var clockOffset: Duration = .zero
 
-  private let transport: any Transport
-  private let hello: Hello
+  private let connector: any HostConnector
   private let continuation: AsyncStream<RuntimeEvent>.Continuation
-  private var socket: (any FrameSocket)?
-  private var reader: Task<Void, Never>?
-  private var nextId = 1
-  private var pending: [Int: CheckedContinuation<Data, any Error>] = [:]
+  private var link: (any HostLink)?
+  private var linkEvents: Task<Void, Never>?
+  private var attemptTask: Task<Void, Never>?
+  private var keepalive: Task<Void, Never>?
   private var waiters: [UUID: CheckedContinuation<Void, any Error>] = [:]
   private var watch = WatchSet()
   private var watchTask: Task<Void, Never>?
   private var retryTask: Task<Void, Never>?
   private var attempt = 0
+  private var rejections = 0
   private var connecting = false
   private var lastOnlineAt: Date?
+  private var path = NetworkPath.unknown
+  private var foreground = true
+  private var current: (kind: TransportKind, key: String, since: Date)?
 
   static let backoff: [Double] = [1, 2, 4, 8, 16, 30]
   static let requestWait: Duration = .seconds(15)
+  /// Ping cadence while online (12 §12.4).
+  static let pingEvery: Duration = .seconds(15)
+  static let pingTimeout: Duration = .seconds(5)
+  /// The verify ping on foreground and on a network change (05 §5.10).
+  public static let verifyTimeout: Duration = .seconds(2)
+  /// Handshakes the host refused while its socket opened, before the host
+  /// counts as changed (04 §4.9).
+  static let rejectionsBeforeBlocked = 3
 
-  public init(env: String, label: String, transport: any Transport, hello: Hello) {
+  init(env: String, label: String, connector: any HostConnector) {
     self.env = env
     self.label = label
-    self.transport = transport
-    self.hello = hello
+    self.connector = connector
     (events, continuation) = AsyncStream.makeStream(of: RuntimeEvent.self, bufferingPolicy: .unbounded)
+  }
+
+  /// A runtime over one plain transport: the demo machine and tests.
+  public init(env: String, label: String, transport: any Transport, hello: PlainHello) {
+    self.init(env: env, label: label, connector: PlainConnector(transport: transport, hello: hello))
   }
 
   public func has(_ capability: String) -> Bool {
@@ -109,6 +118,7 @@ public actor HostRuntime {
   }
 
   private func setState(_ next: HostConnState) {
+    guard next != state else { return }
     state = next
     continuation.yield(.state(next))
     if next.isOnline {
@@ -117,119 +127,241 @@ public actor HostRuntime {
     }
   }
 
-  /// No-op when online or already connecting; skips any backoff wait.
-  public func connect() {
-    if connecting || state.isOnline { return }
+  // MARK: Connecting
+
+  /// No-op when online or already connecting. Every reason but `.retry`
+  /// skips a pending backoff wait. A blocked host stays blocked.
+  public func connect(_ reason: ConnectReason = .user) {
+    if connecting || link != nil { return }
     if case .blocked = state { return }
+    guard foreground else { return }
     retryTask?.cancel()
+    retryTask = nil
+    guard path.satisfied else {
+      setState(.offline(reason: .noNetwork, retryAt: .distantFuture, lastOnlineAt: lastOnlineAt))
+      return
+    }
     connecting = true
     switch state {
     case .idle, .offline: setState(.connecting)
     default: break
     }
-    Task { await self.open() }
+    let connector = connector
+    let path = path
+    attemptTask = Task {
+      do {
+        let connection = try await connector.connect(path: path)
+        self.attach(connection)
+      } catch {
+        self.failConnect(error)
+      }
+    }
   }
 
-  private func open() async {
-    let started = ContinuousClock.now
-    let socket: any FrameSocket
-    do {
-      socket = try await transport.open()
-      try await socket.send(JSONEncoder().encode(hello))
-    } catch {
-      failConnect()
+  private func failConnect(_ error: any Error) {
+    connecting = false
+    attemptTask = nil
+    if error is CancellationError {
+      // Backgrounded or shut down mid-race.
+      if case .connecting = state { setState(.idle) }
       return
     }
-    reader?.cancel()
-    reader = Task { await self.read(socket, started: started) }
-    // The welcome has 5 s to arrive (05 §5.5).
-    Task {
-      try? await Task.sleep(for: .seconds(5))
-      if self.connecting, self.socket == nil { await socket.close(code: 4000, reason: "handshake timeout") }
-    }
-  }
-
-  /// The socket's frames, in order: the welcome, then envelopes.
-  private func read(_ socket: any FrameSocket, started: ContinuousClock.Instant) async {
-    var welcomed = false
-    do {
-      for try await frame in socket.frames {
-        if welcomed {
-          receive(frame)
-          continue
-        }
-        guard let welcome = try? JSONDecoder().decode(Welcome.self, from: frame), welcome.ok else { break }
-        welcomed = true
-        attach(socket, welcome: welcome, rtt: started.duration(to: .now))
+    let failure = error as? ConnectFailure ?? .unreachable
+    switch failure {
+    case let .blocked(reason):
+      setState(.blocked(reason))
+      return
+    case .noNetwork:
+      setState(.offline(reason: .noNetwork, retryAt: .distantFuture, lastOnlineAt: lastOnlineAt))
+      return
+    case .rejected:
+      rejections += 1
+      if rejections >= Self.rejectionsBeforeBlocked {
+        setState(.blocked(.hostIdentityChanged))
+        return
       }
-    } catch {}
-    if welcomed {
-      closed(socket)
-    } else {
-      await socket.close(code: 4000, reason: "handshake failed")
-      failConnect()
+    case .pending, .unreachable:
+      break
     }
-  }
-
-  private func failConnect() {
-    connecting = false
     let delay = Self.backoff[min(attempt, Self.backoff.count - 1)] * Double.random(in: 0.8...1.2)
     attempt += 1
     setState(.offline(reason: .hostUnreachable, retryAt: Date().addingTimeInterval(delay), lastOnlineAt: lastOnlineAt))
     retryTask = Task {
       try? await Task.sleep(for: .seconds(delay))
-      if !Task.isCancelled { self.connect() }
+      guard !Task.isCancelled else { return }
+      self.retryTask = nil
+      self.connect(.retry)
     }
   }
 
-  private func attach(_ socket: any FrameSocket, welcome: Welcome, rtt: Duration) {
+  private func attach(_ connection: Connection) {
     connecting = false
+    attemptTask = nil
+    guard foreground else {
+      // Backgrounded while connecting (05 §5.10): no socket stays open.
+      Task { await connection.link.sayBye(.background) }
+      return
+    }
     attempt = 0
-    self.socket = socket
-    self.welcome = welcome
+    rejections = 0
+    link = connection.link
+    welcome = connection.welcome
     let now = Date()
     lastOnlineAt = now
-    clockOffset = .milliseconds(welcome.time - Int(now.timeIntervalSince1970 * 1000))
-    continuation.yield(.welcome(welcome))
-    let ms = Int(rtt.components.seconds * 1000) + Int(rtt.components.attoseconds / 1_000_000_000_000_000)
+    clockOffset = .milliseconds(connection.welcome.time - Int(now.timeIntervalSince1970 * 1000))
+    current = (connection.kind, connection.key, now)
+    continuation.yield(.welcome(connection.welcome))
+    if let full = connection.full { continuation.yield(.endpoints(full.endpoints.compactMap(HostEndpoint.init))) }
+    let link = connection.link
+    linkEvents?.cancel()
+    linkEvents = Task {
+      for await event in link.events { self.receive(event, from: link) }
+    }
     // The owner re-sends the watch with the revisions it holds now (06 §6.6).
-    setState(.online(transport: transport.kind, endpoint: transport.key, rttMs: ms, since: now))
+    setState(.online(transport: connection.kind, endpoint: connection.key, rttMs: Self.ms(connection.rtt), since: now))
+    startKeepalive(link)
   }
 
-  private func closed(_ closing: any FrameSocket) {
-    guard let socket, socket === closing else { return }
-    self.socket = nil
-    for request in pending.values { request.resume(throwing: RuntimeError.closed) }
-    pending.removeAll()
-    setState(.reconnecting(since: Date()))
-    connect()
-  }
-
-  private func receive(_ frame: Data) {
-    guard let header = try? JSONDecoder().decode(Header.self, from: frame) else { return }
-    switch header.t {
-    case "res":
-      guard let id = header.id, let request = pending.removeValue(forKey: id) else { return }
-      if header.ok == true {
-        request.resume(returning: frame)
-      } else {
-        let error = (try? JSONDecoder().decode(ErrorEnvelope.self, from: frame).e)
-          ?? ChannelError(code: "internal", message: "The host sent an unreadable error")
-        request.resume(throwing: error)
+  private func receive(_ event: LinkEvent, from source: any HostLink) {
+    guard link === source else { return }
+    switch event {
+    case let .event(name, frame):
+      if name == "host.endpoints", let update = try? RuntimeEvent.payload(EndpointsEvent.self, from: frame) {
+        continuation.yield(.endpoints(update.endpoints.compactMap(HostEndpoint.init)))
       }
-    case "evt":
-      guard let name = try? JSONDecoder().decode(EventName.self, from: frame).e else { return }
       continuation.yield(.event(name: name, frame: frame))
-    default:
-      // pong, bye: the keepalive and close codes arrive with MonoChannel.
+    case let .closed(_, bye):
+      dropLink()
+      switch bye {
+      case .deviceRevoked?:
+        setState(.blocked(.deviceRevoked))
+      case .rekey?, .replaced?:
+        setState(.reconnecting(since: Date()))
+        connect(.network)
+      default:
+        // host_stopping, idle_timeout, a dropped socket: the host restarts
+        // or the network moved. Reconnect at once, then back off.
+        setState(.reconnecting(since: Date()))
+        connect(.network)
+      }
+    }
+  }
+
+  private func dropLink() {
+    link = nil
+    current = nil
+    keepalive?.cancel()
+    keepalive = nil
+    linkEvents?.cancel()
+    linkEvents = nil
+  }
+
+  // MARK: Keepalive and verify
+
+  private var presence: Presence { Presence(visible: foreground) }
+
+  private func startKeepalive(_ link: any HostLink) {
+    keepalive?.cancel()
+    keepalive = Task {
+      while !Task.isCancelled {
+        try? await Task.sleep(for: Self.pingEvery)
+        guard !Task.isCancelled else { return }
+        _ = await self.ping(link, timeout: Self.pingTimeout)
+      }
+    }
+  }
+
+  /// Pings `link`; a missing pong closes it and reconnects.
+  private func ping(_ link: any HostLink, timeout: Duration) async -> Bool {
+    do {
+      let pong = try await link.ping(presence: presence, timeout: timeout)
+      guard self.link === link else { return false }
+      let now = Date()
+      clockOffset = .milliseconds(Int(pong.hostNow - now.timeIntervalSince1970 * 1000))
+      if case let .online(kind, endpoint, _, since) = state {
+        setState(.online(transport: kind, endpoint: endpoint, rttMs: Self.ms(pong.rtt), since: since))
+      }
+      return true
+    } catch {
+      guard self.link === link else { return false }
+      dropLink()
+      await link.close()
+      setState(.reconnecting(since: Date()))
+      connect(.network)
+      return false
+    }
+  }
+
+  /// A ping within `timeout` (05 §5.10). False, and a reconnect started,
+  /// when the channel is gone or silent.
+  public func verify(timeout: Duration = HostRuntime.verifyTimeout) async -> Bool {
+    guard let link else {
+      connect(.network)
+      return false
+    }
+    return await ping(link, timeout: timeout)
+  }
+
+  // MARK: App lifecycle and network (05 §5.10)
+
+  public func scenePhaseChanged(_ phase: AppPhase) async {
+    switch phase {
+    case .background:
+      guard foreground else { return }
+      foreground = false
+      retryTask?.cancel()
+      retryTask = nil
+      attemptTask?.cancel()
+      guard let link else { return }
+      // presence{visible:false}, then goodbye: the outbox flush joins in R3.
+      _ = try? await link.ping(presence: Presence(visible: false), timeout: .seconds(2))
+      guard self.link === link else { return }
+      dropLink()
+      await link.sayBye(.background)
+      setState(.idle)
+    case .active:
+      guard !foreground else { return }
+      foreground = true
+      if link != nil {
+        _ = await verify()
+      } else {
+        attempt = 0
+        connect(.foreground)
+      }
+    case .inactive:
       break
     }
   }
 
+  public func pathChanged(_ next: NetworkPath) async {
+    let before = path
+    path = next
+    guard foreground else { return }
+    if !next.satisfied {
+      if link == nil && !connecting {
+        retryTask?.cancel()
+        retryTask = nil
+        setState(.offline(reason: .noNetwork, retryAt: .distantFuture, lastOnlineAt: lastOnlineAt))
+      } else if link != nil {
+        _ = await verify()
+      }
+      return
+    }
+    if link != nil {
+      if before != next { _ = await verify() }
+    } else if !connecting {
+      attempt = 0
+      connect(.network)
+    }
+  }
+
+  // MARK: Requests
+
   /// Waits up to 15 s for a channel, then throws `offline` (12 §12.4).
   private func waitOnline() async throws {
-    if state.isOnline, socket != nil { return }
-    connect()
+    if state.isOnline, link != nil { return }
+    if case .blocked = state { throw RuntimeError.offline(label) }
+    connect(.user)
     let id = UUID()
     let timeout = Task {
       try? await Task.sleep(for: Self.requestWait)
@@ -246,38 +378,14 @@ public actor HostRuntime {
   }
 
   /// A request and its typed result (06 §6.3). Reads time out after 30 s.
+  /// Host errors throw MonoWire's `ChannelError`.
   public func request<R: Decodable & Sendable>(
-    _ method: String, _ params: some Encodable & Sendable, timeout: Duration = .seconds(30)
+    _ method: String, _ params: some Encodable & Sendable, key: String? = nil, timeout: Duration = .seconds(30)
   ) async throws -> R {
     try await waitOnline()
-    guard let socket else { throw RuntimeError.offline(label) }
-    let id = nextId
-    nextId += 1
-    let frame = try JSONEncoder().encode(Request(id: id, m: method, p: params))
-    let expiry = Task {
-      try? await Task.sleep(for: timeout)
-      self.expire(id, method)
-    }
-    defer { expiry.cancel() }
-    let response: Data = try await withCheckedThrowingContinuation { request in
-      pending[id] = request
-      Task {
-        do {
-          try await socket.send(frame)
-        } catch {
-          self.fail(id, error)
-        }
-      }
-    }
+    guard let link else { throw RuntimeError.offline(label) }
+    let response = try await link.requestFrame(method, params, key: key, timeout: timeout)
     return try JSONDecoder().decode(ResultEnvelope<R>.self, from: response).r
-  }
-
-  private func expire(_ id: Int, _ method: String) {
-    pending.removeValue(forKey: id)?.resume(throwing: RuntimeError.timeout(method))
-  }
-
-  private func fail(_ id: Int, _ error: any Error) {
-    pending.removeValue(forKey: id)?.resume(throwing: error)
   }
 
   /// Replaces the watch set (06 §6.6). Sent 50 ms later, coalescing bursts;
@@ -294,20 +402,43 @@ public actor HostRuntime {
   }
 
   private func sendWatch() {
-    guard socket != nil else { return }
+    guard link != nil else { return }
     let watch = watch
     Task { _ = try? await self.request("watch.set", watch) as Ignored }
   }
 
-  /// Closes the connection for good.
-  public func shutdown() async {
+  /// Closes the connection for good. `bye` says goodbye first.
+  public func shutdown(bye: ByeCode? = nil) async {
     retryTask?.cancel()
-    reader?.cancel()
-    await socket?.close(code: 1000, reason: "bye")
-    socket = nil
-    for request in pending.values { request.resume(throwing: RuntimeError.closed) }
-    pending.removeAll()
+    attemptTask?.cancel()
+    let link = link
+    dropLink()
+    if let link {
+      if let bye { await link.sayBye(bye) } else { await link.close() }
+    }
+    for waiter in waiters.values { waiter.resume(throwing: RuntimeError.closed) }
+    waiters.removeAll()
     setState(.idle)
     continuation.finish()
+  }
+
+  static func ms(_ duration: Duration) -> Int {
+    Int(duration.components.seconds * 1000) + Int(duration.components.attoseconds / 1_000_000_000_000_000)
+  }
+}
+
+private struct EndpointsEvent: Decodable {
+  let endpoints: [Endpoint]
+}
+
+extension HostEndpoint {
+  /// A wire endpoint of a kind this build knows.
+  init?(_ endpoint: Endpoint) {
+    guard let kind = Kind(rawValue: endpoint.kind.rawValue) else { return nil }
+    self.init(kind: kind, addr: endpoint.addr, port: endpoint.port, dns: endpoint.dns)
+  }
+
+  var wire: Endpoint {
+    Endpoint(kind: EndpointKind(rawValue: kind.rawValue), addr: addr, port: port, dns: dns)
   }
 }

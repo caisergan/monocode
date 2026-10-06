@@ -1,28 +1,11 @@
 import Foundation
+import MonoStore
 import MonoWire
 import Observation
 
 // The UI-facing stores (12 §12.5): @Observable and main-actor bound, written
-// by the host syncs. Views read only the properties they show. The outbox,
-// UI state and the cache-backed parts arrive with R2 and R3.
-
-/// A paired machine. R1 knows only the demo; R2 adds the Keychain registry.
-public struct HostRecord: Hashable, Sendable, Identifiable {
-  public var env: String
-  public var label: String
-  /// Its label colour, an index into the project colours (11 §11.2).
-  public var colorIndex: Int
-  public var isDemo: Bool
-
-  public var id: String { env }
-
-  public init(env: String, label: String, colorIndex: Int, isDemo: Bool) {
-    self.env = env
-    self.label = label
-    self.colorIndex = colorIndex
-    self.isDemo = isDemo
-  }
-}
+// by the host syncs and painted first from the cache. Views read only the
+// properties they show. The outbox and UI state arrive with R3.
 
 @MainActor @Observable
 public final class HostsStore {
@@ -71,8 +54,11 @@ public final class InboxStore {
   }
 
   public internal(set) var hosts: [String: HostInbox] = [:]
-  /// Painted from the cache and not yet fetched (always false until R2's cache).
-  public internal(set) var cached = false
+  /// Hosts whose rows were painted from the cache and not fetched since.
+  public internal(set) var cachedHosts: Set<String> = []
+
+  /// Some rows come from the cache, not yet refreshed.
+  public var cached: Bool { !cachedHosts.isEmpty }
 
   public init() {}
 
@@ -177,10 +163,12 @@ public final class CatalogStore {
 }
 
 /// What this phone has seen (06 §6.10): "Done" shows until the session is
-/// opened here. In memory until R2's store; the newest 500 entries.
+/// opened here. The newest 500 entries, kept in the cache's `seen` table.
 @MainActor @Observable
 public final class SeenStore {
   public internal(set) var seen: [String: Date] = [:]
+  /// Writes one change through to the cache.
+  @ObservationIgnored var persist: (@MainActor (_ env: String, _ sessionId: String, _ at: Date) -> Void)?
 
   public init() {}
 
@@ -191,10 +179,21 @@ public final class SeenStore {
     if seen.count > 500 {
       for (key, _) in seen.sorted(by: { $0.value > $1.value }).dropFirst(500) { seen[key] = nil }
     }
+    persist?(env, sessionId, date)
   }
 
   public func markUnseen(_ env: String, _ sessionId: String) {
     seen[Self.key(env, sessionId)] = .distantPast
+    persist?(env, sessionId, .distantPast)
+  }
+
+  /// One host's rows from the cache; newer marks made meanwhile win.
+  func restore(_ env: String, _ rows: [String: Date]) {
+    for (sessionId, at) in rows {
+      let key = Self.key(env, sessionId)
+      if let mine = seen[key], mine >= at { continue }
+      seen[key] = at
+    }
   }
 
   /// Finished after this phone last opened it.
@@ -204,12 +203,23 @@ public final class SeenStore {
   }
 }
 
-/// Projects pinned on this phone (11 §11.13). In memory until R2's store.
+/// Projects pinned on this phone (11 §11.13). A small preference, so it
+/// lives in the defaults under the Expo app's key, `mc.projects.pinned`.
 @MainActor @Observable
 public final class PinsStore {
-  public internal(set) var pins: [String] = []
+  public static let defaultsKey = "mc.projects.pinned"
 
-  public init() {}
+  public internal(set) var pins: [String] = [] {
+    didSet { defaults?.set(pins, forKey: Self.defaultsKey) }
+  }
+
+  @ObservationIgnored private let defaults: UserDefaults?
+
+  /// `defaults` nil keeps the pins in memory.
+  public init(defaults: UserDefaults? = nil) {
+    self.defaults = defaults
+    pins = defaults?.stringArray(forKey: Self.defaultsKey) ?? []
+  }
 
   public static func key(_ env: String, _ projectId: String) -> String { "\(env)/\(projectId)" }
 
@@ -254,6 +264,13 @@ public final class SessionStore {
   /// A block of the window as last synced (possibly truncated in transit).
   public func block(_ id: String) -> Block? {
     value?.session.blocks.first { $0.id == id }
+  }
+
+  /// A window from the cache: shown, but `cached` until the host answers.
+  func paint(_ value: HostSession, _ window: WindowMeta?) {
+    self.value = value
+    self.window = window
+    freshness = .cached
   }
 
   func publish(_ value: HostSession, _ window: WindowMeta?) {

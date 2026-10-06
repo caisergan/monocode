@@ -1,12 +1,12 @@
 import Foundation
-import MonoWire
+import MonoChannel
 
 public enum TransportKind: String, Sendable {
   case direct, relay, demo
 }
 
-/// One way to reach a host (12 §12.4). Direct and relay transports arrive
-/// with MonoChannel in R2; the demo transport is MonoDemo's.
+/// One way to reach a host (12 §12.4): `DirectTransport` here, the demo
+/// transport in MonoDemo, the relay with R5.
 public protocol Transport: Sendable {
   var kind: TransportKind { get }
   /// The candidate key, e.g. "lan|192.168.1.20|3775".
@@ -15,18 +15,15 @@ public protocol Transport: Sendable {
 }
 
 /// A message-framed socket. Cancelling the task that reads `frames` does not
-/// close it; `close` does.
-public protocol FrameSocket: AnyObject, Sendable {
-  func send(_ frame: Data) async throws
-  var frames: AsyncThrowingStream<Data, any Error> { get }
-  func close(code: Int, reason: String) async
-}
+/// close it; `close` does. MonoChannel's `ChannelSocket` has the same
+/// requirements, so one type serves both.
+public typealias FrameSocket = ChannelSocket
 
-/// The phone's half of the handshake. In R1 frames are plain JSON envelopes
-/// (06 §6.3): the phone sends a hello and the host answers with its welcome.
-/// R2 wraps both in the Noise IK handshake (06 §6.2), and every later frame
-/// in a record.
-public struct Hello: Codable, Hashable, Sendable {
+/// The demo's half of the handshake: frames are plain JSON envelopes
+/// (06 §6.3), the phone sends this hello and the host answers with its
+/// welcome. A real host gets MonoChannel's `Hello` inside the Noise IK
+/// handshake (06 §6.2) instead, and every later frame in a record.
+public struct PlainHello: Codable, Hashable, Sendable {
   public var t = "hello"
   public var channel = 1
   public var env: String

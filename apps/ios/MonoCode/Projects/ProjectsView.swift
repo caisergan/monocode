@@ -69,7 +69,10 @@ struct ProjectsView: View {
         ForEach(engine.hosts.records) { record in
           let group = rest.filter { $0.env == record.env }
           if !group.isEmpty || query.isEmpty {
-            MachineRow(record: record).plainRow()
+            // The header opens Machine details (11 §11.13).
+            NavigationLink(value: Destination.machine(env: record.env)) { MachineRow(record: record) }
+              .buttonStyle(.plain)
+              .plainRow()
             ForEach(group) { ProjectRow(row: $0) }
           }
         }
@@ -133,6 +136,7 @@ struct MachineRow: View {
     }
     .padding(.horizontal, 16)
     .frame(height: 44)
+    .contentShape(.rect)
   }
 
   private func dotColor(_ dot: HostConnState.Dot) -> Color {

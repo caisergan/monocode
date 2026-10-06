@@ -12,6 +12,7 @@ struct RootView: View {
 
   var body: some View {
     @Bindable var router = router
+    @Bindable var model = model
     TabView(selection: $router.tab) {
       Tab("Agents", systemImage: "bubble.left.and.text.bubble.right", value: AppTab.agents) {
         TabStack(path: $router.agents) { AgentsView() }
@@ -27,12 +28,16 @@ struct RootView: View {
     .tabBarMinimizeBehavior(.onScrollDown)
     .modifier(BottomAccessory(enabled: model.hasMachines && !router.sessionOnTop))
     .modifier(MonoTheme())
-    .onOpenURL { router.open($0) }
+    .onOpenURL { model.open($0) }
+    .sheet(item: $model.pairing) { flow in
+      PairingSheet(flow: flow)
+        .modifier(MonoTheme())
+    }
     #if DEBUG
     .task {
       // `simctl launch <device> com.monocode.mobile.dev -MCOpen <url>` opens a
-      // debug link without the system's open-URL prompt.
-      if let url = UserDefaults.standard.string(forKey: "MCOpen").flatMap(URL.init(string:)) { router.open(url) }
+      // link without the system's open-URL prompt.
+      if let url = UserDefaults.standard.string(forKey: "MCOpen").flatMap(URL.init(string:)) { model.open(url) }
     }
     #endif
   }
@@ -57,6 +62,8 @@ extension Destination {
     case let .session(env, sessionId): SessionView(env: env, sessionId: sessionId)
     case let .newSession(env, projectId): NewSessionView(env: env, projectId: projectId)
     case let .file(env, projectId, cwd, path, line): FileView(env: env, projectId: projectId, cwd: cwd, path: path, line: line)
+    case .machines: MachinesView()
+    case let .machine(env): MachineDetailsView(env: env)
     #if DEBUG
     case let .transcriptLab(run): TranscriptLabView(run: run)
     case .scrollEdgeControl: ScrollEdgeControlView()

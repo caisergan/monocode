@@ -42,6 +42,17 @@ struct AgentsView: View {
     ].filter { !$0.cards.isEmpty }
   }
 
+  /// The banners' one action (11 §11.12): a removed phone pairs again, an
+  /// offline or outdated machine shows its details.
+  private func noticeAction(_ env: String) -> (label: String, run: () -> Void) {
+    switch engine.hosts.states[env] {
+    case .blocked(.deviceRevoked)?, .blocked(.unknownDevice)?, .blocked(.hostIdentityChanged)?:
+      ("Pair again", { model.presentPairing() })
+    default:
+      ("Details", { router.push(.machine(env: env)) })
+    }
+  }
+
   private var notices: [(env: String, text: String)] {
     engine.hosts.records.compactMap { record in engine.hosts.notice(record.env).map { (record.env, $0) } }
   }
@@ -79,7 +90,7 @@ struct AgentsView: View {
         NoticeBar(text: "Updating…").plainRow()
       }
       ForEach(notices, id: \.env) { notice in
-        NoticeBar(text: notice.text).plainRow()
+        NoticeBar(text: notice.text, action: noticeAction(notice.env)).plainRow()
       }
       if sections.isEmpty {
         Group {

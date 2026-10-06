@@ -40,7 +40,7 @@ final class ScreenshotTests: XCTestCase {
   @MainActor
   private func launch(_ arguments: [String]) -> XCUIApplication {
     let app = XCUIApplication()
-    app.launchArguments = ["-MCTheme", theme] + arguments
+    app.launchArguments = ["-MCTheme", theme, "-MCReset", "YES"] + arguments
     app.launch()
     return app
   }

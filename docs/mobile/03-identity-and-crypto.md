@@ -287,7 +287,7 @@ ticket = seal(gatewayPublic, JSON{
 | Desktop `remote-machines.json` | Admin tokens, including the local host's | Existing: 0600, never sent to the renderer |
 | Phone secure storage | Device keys, push key, cache DB key, app-lock settings | Keychain `AfterFirstUnlockThisDeviceOnly` |
 | Phone iOS keychain access group | Push private key only | Shared with the Notification Service Extension |
-| Phone SQLite cache | Transcripts, summaries, outbox | Encrypted per spike S18 (SQLCipher with the key in the Keychain, or Data Protection); excluded from backups |
+| Phone SQLite cache | Transcripts, summaries, outbox | Data Protection `completeUntilFirstUserAuthentication` on the files, not SQLCipher (spike S18, [14 §14.2](14-roadmap.md#142-m0-spikes)); excluded from backups |
 | Gateway | Gateway private key, APNs signing key (`.p8`) | Worker secrets |
 | Relay Durable Object storage | Room → relay public key | Public data only |
 

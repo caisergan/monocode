@@ -37,10 +37,12 @@ final class ShellUITests: XCTestCase {
   @MainActor
   func testTryTheDemoShowsItsAgents() {
     let app = XCUIApplication()
+    // A fresh install: a machine paired earlier would skip Welcome.
+    app.launchArguments = ["-MCReset", "YES"]
     app.launch()
     let demo = app.buttons["Try the demo"]
     XCTAssertTrue(demo.waitForExistence(timeout: 10))
-    XCTAssertFalse(app.buttons["Pair with a computer"].isEnabled)
+    XCTAssertTrue(app.buttons["Pair with a computer"].isEnabled)
     demo.tap()
     XCTAssertTrue(app.staticTexts["Fix flaky auth test"].waitForExistence(timeout: 10))
     app.staticTexts["Fix flaky auth test"].tap()

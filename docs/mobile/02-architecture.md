@@ -87,7 +87,7 @@ its own host packages ([13 §13.5](13-testing-and-release.md#135-publishers-and-
 | Host ↔ push gateway | Gateway trusts signed requests for tickets bound to the room | Ed25519 request signature + sealed push ticket |
 | Gateway ↔ APNs ↔ phone | Nobody, for content | Payload sealed to the phone's push key |
 | Desktop ↔ host | Desktop holds an admin device token | Existing bearer token over loopback or SSH forward |
-| Phone storage | The phone's OS | Keychain for keys; an encrypted cache ([12 §12.6](12-mobile-engineering.md#126-persistence), spike S18) |
+| Phone storage | The phone's OS | Keychain for keys; a cache under Data Protection ([12 §12.6](12-mobile-engineering.md#126-persistence), spike S18) |
 
 Every paired device can run agents as the host's OS user. Pairing is therefore
 equivalent to granting shell access, and the UI says so.

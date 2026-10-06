@@ -12,7 +12,8 @@
 // `--check` fails when anything on disk is stale instead of writing it.
 
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { existsSync } from "node:fs";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -22,7 +23,11 @@ const catalog = join(transcript, "Sources/MonoTranscript/Resources/FileIcons.xca
 const tablePath = join(transcript, "Sources/MonoTranscript/Resources/file-icons.json");
 const samplesPath = join(transcript, "Tests/MonoTranscriptTests/Fixtures/file-icon-samples.json");
 
-const icons = await import(pathToFileURL(join(repo, "node_modules/react-material-icon-theme/dist/index.esm.js")).href);
+// The repo's node_modules, then NODE_PATH's, as Node resolves a bare name.
+const modules = [join(repo, "node_modules"), ...(process.env.NODE_PATH?.split(delimiter).filter(Boolean) ?? [])];
+const iconTheme = modules.map((dir) => join(dir, "react-material-icon-theme/dist/index.esm.js")).find(existsSync);
+if (!iconTheme) throw new Error("react-material-icon-theme is not installed: run npm ci at the repo root");
+const icons = await import(pathToFileURL(iconTheme).href);
 
 /** The desktop's resolveFileIcon (src/features/files/ui/FileTypeIcon.tsx). */
 function resolveFileIcon(fileName) {

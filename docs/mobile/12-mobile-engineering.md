@@ -15,7 +15,7 @@ document is the engineering reference the app is built against.
 | UI | SwiftUI for screens, navigation, sheets, menus and glass. UIKit for the transcript and viewers (`MonoTranscriptView`) and wherever spikes S19 and S20 call for it | [16 §16.6](16-ios-native-design.md#166-design-by-surface) |
 | Navigation | `TabView` with a `NavigationStack` per tab; typed destinations in a `Router` | [11 §11.10](11-design-and-ux.md#1110-navigation) |
 | State | `@Observable` stores on the main actor, plus one `HostRuntime` actor per host | §12.4, §12.5 |
-| Storage | SQLite through GRDB, encrypted per spike S18; Keychain Services for secrets; `UserDefaults` for small preferences | §12.6 |
+| Storage | SQLite through GRDB under Data Protection (spike S18); Keychain Services for secrets; `UserDefaults` for small preferences | §12.6 |
 | Lists | SwiftUI `List` with MonoCode card rows (spike S19; fallback `UICollectionView`) | §12.9 |
 | Transcript, diff viewer, file viewer | `MonoTranscriptView` (UIKit, CoreText) | [15 §15.4](15-performance.md#154-the-native-transcript-monotranscriptview) |
 | Animation and gestures | SwiftUI animations with the token curves; Core Animation inside the transcript; system gestures | Bezier timings from `@monocode/design`; springs only for gesture hand-off ([11 §11.1](11-design-and-ux.md#111-design-parity-rules) M8) |
@@ -35,7 +35,7 @@ document is the engineering reference the app is built against.
 | Device features | `.sensoryFeedback` haptics, LocalAuthentication, `UIPasteboard`, `ShareLink` | |
 | Testing | Swift Testing for the packages (`swift test` on the Mac); XCTest and XCUITest for the app, the transcript and performance | [13](13-testing-and-release.md), [15 §15.6](15-performance.md#156-measurement-and-gates) |
 
-Third-party packages are limited to GRDB (with SQLCipher if S18 keeps it) and the
+Third-party packages are limited to GRDB (plain, without SQLCipher: S18) and the
 highlighter S21 chooses. No analytics or crash-reporting SDK ships in v1
 ([12.16](#1216-logging-and-diagnostics)).
 
@@ -207,9 +207,10 @@ change.
 **SQLite** (`monocode.sqlite` in Application Support, excluded from backups with
 `isExcludedFromBackup`), through GRDB:
 - a `DatabasePool` in WAL mode; reads run concurrently off the main thread;
-- encrypted per **spike S18**: either SQLCipher with a 32-byte random key in the
-  Keychain (`mc.cache.dbKey`), or plain SQLite with the file protection class
-  `completeUntilFirstUserAuthentication`.
+- plain SQLite under the Data Protection class
+  `completeUntilFirstUserAuthentication`, set on the database, WAL and shared-memory
+  files at every open (**spike S18**, decided provisionally in R2: SQLCipher is not
+  used, [14 §14.2](14-roadmap.md#142-m0-spikes)).
 
 ```sql
 CREATE TABLE schema (version INTEGER NOT NULL);
@@ -261,7 +262,7 @@ struct HostRecord: Codable, Sendable {
 | `mc.host.<env>.deviceKey` | X25519 private key | App |
 | `mc.host.<env>.counter` | Handshake counter, written before every attempt | App |
 | `mc.push.key`, `mc.push.key.prev` | Push private keys | Shared with the extension |
-| `mc.cache.dbKey` | Cache key, if S18 keeps SQLCipher | App |
+| `mc.cache.dbKey` | Unused: S18 dropped SQLCipher. The account name stays reserved | App |
 | `mc.pending.pairing` | The pending pairing record ([04 §4.7](04-pairing.md#47-phone-screens)) | App |
 | `mc.applock` | App lock settings | App |
 
