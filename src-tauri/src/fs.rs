@@ -5819,6 +5819,66 @@ pub async fn open_path_with_default_app(path: String) -> Result<(), String> {
     .map_err(|error| error.to_string())?
 }
 
+/// Types a file from a connected machine may be opened as. The bytes come from
+/// another computer, so only documents and media that open in a viewer are
+/// allowed; scripts, installers, and shortcuts that a default handler would
+/// run are refused.
+const REMOTE_OPEN_EXTENSIONS: &[&str] = &[
+    "html", "htm", "xhtml", "svg", "pdf", "png", "jpg", "jpeg", "gif", "webp", "avif", "bmp",
+    "ico", "tif", "tiff", "txt", "md", "markdown", "csv", "tsv", "json", "log", "mp4", "webm",
+    "mov", "mp3", "wav", "ogg", "m4a",
+];
+const REMOTE_OPEN_DIR: &str = "monocode-remote-files";
+
+/// Where the local copy of `source` (a `remote://` path) lives under `root`.
+/// The folder is derived from the whole source path, so opening the same file
+/// again overwrites the copy and a browser tab on it just needs a reload.
+fn remote_copy_path(root: &Path, source: &str) -> Result<PathBuf, String> {
+    use std::hash::{Hash, Hasher};
+
+    let name = source.rsplit(['/', '\\']).next().unwrap_or_default();
+    if name.is_empty() || name == "." || name == ".." {
+        return Err("Expected a file path".into());
+    }
+    let extension = Path::new(name)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    if !REMOTE_OPEN_EXTENSIONS.contains(&extension.as_str()) {
+        return Err(format!(
+            "{name} can’t be opened from another machine. Only documents, images, and media can."
+        ));
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    source.hash(&mut hasher);
+    Ok(root.join(format!("{:016x}", hasher.finish())).join(name))
+}
+
+fn write_remote_copy(root: &Path, source: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    let path = remote_copy_path(root, source)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    std::fs::write(&path, bytes).map_err(|error| error.to_string())?;
+    Ok(path)
+}
+
+/// Opens a file from a connected machine in its default app. The host sends
+/// the bytes as base64; they are saved to a temporary copy, which is what opens.
+#[tauri::command]
+pub async fn open_remote_file_copy(source: String, data: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)
+            .map_err(|_| "File data is not valid base64.".to_string())?;
+        let root = std::env::temp_dir().join(REMOTE_OPEN_DIR);
+        let path = write_remote_copy(&root, &source, &bytes)?;
+        open::that(&path).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6170,6 +6230,39 @@ mod tests {
                 Err(error) => panic!("{}", error),
             }
         }
+    }
+
+    #[test]
+    fn remote_copies_keep_the_file_name_and_reuse_one_folder_per_file() {
+        let dir = tmp("remote-copy");
+        let source = "remote://env/home/dev/repo/docs/Report.HTML";
+        let first = write_remote_copy(&dir.0, source, b"<p>one</p>").unwrap();
+        let second = write_remote_copy(&dir.0, source, b"<p>two</p>").unwrap();
+        assert_eq!(first, second);
+        assert_eq!(first.file_name().unwrap(), "Report.HTML");
+        assert_eq!(std::fs::read(&second).unwrap(), b"<p>two</p>");
+
+        let other = write_remote_copy(&dir.0, "remote://env/other/Report.HTML", b"x").unwrap();
+        assert_ne!(first.parent(), other.parent());
+        assert!(first.starts_with(&dir.0) && other.starts_with(&dir.0));
+    }
+
+    #[test]
+    fn remote_copies_refuse_runnable_and_nameless_files() {
+        let root = Path::new("/tmp/remote-copies");
+        for source in [
+            "remote://env/repo/run.sh",
+            "remote://env/repo/setup.command",
+            "remote://env/repo/payload.js",
+            "remote://env/repo/install.bat",
+            "remote://env/repo/Makefile",
+            "remote://env/repo/docs/",
+            "remote://env/repo/..",
+        ] {
+            assert!(remote_copy_path(root, source).is_err(), "{source}");
+        }
+        let windows = remote_copy_path(root, "remote://env/C:\\repo\\out\\chart.svg").unwrap();
+        assert_eq!(windows.file_name().unwrap(), "chart.svg");
     }
 
     #[test]

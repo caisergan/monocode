@@ -25,6 +25,7 @@ import {
   type FilePaneTab,
 } from "../model/layout";
 import { displayPath } from "../../../shared/lib/paths";
+import { REMOTE_PATH_PREFIX } from "../../../shared/lib/remotePaths";
 import { IS_MAC, IS_WIN } from "../../../platform/tauri/platform";
 import { releaseNotesTitle } from "../../../app/model/releaseNotes";
 import { terminalTabLabel } from "../../terminal/model/terminalTab";
@@ -97,7 +98,12 @@ export function surfaceTabMenuItems(
 
   return [
     { kind: "item", id: "open-default", label: "Open in Default App" },
-    { kind: "item", id: "reveal", label: REVEAL_LABEL },
+    {
+      kind: "item",
+      id: "reveal",
+      label: REVEAL_LABEL,
+      disabled: file.path.startsWith(REMOTE_PATH_PREFIX),
+    },
     { kind: "sep" },
     { kind: "item", id: "copy-path", label: "Copy Path" },
     {

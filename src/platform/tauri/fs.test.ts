@@ -6,8 +6,10 @@ import {
   gitHeadMessage,
   isCheckoutBlockedByChanges,
   listSkills,
+  openPathWithDefaultApp,
   pickFolders,
   resolveProjectLocation,
+  setRemoteCommandRunner,
 } from "./fs";
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -36,6 +38,32 @@ describe("pickFolders", () => {
   it("returns nothing when the dialog is dismissed", async () => {
     vi.mocked(open).mockResolvedValueOnce(null);
     await expect(pickFolders()).resolves.toEqual([]);
+  });
+});
+
+describe("openPathWithDefaultApp", () => {
+  it("opens a local file in place", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce(undefined);
+    await openPathWithDefaultApp("/repo/docs/report.html");
+    expect(vi.mocked(invoke)).toHaveBeenLastCalledWith(
+      "open_path_with_default_app",
+      { path: "/repo/docs/report.html" },
+    );
+  });
+
+  it("opens a file on a connected machine from a local copy", async () => {
+    const path = "remote://env/home/dev/repo/docs/report.html";
+    const runner = vi.fn(async () => "PGh0bWw+");
+    setRemoteCommandRunner(runner);
+    vi.mocked(invoke).mockResolvedValueOnce(undefined);
+
+    await openPathWithDefaultApp(path);
+
+    expect(runner).toHaveBeenCalledWith("read_binary_file", { path });
+    expect(vi.mocked(invoke)).toHaveBeenLastCalledWith(
+      "open_remote_file_copy",
+      { source: path, data: "PGh0bWw+" },
+    );
   });
 });
 
