@@ -308,7 +308,7 @@ export function OrchestrationSidebarAgents({
               ? "Stopping interrupted work before this run can resume."
               : leadBusy
                 ? "Waiting for the lead's current turn to finish before this run can resume."
-                : "Resume continues interrupted workers from their retained checkouts and starts queued work. Policy-blocked tasks stay stopped for review."}
+                : "Resume continues interrupted workers from their retained checkouts and starts queued work. Policy-blocked tasks stay stopped for review. You can message the lead meanwhile."}
           </p>
           {resumeBlocker && (
             <p className="px-0.5 text-[11px] leading-relaxed text-amber-400">

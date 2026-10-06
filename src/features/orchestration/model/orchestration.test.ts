@@ -1442,7 +1442,17 @@ describe("local orchestration", () => {
     ).toHaveLength(1);
     expect(restored.run("lead")?.status).toBe("paused");
     expect(restored.submissionError(worker)).toContain("paused");
-    expect(restored.submissionError("lead")).toContain("Resume");
+    // The user can still talk to a paused lead. After a restart it has no
+    // control connection, so the run's state rides along with the turn.
+    expect(restored.submissionError("lead")).toBeNull();
+    const restoredPrompt = restored.prompt("lead", "How are the agents?");
+    expect(restoredPrompt.startsWith("How are the agents?")).toBe(true);
+    expect(restoredPrompt).toContain("control connection is closed");
+    expect(restoredPrompt).toContain(`"taskId":"${f.tasks()[0].id}"`);
+    expect(restoredPrompt).toContain('"status":"interrupted"');
+    expect(restoredPrompt).toContain("you cannot resume it yourself");
+    // A worker's own turns get no lead context.
+    expect(restored.prompt(worker, "Hi")).toBe("Hi");
     expect(await restored.ownsTurns({ id: "unrelated" })).toBe(false);
     await restored.stopRun("lead");
     expect(
@@ -1813,6 +1823,11 @@ describe("local orchestration", () => {
       status: "paused",
       error: "The user paused this run.",
     });
+    // Paused in this process, the lead keeps read access to the run.
+    expect(f.manager.submissionError("lead")).toBeNull();
+    const pausedPrompt = f.manager.prompt("lead", "Hold the queue");
+    expect(pausedPrompt).toContain("list, get and wait still show the current state");
+    expect(pausedPrompt).toContain("The user paused this run.");
     expect(f.tasks()[0].status).toBe("interrupted");
     expect(leadStops()).toBe(stopsBefore + 1);
     expect(f.lead.busy).toBe(false);
