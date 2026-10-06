@@ -52,6 +52,9 @@ public protocol TranscriptViewDelegate: AnyObject {
   func transcript(_ view: MonoTranscriptView, didTapAction actionId: String, rowId: String)
   /// A link or file chip was tapped.
   func transcript(_ view: MonoTranscriptView, didTapLink href: String, rowId: String)
+  /// A file chip: `reference` is the path as the chip reads it, possibly
+  /// with `:line`; trail rows show only the file name.
+  func transcript(_ view: MonoTranscriptView, didTapFile reference: String, rowId: String)
   /// Drives the jump-to-latest button.
   func transcript(_ view: MonoTranscriptView, atBottomChanged atBottom: Bool)
   /// The reader reached the top; the owner loads an older page.
@@ -65,6 +68,7 @@ public protocol TranscriptViewDelegate: AnyObject {
 extension TranscriptViewDelegate {
   public func transcript(_ view: MonoTranscriptView, didTapAction actionId: String, rowId: String) {}
   public func transcript(_ view: MonoTranscriptView, didTapLink href: String, rowId: String) {}
+  public func transcript(_ view: MonoTranscriptView, didTapFile reference: String, rowId: String) {}
   public func transcript(_ view: MonoTranscriptView, atBottomChanged atBottom: Bool) {}
   public func transcriptNeedsOlder(_ view: MonoTranscriptView) {}
   public func transcript(_ view: MonoTranscriptView, didBecomeReadyWith rows: Int) {}
@@ -460,6 +464,8 @@ public final class MonoTranscriptView: UIView, UIScrollViewDelegate {
     for hit in layout.hits where hit.rect.contains(local) {
       if let link = hit.link {
         delegate?.transcript(self, didTapLink: link, rowId: layout.id)
+      } else if let file = hit.file {
+        delegate?.transcript(self, didTapFile: file, rowId: layout.id)
       } else if let action = hit.action {
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         delegate?.transcript(self, didTapAction: action, rowId: layout.id)

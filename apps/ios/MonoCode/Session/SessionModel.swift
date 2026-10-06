@@ -21,6 +21,8 @@ final class SessionModel: TranscriptViewDelegate {
   /// The block a tapped tool, thinking or trail row shows in the tool sheet.
   var toolBlock: ToolSheetItem?
   @ObservationIgnored var openURL: ((URL) -> Void)?
+  /// Pushes the file viewer (when the machine can read files).
+  @ObservationIgnored var openFile: ((_ projectId: String, _ cwd: String?, _ path: String, _ line: Int?) -> Void)?
 
   init(env: String, sessionId: String) {
     self.env = env
@@ -90,6 +92,38 @@ final class SessionModel: TranscriptViewDelegate {
 
   func transcript(_ view: MonoTranscriptView, didTapLink href: String, rowId: String) {
     if let url = URL(string: href), url.scheme == "http" || url.scheme == "https" || url.scheme == "mailto" { openURL?(url) }
+  }
+
+  /// A file chip (11 §11.16): prose chips name the path, trail rows only
+  /// the file name, so a trail row's file comes from its tool call.
+  func transcript(_ view: MonoTranscriptView, didTapFile reference: String, rowId: String) {
+    guard let openFile, let value = store?.value else { return }
+    let session = value.session
+    let cwd = session.worktreeCwd ?? session.cwd
+    var absolute: String?
+    var line: Int?
+    if let block = store?.block(rowId), block.role == .tool || block.role == .approval {
+      let label = Transcript.toolCallLabel(block, cwd: cwd)
+      absolute = Transcript.resolveToolCallDisplay(label, preview: block.tool?.preview, cwd: cwd).filePath
+    } else {
+      absolute = Paths.resolveWorkspacePath(reference, cwd: cwd)
+      line = Self.line(in: reference)
+    }
+    guard let absolute else { return }
+    // The host reads paths inside the working copy; one outside it is shown
+    // as its refusal.
+    openFile(value.projectId, session.worktreeCwd, Paths.displayPath(absolute, cwd: cwd), line)
+  }
+
+  private static let location = try! NSRegularExpression(pattern: "(?::(\\d+)(?::\\d+)?|#L(\\d+)(?:-L?\\d+)?)$")
+
+  static func line(in reference: String) -> Int? {
+    let ns = reference as NSString
+    guard let m = location.firstMatch(in: reference, range: NSRange(location: 0, length: ns.length)) else { return nil }
+    for group in [1, 2] where m.range(at: group).location != NSNotFound {
+      return Int(ns.substring(with: m.range(at: group)))
+    }
+    return nil
   }
 
   func transcript(_ view: MonoTranscriptView, atBottomChanged atBottom: Bool) {

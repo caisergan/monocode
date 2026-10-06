@@ -9,6 +9,9 @@ enum Destination: Hashable {
   case project(env: String, projectId: String)
   case session(env: String, sessionId: String)
   case newSession(env: String?, projectId: String?)
+  /// A file in a project's folder or a session's worktree (`cwd`), at
+  /// `path` relative to it, scrolled to `line` when given.
+  case file(env: String, projectId: String, cwd: String?, path: String, line: Int?)
   #if DEBUG
   case transcriptLab(LabRun?)
   case scrollEdgeControl
@@ -29,15 +32,18 @@ final class Router {
   var debugTool: String?
   #endif
 
-  /// The session screen hides the tab bar (M16), and the accessory with it.
+  /// The session screen hides the tab bar (M16), and the file viewer it
+  /// opens does too; the accessory goes with it.
   var sessionOnTop: Bool {
     let path: [Destination] = switch tab {
     case .agents: agents
     case .projects: projects
     case .settings: settings
     }
-    if case .session? = path.last { return true }
-    return false
+    switch path.last {
+    case .session?, .file?: return true
+    default: return false
+    }
   }
 
   /// Pushes onto the stack of the selected tab.
@@ -76,6 +82,11 @@ final class Router {
       let env = items.first(where: { $0.name == "env" })?.value ?? "00000000-0000-4000-8000-00000000d3e0"
       debugTool = items.first(where: { $0.name == "tool" })?.value
       open(.agents, [.session(env: env, sessionId: id)])
+    case "file":
+      // `<scheme>://file?project=…&path=…`, on the demo machine.
+      let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+      guard let project = items.first(where: { $0.name == "project" })?.value, let path = items.first(where: { $0.name == "path" })?.value else { return }
+      open(.agents, [.file(env: "00000000-0000-4000-8000-00000000d3e0", projectId: project, cwd: nil, path: path, line: nil)])
     case "fling-cards":
       open(.settings, [.cardFling(run: url.query()?.contains("run=1") == true)])
     default:

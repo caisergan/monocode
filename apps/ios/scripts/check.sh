@@ -17,6 +17,7 @@ step() { printf '\n== %s\n' "$*"; }
 step "Generated files are current"
 node "$root/scripts/gen-design-tokens.mjs" --check
 node "$root/scripts/gen-fixtures.mjs" --check
+node "$root/scripts/build-native-assets.mjs" --check
 
 ios_only=()
 for manifest in "$root"/Packages/*/Package.swift; do

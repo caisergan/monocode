@@ -45,10 +45,19 @@ func jsonDifference(_ a: Any, _ b: Any, path: String = "$") -> String? {
     let now = try #require(root["now"] as? Int)
     let calls = try #require(root["calls"] as? [[String: Any]])
     let host = try DemoHost(now: Date(timeIntervalSince1970: Double(now) / 1000), clock: { now })
-    #expect(calls.count == 24)
+    #expect(calls.count == 39)
     for call in calls {
       let method = call["method"] as! String
       let params = try JSONSerialization.data(withJSONObject: call["params"]!)
+      if let error = call["error"] as? [String: String] {
+        do {
+          _ = try await host.call(method, params)
+          Issue.record("\(method) \(String(data: params, encoding: .utf8)!) was not refused")
+        } catch let refusal as DemoError {
+          #expect(refusal.code == error["code"] && refusal.message == error["message"], "\(method) \(String(data: params, encoding: .utf8)!): \(refusal)")
+        }
+        continue
+      }
       let answer = try await host.call(method, params)
       let result = try JSONSerialization.jsonObject(with: answer, options: [.fragmentsAllowed])
       let difference = jsonDifference(call["result"]!, result)

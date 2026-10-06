@@ -16,7 +16,9 @@ let package = Package(
     .package(path: "../MonoDesign"),
   ],
   targets: [
-    .target(name: "MonoTranscript", dependencies: ["MonoWire", "MonoDesign"], resources: [.copy("Resources/Fixtures")]),
+    .target(
+      name: "MonoTranscript", dependencies: ["MonoWire", "MonoDesign"],
+      resources: [.copy("Resources/Fixtures"), .process("Resources/FileIcons.xcassets"), .copy("Resources/file-icons.json")]),
     .testTarget(name: "MonoTranscriptTests", dependencies: ["MonoTranscript"], resources: [.copy("Fixtures")]),
   ]
 )

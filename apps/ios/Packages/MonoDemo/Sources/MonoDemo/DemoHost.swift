@@ -12,12 +12,34 @@ struct DemoState: Decodable {
   var sessions: [HostSession]
   var models: ModelCatalog
   var replies: [String]
+  /// demoRepo.ts's working trees by working-copy path.
+  var repos: [String: [String: RepoFile]]
 
   static func bundled() throws -> DemoState {
     guard let url = Bundle.module.url(forResource: "demo-state", withExtension: "json") else {
       throw CocoaError(.fileNoSuchFile)
     }
     return try JSONDecoder().decode(DemoState.self, from: Data(contentsOf: url))
+  }
+}
+
+/// A file in a demo repository: its text, or a binary or oversized blob.
+enum RepoFile: Decodable {
+  case text(String)
+  case binary
+  case tooLarge
+
+  init(from decoder: any Decoder) throws {
+    let container = try decoder.singleValueContainer()
+    if let text = try? container.decode(String.self) {
+      self = .text(text)
+      return
+    }
+    struct Blob: Decodable {
+      var binary: Bool?
+      var tooLarge: Bool?
+    }
+    self = try container.decode(Blob.self).tooLarge == true ? .tooLarge : .binary
   }
 }
 
@@ -38,7 +60,8 @@ struct DemoError: Error {
 /// path the way `host/` does, from the Expo demo's initial state.
 ///
 /// - Methods: `inbox.list`, `projects.list`, `sessions.page`, `sessions.sync`,
-///   `sessions.blocks`, `sessions.block`, `watch.set`, `models.list`. Anything else is
+///   `sessions.blocks`, `sessions.block`, `files.read`, `watch.set`,
+///   `models.list`. Anything else is
 ///   `method_not_found`, so the app hides it.
 /// - Events, coalesced as the host does (06 §6.6): `session.sync` at most
 ///   every 100 ms per session, `inbox.changed` and `project.sessions` at most
@@ -49,7 +72,7 @@ struct DemoError: Error {
 ///   shimmer are live without the write path.
 public actor DemoHost {
   public static let env = "00000000-0000-4000-8000-00000000d3e0"
-  public static let capabilities = ["sessions", "models.list", "channel.watch", "sessions.window", "sessions.page", "inbox"]
+  public static let capabilities = ["sessions", "models.list", "channel.watch", "sessions.window", "sessions.page", "inbox", "files.read"]
   static let day = 86_400_000
   static let turnModel = TurnModel(harness: "claude", id: "claude:opus-4-6", name: "Claude Opus 4.6")
 
@@ -66,6 +89,7 @@ public actor DemoHost {
   private var sessions: [String: Entry]
   private let models: ModelCatalog
   private let replies: [String]
+  private let repos: [String: [String: RepoFile]]
   private let clock: @Sendable () -> Int
   /// Simulated time runs this much faster (tests).
   private let speed: Double
@@ -91,6 +115,7 @@ public actor DemoHost {
     projects = state.projects
     models = state.models
     replies = state.replies
+    repos = state.repos
     self.speed = speed
     let started = Date().timeIntervalSince1970 * 1000
     self.clock = clock ?? { Int((Date().timeIntervalSince1970 * 1000 - started) * speed) + nowMs }
@@ -212,11 +237,51 @@ public actor DemoHost {
         throw DemoError(code: "not_found", message: "Session not found on this machine")
       }
       return try encoder.encode(BlockResult(block: block, revision: entry.value.revision))
+    case "files.read":
+      return try encoder.encode(readFile(try decoder.decode(FileParams.self, from: params)))
     case "watch.set":
       setWatch(try decoder.decode(WatchSet.self, from: params))
       return Data("{}".utf8)
     default:
       throw DemoError(code: "method_not_found", message: "Unsupported host method")
+    }
+  }
+
+  struct FileParams: Decodable {
+    var projectId: String?
+    var cwd: String?
+    var path: String?
+  }
+
+  /// `files.read`, with demoRepo.ts's refusals and messages.
+  private func readFile(_ params: FileParams) throws -> String {
+    guard let project = projects.first(where: { $0.id == params.projectId }) else {
+      throw DemoError(code: "not_found", message: "Project is not registered on this machine")
+    }
+    let cwd = params.cwd.flatMap { $0.isEmpty ? nil : $0 } ?? project.cwd
+    guard let files = repos[cwd] else {
+      throw DemoError(code: "invalid_params", message: "Choose an available worktree of this project")
+    }
+    guard let input = params.path, input.utf16.count <= 4096, !input.contains("\0") else {
+      throw DemoError(code: "invalid_params", message: "Invalid workspace path")
+    }
+    let path = input.replacingOccurrences(of: "^\\.?/+", with: "", options: .regularExpression)
+      .replacingOccurrences(of: "/+$", with: "", options: .regularExpression)
+    if path.isEmpty || path.split(separator: "/", omittingEmptySubsequences: false).contains(where: { $0 == ".." || $0.lowercased() == ".git" }) {
+      throw DemoError(code: "internal", message: "Path is outside the workspace")
+    }
+    switch files[path] {
+    case let .text(text)?:
+      return text
+    case .binary?:
+      throw DemoError(code: "internal", message: "Binary file cannot be previewed")
+    case .tooLarge?:
+      throw DemoError(code: "internal", message: "File is too large to preview")
+    case nil:
+      if files.keys.contains(where: { $0.hasPrefix(path + "/") }) {
+        throw DemoError(code: "internal", message: "Path is not a file")
+      }
+      throw DemoError(code: "internal", message: "ENOENT: no such file or directory, realpath '\(path)'")
     }
   }
 

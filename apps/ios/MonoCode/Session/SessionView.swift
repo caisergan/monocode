@@ -72,6 +72,12 @@ struct SessionView: View {
     }
     .onAppear {
       model.openURL = { openURL($0) }
+      // Checked at tap time: a session opened from a link appears before
+      // the machine's welcome arrives.
+      model.openFile = { [router, engine, env] projectId, cwd, path, line in
+        guard engine.hosts.has(env, "files.read") else { return }
+        router.push(.file(env: env, projectId: projectId, cwd: cwd, path: path, line: line))
+      }
       model.setTheme(palette)
       engine.seen.markSeen(env, sessionId)
     }

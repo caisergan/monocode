@@ -297,6 +297,17 @@ public final class HostSync {
     return result.block
   }
 
+  /// A file's text (`files.read`, 06 §6.5): `path` is relative to the
+  /// project folder, or to `cwd` for a session's worktree.
+  public func readFile(projectId: String, cwd: String?, path: String) async throws -> String {
+    struct Params: Encodable, Sendable {
+      var projectId: String
+      var cwd: String?
+      var path: String
+    }
+    return try await runtime.request("files.read", Params(projectId: projectId, cwd: cwd, path: path))
+  }
+
   /// Prepends the turns before the window; the first returned block becomes
   /// the anchor the next watch carries.
   public func loadOlder(_ store: SessionStore) async {

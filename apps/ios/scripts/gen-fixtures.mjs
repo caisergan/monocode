@@ -211,6 +211,14 @@ const demoState = {
   models: await demo.handle("models.list", {}),
   /** Answers the Swift demo streams, one per simulated turn. */
   replies: Array.from({ length: 6 }, (_, i) => answer(replyRandom, i % 2 === 0)),
+  /** demoRepo.ts's working trees, by working-copy path, for `files.read`:
+   * text, or the size of a binary or oversized file. */
+  repos: Object.fromEntries(
+    [{ projectId: "p-app" }, { projectId: "p-api" }, { projectId: "p-app", cwd: "/Users/demo/code/my-app-worktrees/fix-auth" }].map((params) => [
+      params.cwd ?? demo.projects.find((project) => project.id === params.projectId).cwd,
+      Object.fromEntries([...demo.repo(params).work.entries()].sort(([a], [b]) => (a < b ? -1 : 1)).map(([path, blob]) => [path, clone(blob)])),
+    ]),
+  ),
 };
 
 /** `sessions.sync` as the host computes it (06 §6.7). The TypeScript demo
@@ -230,6 +238,17 @@ async function demoResponses() {
     const result = method === "sessions.sync" ? sessionsSync(params) : await demo.handle(method, params);
     calls.push({ method, params, result: clone(result) });
     return result;
+  };
+  /** A call the demo refuses: the error code connectDemo would send. */
+  const refused = async (method, params) => {
+    try {
+      await demo.handle(method, params);
+    } catch (error) {
+      const code = error.code ?? (/^Invalid/.test(error.message) ? "invalid_params" : "internal");
+      calls.push({ method, params, error: { code, message: error.message } });
+      return;
+    }
+    throw new Error(`${method} ${JSON.stringify(params)} was not refused`);
   };
   await call("inbox.list", {});
   await call("projects.list", {});
@@ -254,6 +273,13 @@ async function demoResponses() {
       before = older.hasOlder ? older.blocks[0]?.id : undefined;
     }
   }
+  for (const path of ["README.md", "src/auth/session.ts", "./src/index.ts", "src/utils/dates.ts"]) await call("files.read", { projectId: "p-app", path });
+  await call("files.read", { projectId: "p-api", path: "src/routes/sessions.ts" });
+  await call("files.read", { projectId: "p-app", cwd: "/Users/demo/code/my-app-worktrees/fix-auth", path: "src/auth/session.ts" });
+  for (const path of ["src/auth/legacy.ts", "src", "docs/images/logo.png", "test/fixtures/big-log.txt", "../secrets", ".git/config", ""])
+    await refused("files.read", { projectId: "p-app", path });
+  await refused("files.read", { projectId: "p-app", cwd: "/elsewhere", path: "README.md" });
+  await refused("files.read", { projectId: "nope", path: "README.md" });
   await call("sessions.sync", { sessionId: "s-perf", window: { tailTurns: 5 }, maxBlockChars: 300 });
   await call("sessions.sync", { sessionId: "s-perf", window: { anchor: "u30" }, maxBlockChars: 20_000 });
   await call("sessions.sync", { sessionId: "s-perf", revision: 1, window: { anchor: "gone" }, maxBlockChars: 20_000 });

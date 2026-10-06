@@ -136,7 +136,9 @@ private let paragraph = "The session host keeps the channel open while the phone
 /// R0's known bug: inline code chips wrapped across lines.
 @Suite @MainActor struct ChipTests {
   @Test func aChipNeverSplitsAcrossLines() async {
-    let harness = EngineHarness(width: 260)
+    // The chip (with its icon) fits a 268 pt line but not the space left
+    // after "…store in": it must move to the next line whole.
+    let harness = EngineHarness(width: 300)
     var row = RowSpec(id: "a", version: 1, kind: "markdown")
     row.runs = [
       TextRun(text: "The failure comes from the session store in ", style: "prose"),
@@ -150,5 +152,42 @@ private let paragraph = "The session host keeps the channel open while the phone
     }.flatMap { $0 }
     #expect(chips.count == 1, "the chip split into \(chips.count) pieces")
     #expect(RowLayouter.unbreakable("a b") == "\u{202F}a\u{2060}\u{00A0}\u{2060}b\u{202F}")
+  }
+}
+
+/// File chips (11 §11.16): the desktop's file-type icon, and a tap target.
+@Suite @MainActor struct FileChipTests {
+  @Test func iconsResolveLikeTheDesktop() throws {
+    let url = try #require(Bundle.module.url(forResource: "file-icon-samples", withExtension: "json", subdirectory: "Fixtures"))
+    let samples = try JSONDecoder().decode([String: String].self, from: Data(contentsOf: url))
+    #expect(samples.count > 30)
+    for (name, icon) in samples { #expect(FileIcons.name(for: name) == icon, "\(name)") }
+    #expect(FileIcons.name(forReference: "src/auth/session.ts:42") == "typescript")
+    #expect(FileIcons.image("typescript", size: 16, scale: 3) != nil)
+  }
+
+  @Test func aFileChipHasAnIconAndOpensItsFile() async {
+    let harness = EngineHarness(width: 360)
+    var prose = RowSpec(id: "a", version: 1, kind: "markdown")
+    prose.runs = [TextRun(text: "Look at ", style: "prose"), TextRun(text: "src/auth/session.ts:42", style: "inlineCode", chip: 2)]
+    var trail = RowSpec(id: "t", version: 1, kind: "trailRow")
+    trail.runs = [TextRun(text: "Read ", style: "trailVerb"), TextRun(text: "session.ts", style: "trailTarget", chip: 2)]
+    trail.actions = [ActionSpec(id: "tool", label: "")]
+    let snapshot = await harness.apply(
+      [["op": "reset", "rows": [prose, trail].map { try! JSONSerialization.jsonObject(with: JSONEncoder().encode($0)) }]], expecting: 2)
+    let block = snapshot.layouts[0].elements.compactMap { element -> TextBlock? in
+      if case let .text(block, _) = element { return block }
+      return nil
+    }.first
+    #expect(block?.icons.map(\.1) == ["typescript"])
+    #expect(snapshot.layouts[0].hits.compactMap(\.file) == ["src/auth/session.ts:42"])
+    let trailIcons = snapshot.layouts[1].elements.compactMap { element -> String? in
+      if case let .icon(name, _) = element { return name }
+      return nil
+    }
+    #expect(trailIcons == ["typescript"])
+    // The chip's hit comes before the row's, so a tap on it opens the file.
+    #expect(snapshot.layouts[1].hits.first?.file == "session.ts")
+    #expect(snapshot.layouts[1].hits.last?.action == "tool")
   }
 }

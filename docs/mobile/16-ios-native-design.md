@@ -623,6 +623,7 @@ has the detail.
 | R1-11 | The session screen's ⋯ menu lists Session info and "Copy session ID" only. Allow, Deny, Build, the draft row and image rows do nothing when tapped, and there is no attachment sheet. The transcript's per-row accessibility, long-press menu, find highlights and prompt anchoring (`setBottomSpacer`) are not built | The other menu items need host methods or the write path (R3); the attachment sheet needs `attachments.read` (R2). The view API items were not in the R0 prototype either (14 "As built, R0") and land with R3 and R7 |
 | R1-12 | A chip never splits across lines, but one wider than the line still breaks inside; it is not truncated in the middle as 15 §15.4 says | Rare at phone widths (a path over about 30 characters); truncation needs a CoreText pass of its own |
 | R1-13 | `ease.pop` (11 §11.6) is defined in the app, for the jump-to-latest button, not in MonoDesign | `@monocode/design` exports only `easeOut` and `tabEaseOut`; adding `ease.pop` there is a package change outside `apps/ios` |
+| R1-14 | A file chip opens a plain file viewer: `files.read` text with line numbers, scrolled to the chip's line, with no highlighting, wrap, find or Markdown preview. The viewer hides the tab bar, as the session screen does | The owner asked for file chips to open the file on 2026-10-06; the full viewer is R4's document mode (11 §11.20). Opened from a chat, the tab bar coming back over a file would read as leaving the chat (an extension of M16) |
 
 ## 16.8 Spikes
 

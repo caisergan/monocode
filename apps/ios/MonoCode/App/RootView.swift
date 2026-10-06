@@ -56,6 +56,7 @@ extension Destination {
     case let .project(env, projectId): ProjectView(env: env, projectId: projectId)
     case let .session(env, sessionId): SessionView(env: env, sessionId: sessionId)
     case let .newSession(env, projectId): NewSessionView(env: env, projectId: projectId)
+    case let .file(env, projectId, cwd, path, line): FileView(env: env, projectId: projectId, cwd: cwd, path: path, line: line)
     #if DEBUG
     case let .transcriptLab(run): TranscriptLabView(run: run)
     case .scrollEdgeControl: ScrollEdgeControlView()

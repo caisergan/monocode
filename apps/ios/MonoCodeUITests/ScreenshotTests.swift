@@ -16,6 +16,26 @@ final class ScreenshotTests: XCTestCase {
 
   @MainActor func testDark() throws { try walk("dark") }
   @MainActor func testLight() throws { try walk("light") }
+  @MainActor func testFileChipDark() throws { try fileChip("dark") }
+  @MainActor func testFileChipLight() throws { try fileChip("light") }
+
+  @MainActor
+  private func fileChip(_ theme: String) throws {
+    self.theme = theme
+    var app: XCUIApplication
+    // A file chip opens the file; Back returns to the chat. The chip's
+    // place is fixed on the iPhone 17 (402 × 874 pt) for this settled session.
+    app = launch(["-MCDemo", "YES", "-MCOpen", "monocode-dev://session?id=s-auth"])
+    XCTAssertTrue(app.navigationBars["Fix flaky auth test"].waitForExistence(timeout: 30))
+    sleep(2)
+    app.coordinate(withNormalizedOffset: CGVector(dx: 120.0 / 402, dy: 386.0 / 874)).tap()
+    XCTAssertTrue(app.staticTexts["session.ts"].waitForExistence(timeout: 10), "the file chip did not open the file")
+    sleep(1)
+    try shot(app, "21-file-from-chip")
+    app.navigationBars.buttons.element(boundBy: 0).tap()
+    XCTAssertTrue(app.navigationBars["Fix flaky auth test"].waitForExistence(timeout: 10))
+
+  }
 
   @MainActor
   private func launch(_ arguments: [String]) -> XCUIApplication {

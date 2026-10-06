@@ -10,11 +10,18 @@ import UIKit
 private let gutter: CGFloat = 16
 private let chipKey = NSAttributedString.Key("MonoChip")
 private let linkKey = NSAttributedString.Key("MonoLink")
+/// A file chip's reference (its text) and its icon placeholder's icon name.
+private let fileKey = NSAttributedString.Key("MonoFile")
+private let iconKey = NSAttributedString.Key("MonoIcon")
+/// File-type icons in chips (11 §11.16): 16 pt, then a 3 pt gap.
+private let iconSize: CGFloat = 16
 
 struct Hit: Sendable {
   let rect: CGRect
   let action: String?
   let link: String?
+  /// A file chip's reference, as its text reads.
+  var file: String? = nil
 }
 
 /// A wrapped block of text: the frame CoreText laid out, its size, and the
@@ -26,15 +33,22 @@ final class TextBlock: @unchecked Sendable {
   let pathHeight: CGFloat
   let chips: [(CGRect, Int)]
   let links: [(CGRect, String)]
+  /// File chips and the reference each one opens.
+  let files: [(CGRect, String)]
+  /// File-type icons to draw over the chips' placeholders.
+  let icons: [(CGRect, String)]
   let usedWidth: CGFloat
   let lineCount: Int
 
-  init(frame: CTFrame, size: CGSize, pathHeight: CGFloat, chips: [(CGRect, Int)], links: [(CGRect, String)], usedWidth: CGFloat, lineCount: Int) {
+  init(frame: CTFrame, size: CGSize, pathHeight: CGFloat, chips: [(CGRect, Int)], links: [(CGRect, String)],
+       files: [(CGRect, String)], icons: [(CGRect, String)], usedWidth: CGFloat, lineCount: Int) {
     self.frame = frame
     self.size = size
     self.pathHeight = pathHeight
     self.chips = chips
     self.links = links
+    self.files = files
+    self.icons = icons
     self.usedWidth = usedWidth
     self.lineCount = lineCount
   }
@@ -46,6 +60,8 @@ enum Element {
   case text(TextBlock, CGPoint)
   /// A single CTLine; the point is its baseline origin in top-left coordinates.
   case line(CTLine, CGPoint)
+  /// A file-type icon by name, in top-left coordinates.
+  case icon(String, CGRect)
 }
 
 /// Immutable once built on the layout queue; painted on the raster queue
@@ -104,6 +120,7 @@ final class RowLayout: @unchecked Sendable {
         ctx.textMatrix = .identity
         CTFrameDraw(block.frame, ctx)
         ctx.restoreGState()
+        for (rect, name) in block.icons { Self.drawIcon(name, in: rect.offsetBy(dx: origin.x, dy: origin.y), ctx: ctx) }
       case let .line(line, baseline):
         ctx.saveGState()
         ctx.translateBy(x: baseline.x, y: baseline.y)
@@ -112,8 +129,21 @@ final class RowLayout: @unchecked Sendable {
         ctx.textPosition = .zero
         CTLineDraw(line, ctx)
         ctx.restoreGState()
+      case let .icon(name, rect):
+        Self.drawIcon(name, in: rect, ctx: ctx)
       }
     }
+  }
+
+  /// Draws an icon upright in the top-left (flipped) context.
+  private static func drawIcon(_ name: String, in rect: CGRect, ctx: CGContext) {
+    let scale = max(1, abs(ctx.userSpaceToDeviceSpaceTransform.a))
+    guard let image = FileIcons.image(name, size: rect.width, scale: scale) else { return }
+    ctx.saveGState()
+    ctx.translateBy(x: rect.minX, y: rect.maxY)
+    ctx.scaleBy(x: 1, y: -1)
+    ctx.draw(image, in: CGRect(origin: .zero, size: rect.size))
+    ctx.restoreGState()
   }
 }
 
@@ -140,6 +170,19 @@ enum RowLayouter {
         NSAttributedString.Key(kCTParagraphStyleAttributeName as String): paragraph,
       ]
       if let link = run.link { attributes[linkKey] = link }
+      if run.chip == 2 {
+        // A file chip: the icon's placeholder, then the name, all one chip
+        // that opens the file.
+        attributes[chipKey] = 2
+        attributes[fileKey] = run.text
+        var icon = attributes
+        icon[iconKey] = FileIcons.name(forReference: run.text)
+        icon[NSAttributedString.Key(kCTRunDelegateAttributeName as String)] = iconPlaceholder(font: style.font)
+        out.append(NSAttributedString(string: "\u{202F}", attributes: attributes))
+        out.append(NSAttributedString(string: "\u{FFFC}", attributes: icon))
+        out.append(NSAttributedString(string: "\u{2060}" + String(unbreakable(run.text).dropFirst()), attributes: attributes))
+        continue
+      }
       var text = run.text
       if run.chip > 0 {
         attributes[chipKey] = run.chip
@@ -148,6 +191,28 @@ enum RowLayouter {
       out.append(NSAttributedString(string: text, attributes: attributes))
     }
     return out
+  }
+
+  /// The width an icon takes in the line, with the font's own ascent and
+  /// descent so the line keeps its height.
+  private final class IconMetrics {
+    let ascent: CGFloat
+    let descent: CGFloat
+    init(ascent: CGFloat, descent: CGFloat) {
+      self.ascent = ascent
+      self.descent = descent
+    }
+  }
+
+  static func iconPlaceholder(font: CTFont) -> CTRunDelegate {
+    var callbacks = CTRunDelegateCallbacks(
+      version: kCTRunDelegateVersion1,
+      dealloc: { Unmanaged<IconMetrics>.fromOpaque($0).release() },
+      getAscent: { Unmanaged<IconMetrics>.fromOpaque($0).takeUnretainedValue().ascent },
+      getDescent: { Unmanaged<IconMetrics>.fromOpaque($0).takeUnretainedValue().descent },
+      getWidth: { _ in iconSize + 3 })
+    let metrics = IconMetrics(ascent: CTFontGetAscent(font), descent: CTFontGetDescent(font))
+    return CTRunDelegateCreate(&callbacks, Unmanaged.passRetained(metrics).toOpaque())!
   }
 
   /// A chip never splits across lines (15 §15.4): narrow no-break spaces pad
@@ -173,6 +238,8 @@ enum RowLayouter {
     CTFrameGetLineOrigins(frame, CFRange(location: 0, length: 0), &origins)
     var chips: [(CGRect, Int)] = []
     var links: [(CGRect, String)] = []
+    var files: [(CGRect, String)] = []
+    var icons: [(CGRect, String)] = []
     var used: CGFloat = 0
     for (index, line) in lines.enumerated() {
       let origin = origins[index]
@@ -201,10 +268,22 @@ enum RowLayouter {
           }
         }
         if let link { links.append((rect, link)) }
+        if let file = attributes[fileKey] as? String {
+          if let last = files.indices.last, files[last].1 == file, abs(files[last].0.maxX - rect.minX) < 0.5,
+            abs(files[last].0.minY - rect.minY) < 2
+          {
+            files[last].0 = files[last].0.union(rect)
+          } else {
+            files.append((rect, file))
+          }
+        }
+        if let icon = attributes[iconKey] as? String {
+          icons.append((CGRect(x: rect.minX + 1, y: rect.midY - iconSize / 2, width: iconSize, height: iconSize), icon))
+        }
       }
     }
     return TextBlock(frame: frame, size: CGSize(width: width, height: height), pathHeight: pathHeight,
-                     chips: chips, links: links, usedWidth: ceil(used), lineCount: lines.count)
+                     chips: chips, links: links, files: files, icons: icons, usedWidth: ceil(used), lineCount: lines.count)
   }
 
   /// One line, truncated with an ellipsis at `width`.
@@ -306,16 +385,29 @@ enum RowLayouter {
       let (line, _) = singleLine(spec.runs + spec.sub, theme: theme, width: width - x - gutter)
       let base = baseline(for: line, top: height, height: rowHeight)
       // Chips in a single line: measure them from the line itself.
+      var icons: [Element] = []
+      var fileRect: (CGRect, String)?
       for run in CTLineGetGlyphRuns(line) as! [CTRun] {
-        guard let chip = (CTRunGetAttributes(run) as NSDictionary)[chipKey] as? Int else { continue }
+        let attributes = CTRunGetAttributes(run) as NSDictionary
+        guard let chip = attributes[chipKey] as? Int else { continue }
         let range = CTRunGetStringRange(run)
         let start = CTLineGetOffsetForStringIndex(line, range.location, nil)
         let end = CTLineGetOffsetForStringIndex(line, range.location + range.length, nil)
         let rect = CGRect(x: x + start, y: height + 4, width: end - start, height: rowHeight - 8)
         elements.append(.fill(CGPath(roundedRect: rect, cornerWidth: 4, cornerHeight: 4, transform: nil),
                               theme.color(chip == 2 ? "fileChip" : "chip")))
+        if let icon = attributes[iconKey] as? String {
+          icons.append(.icon(icon, CGRect(x: rect.minX + 1, y: rect.midY - iconSize / 2, width: iconSize, height: iconSize)))
+        }
+        if let file = attributes[fileKey] as? String {
+          fileRect = (fileRect.map { $0.0.union(rect) } ?? rect, file)
+        }
       }
       elements.append(.line(line, CGPoint(x: x, y: base)))
+      elements.append(contentsOf: icons)
+      if let (rect, file) = fileRect {
+        hits.append(Hit(rect: rect.insetBy(dx: -4, dy: -6), action: nil, link: nil, file: file))
+      }
       if spec.actions.first != nil || spec.kind == "trailRow" {
         hits.append(Hit(rect: CGRect(x: 0, y: height, width: width, height: rowHeight), action: spec.actions.first?.id ?? "open", link: nil))
       }
@@ -424,6 +516,9 @@ enum RowLayouter {
   private static func appendLinkHits(_ block: TextBlock, origin: CGPoint, into hits: inout [Hit]) {
     for (rect, link) in block.links {
       hits.append(Hit(rect: rect.offsetBy(dx: origin.x, dy: origin.y).insetBy(dx: -4, dy: -6), action: nil, link: link))
+    }
+    for (rect, file) in block.files {
+      hits.append(Hit(rect: rect.offsetBy(dx: origin.x, dy: origin.y).insetBy(dx: -4, dy: -6), action: nil, link: nil, file: file))
     }
   }
 
