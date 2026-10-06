@@ -277,9 +277,26 @@ export function OrchestrationSidebarAgents({
         </p>
       )}
       {/* Stopping a run belongs to the composer, which stops the lead and its
-          agents together. Resume has no other home, so it stays. The card
-          captures the pointer on press for dragging, which retargets the
-          click to the card, so presses must not reach it. */}
+          agents together. Pause and Resume have no other home, so they stay.
+          The card captures the pointer on press for dragging, which retargets
+          the click to the card, so presses must not reach it. */}
+      {run?.status === "active" && (
+        <div
+          className="-mr-1.5 mt-1 flex items-center justify-end"
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <button
+            type="button"
+            className={action}
+            disabled={pending}
+            title="Stop the lead and its agents, keeping their work. Resume continues them."
+            onClick={() => void perform(() => orchestrator.pauseRun(leadId))}
+          >
+            Pause
+          </button>
+        </div>
+      )}
       {run?.status === "paused" && (
         <div
           className="mt-1.5 space-y-1.5 border-t border-stroke pt-1.5"
@@ -290,7 +307,7 @@ export function OrchestrationSidebarAgents({
             {stopping
               ? "Stopping interrupted work before this run can resume."
               : leadBusy
-                ? "Waiting for the lead's interrupted turn to finish before this run can resume."
+                ? "Waiting for the lead's current turn to finish before this run can resume."
                 : "Resume continues interrupted workers from their retained checkouts and starts queued work. Policy-blocked tasks stay stopped for review."}
           </p>
           {resumeBlocker && (
@@ -318,7 +335,7 @@ export function OrchestrationSidebarAgents({
                 stopping
                   ? "Wait for interrupted agents to stop"
                   : leadBusy
-                    ? "Wait for the lead's interrupted turn to finish"
+                    ? "Wait for the lead's current turn to finish"
                     : resumeBlocker
                       ? `Stop ${resumeBlocker.title || "the other conversation"} before resuming`
                       : "Continue interrupted and queued work"

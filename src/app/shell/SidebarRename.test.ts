@@ -12,6 +12,8 @@ import {
   orchestrator,
   type OrchestrationRun,
 } from "../../features/orchestration/model/orchestration";
+import { loadPastWorkers } from "../../features/orchestration/model/pastWorkers";
+import { OrchestrationWorkers } from "../../features/orchestration/ui/OrchestrationActions";
 
 // Keep native services out of these menu/input interaction tests.
 vi.mock("../../features/source-control/hooks/useProjectDiffStats", () => ({
@@ -24,6 +26,12 @@ vi.mock("./SidebarUpdate", () => ({ SidebarUpdateFooter: () => null }));
 vi.mock("../../features/files/ui/FileTree", () => ({ FileTree: () => null }));
 vi.mock("../../platform/tauri/clipboard", () => ({
   copyText: vi.fn().mockResolvedValue(undefined),
+}));
+vi.mock("../../features/orchestration/model/pastWorkers", async (actual) => ({
+  ...(await actual<
+    typeof import("../../features/orchestration/model/pastWorkers")
+  >()),
+  loadPastWorkers: vi.fn().mockResolvedValue([]),
 }));
 
 let container: HTMLDivElement;
@@ -1157,6 +1165,82 @@ describe("sidebar orchestration card", () => {
       trigger.dispatchEvent(new MouseEvent("mouseout", { bubbles: true })),
     );
     expect(document.querySelector('[role="tooltip"]')).toBeNull();
+  });
+
+  it("lists the current run and earlier agents from the orchestrator icon", async () => {
+    props.busySessionIds = new Set();
+    props.sessions[0].orchestration = {
+      status: "finished",
+      tasks: [
+        {
+          sessionId: "worker-now",
+          title: "Current task",
+          harness: "codex",
+          model: "codex:test",
+          status: "completed",
+        },
+      ],
+    };
+    vi.mocked(loadPastWorkers).mockResolvedValue([
+      {
+        sessionId: "worker-old",
+        title: "Earlier task",
+        harness: "claude",
+        model: "claude:test",
+        updatedAt: Date.now(),
+      },
+    ]);
+    const openDetails = vi.fn();
+    await act(async () =>
+      root.render(
+        createElement(
+          OrchestrationWorkers.Provider,
+          { value: { selectedId: null, inspect: () => {}, openDetails } },
+          createElement(Sidebar, props),
+        ),
+      ),
+    );
+    const icon = card().querySelector<HTMLButtonElement>(
+      "[data-orchestration-icon]",
+    )!;
+    await act(async () => icon.click());
+    // The icon opens the agents list instead of selecting the lead.
+    expect(props.onSelectSession).not.toHaveBeenCalled();
+    expect(icon.getAttribute("aria-expanded")).toBe("true");
+    expect(loadPastWorkers).toHaveBeenCalledWith("session-1");
+    const panel = document.querySelector<HTMLElement>(
+      "[data-orchestration-agents]",
+    )!;
+    expect(panel.textContent).toContain("This run");
+    expect(panel.textContent).toContain("Current task");
+    expect(panel.textContent).toContain("Earlier · Today");
+    expect(panel.textContent).toContain("Earlier task");
+    act(() =>
+      panel
+        .querySelector<HTMLButtonElement>(
+          '[data-orchestration-agent-link="worker-old"]',
+        )!
+        .click(),
+    );
+    expect(openDetails).toHaveBeenCalledExactlyOnceWith({
+      sessionId: "worker-old",
+      leadId: "session-1",
+      title: "Earlier task",
+      harness: "claude",
+    });
+    expect(document.querySelector("[data-orchestration-agents]")).toBeNull();
+    // Card controls swallow pointerdown, so dismissal must not depend on it.
+    await act(async () => icon.click());
+    expect(document.querySelector("[data-orchestration-agents]")).not.toBeNull();
+    const archive = card().querySelector<HTMLButtonElement>(
+      '[aria-label^="Archive "]',
+    );
+    act(() => {
+      (archive ?? document.body).dispatchEvent(
+        new PointerEvent("pointerdown", { bubbles: true }),
+      );
+    });
+    expect(document.querySelector("[data-orchestration-agents]")).toBeNull();
   });
 
   it("renders saved worker details without claiming the workers are running", () => {

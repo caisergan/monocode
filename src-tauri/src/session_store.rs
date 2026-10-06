@@ -1125,6 +1125,64 @@ pub(crate) fn save_orchestration(
     tx.commit()
 }
 
+/// A worker from one of a lead's earlier runs. The lead keeps one run, so
+/// these are only reachable through the worker index.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PastWorker {
+    pub session_id: String,
+    pub title: String,
+    pub harness: String,
+    pub model: String,
+    pub branch: Option<String>,
+    pub worktree_cwd: Option<String>,
+    pub updated_at: i64,
+}
+
+/// Workers still attached to `lead` that its current run no longer lists,
+/// newest first.
+pub(crate) fn past_orchestration_workers(
+    conn: &Connection,
+    lead: &str,
+) -> rusqlite::Result<Vec<PastWorker>> {
+    let state: Option<String> = conn
+        .query_row(
+            "SELECT state FROM orchestration_runs WHERE lead_id = ?1",
+            [lead],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let current: std::collections::HashSet<String> = state
+        .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
+        .and_then(|run| run["tasks"].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|task| task["sessionId"].as_str().map(str::to_string))
+        .collect();
+    let mut statement = conn.prepare(
+        "SELECT s.id, s.title, s.harness, s.model, s.branch, s.worktree_cwd, s.updated_at
+         FROM orchestration_workers w JOIN sessions s ON s.id = w.session_id
+         WHERE w.lead_id = ?1
+         ORDER BY s.updated_at DESC",
+    )?;
+    let rows = statement.query_map([lead], |row| {
+        Ok(PastWorker {
+            session_id: row.get(0)?,
+            title: row.get(1)?,
+            harness: row.get(2)?,
+            model: row.get(3)?,
+            branch: row.get(4)?,
+            worktree_cwd: row.get(5)?,
+            updated_at: row.get(6)?,
+        })
+    })?;
+    rows.filter(|row| {
+        row.as_ref()
+            .map_or(true, |worker| !current.contains(&worker.session_id))
+    })
+    .collect()
+}
+
 fn worker_parent(conn: &Connection, id: &str) -> rusqlite::Result<Option<String>> {
     conn.query_row(
         "SELECT lead_id FROM orchestration_workers WHERE session_id = ?1",
@@ -2288,9 +2346,17 @@ mod tests {
         let worker = get_session(&conn, "worker-a").unwrap().unwrap();
         assert_eq!(worker.orchestration_lead_id.as_deref(), Some("lead"));
         assert!(has_user_block(&worker.blocks));
+        assert!(past_orchestration_workers(&conn, "lead").unwrap().is_empty());
         // A later run replaces the card's agents without resurfacing old chats.
-        save_orchestration(&conn, "lead", &json!({"status": "active", "tasks": []})).unwrap();
+        save_orchestration(&conn, "lead", &json!({"status": "active", "tasks": [
+            {"sessionId": "worker-b", "title": "Tests", "harness": "claude", "model": "two", "status": "queued"}
+        ]})).unwrap();
         assert_eq!(list_by_project(&conn, "/tmp/a").unwrap().len(), 2);
+        // The replaced run's worker stays attached to its lead, listed apart.
+        let past = past_orchestration_workers(&conn, "lead").unwrap();
+        assert_eq!(past.len(), 1);
+        assert_eq!(past[0].session_id, "worker-a");
+        assert!(past_orchestration_workers(&conn, "worker-a").unwrap().is_empty());
     }
 
     #[test]

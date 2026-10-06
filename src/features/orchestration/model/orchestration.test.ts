@@ -1090,9 +1090,12 @@ describe("local orchestration", () => {
     const submitsBeforeResume = vi.mocked(f.host.submit).mock.calls.length;
     await f.manager.start("lead", ["codex"], 2);
     await vi.waitFor(() =>
-      expect(vi.mocked(f.host.submit).mock.calls.length).toBeGreaterThan(
-        submitsBeforeResume,
-      ),
+      expect(
+        vi
+          .mocked(f.host.submit)
+          .mock.calls.slice(submitsBeforeResume)
+          .some(([id]) => id === interrupted.sessionId),
+      ).toBe(true),
     );
     expect(f.manager.run("lead")!.lastPauseReason).toBe(reason);
     expect(f.tasks().find((task) => task.id === interrupted.id)?.status).toBe(
@@ -1403,12 +1406,48 @@ describe("local orchestration", () => {
     expect(restored.run("lead")?.tasks[0].status).toBe("interrupted");
     expect(f.host.submit).toHaveBeenCalledTimes(1);
     await restored.start("lead", ["codex"], 2);
-    await vi.waitFor(() => expect(f.host.submit).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(f.host.submit).toHaveBeenCalledTimes(3));
     expect(restored.run("lead")?.tasks[0].status).toBe("running");
-    expect(vi.mocked(f.host.submit).mock.calls[1][1]).toContain(
-      "Continue the existing assignment",
+    const resumed = vi.mocked(f.host.submit).mock.calls.slice(1);
+    expect(
+      resumed.find(([id]) => id === f.tasks()[0].sessionId)?.[1],
+    ).toContain("Continue the existing assignment");
+    // The lead is told the run resumed, so a cut-off lead turn cannot stall it.
+    expect(resumed.find(([id]) => id === "lead")?.[1]).toContain(
+      "The user resumed this orchestration run",
     );
     await restored.stopRun("lead");
+  });
+  it("leaves a restored run's agents for Resume instead of auto-continuing them", async () => {
+    const f = setup();
+    await f.start();
+    await f.delegate(["a"]);
+    await vi.waitFor(() => expect(f.tasks()[0].status).toBe("running"));
+    await vi.waitFor(() =>
+      expect(f.saved.get("lead")?.tasks[0].status).toBe("running"),
+    );
+    const worker = f.tasks()[0].sessionId;
+    const restored = new Orchestrator(f.store);
+    restored.bind(f.host);
+    // Nothing is loaded yet; both callers must see the same restored run.
+    const [lead, owned] = await Promise.all([
+      restored.ownsTurns({ id: "lead" }),
+      restored.ownsTurns({ id: worker, orchestrationLeadId: "lead" }),
+      restored.hydrate("lead"),
+    ]);
+    expect(lead).toBe(true);
+    expect(owned).toBe(true);
+    expect(
+      f.store.load.mock.calls.filter(([id]) => id === "lead"),
+    ).toHaveLength(1);
+    expect(restored.run("lead")?.status).toBe("paused");
+    expect(restored.submissionError(worker)).toContain("paused");
+    expect(restored.submissionError("lead")).toContain("Resume");
+    expect(await restored.ownsTurns({ id: "unrelated" })).toBe(false);
+    await restored.stopRun("lead");
+    expect(
+      await restored.ownsTurns({ id: worker, orchestrationLeadId: "lead" }),
+    ).toBe(false);
   });
   it("does not claim a turn or run is successful before review", async () => {
     const f = setup();
@@ -1711,6 +1750,78 @@ describe("local orchestration", () => {
     await expect(
       f.call("steer", { taskId: task.id, text: "Too late" }),
     ).rejects.toThrow(/Only a running agent can be steered.*message/s);
+  });
+  it("lets the lead pause the run, keeping its turn and every agent's work", async () => {
+    const f = setup();
+    await f.start();
+    await f.delegate(["a"]);
+    await f.delegate(["a/b"]);
+    await vi.waitFor(() => expect(f.tasks()[0].status).toBe("running"));
+    const [running, queued] = f.tasks();
+    expect(queued.status).toBe("queued");
+    const leadStops = () =>
+      vi.mocked(f.host.stop).mock.calls.filter(([id]) => id === "lead").length;
+    const stopsBefore = leadStops();
+    const result = await f.call(
+      "pause",
+      { reason: "The plan needs the user's call" },
+      "pause-1",
+    );
+    expect(result).toMatchObject({ paused: true, interrupted: [running.id] });
+    const run = f.manager.run("lead")!;
+    expect(run.status).toBe("paused");
+    expect(run.error).toBe(
+      "The lead paused this run: The plan needs the user's call",
+    );
+    expect(f.tasks()[0]).toMatchObject({ status: "interrupted" });
+    expect(f.tasks()[1].status).toBe("queued");
+    expect(f.host.stop).toHaveBeenCalledWith(running.sessionId);
+    // The lead is mid-call explaining the pause; its turn keeps going.
+    expect(leadStops()).toBe(stopsBefore);
+    expect(f.lead.busy).toBe(true);
+    // A retry of the same call reads its receipt; new mutations are refused.
+    expect(
+      await f.call(
+        "pause",
+        { reason: "The plan needs the user's call" },
+        "pause-1",
+      ),
+    ).toEqual(result);
+    await expect(f.call("pause")).rejects.toThrow("click Resume");
+    await expect(f.delegate(["c"])).rejects.toThrow("click Resume");
+    expect(await f.call("wait", { timeoutSeconds: 25 })).toMatchObject({
+      status: "paused",
+    });
+    await expect(f.call("pause", { why: "x" })).rejects.toThrow(
+      "pause accepts: reason",
+    );
+    f.lead.busy = false;
+    await f.manager.start("lead", ["codex"], 2);
+    await vi.waitFor(() => expect(f.tasks()[0].status).toBe("running"));
+    await f.manager.stopRun("lead");
+  });
+  it("lets the user pause the run, stopping the lead's turn as well", async () => {
+    const f = setup();
+    await f.start();
+    await f.delegate(["a"]);
+    await vi.waitFor(() => expect(f.tasks()[0].status).toBe("running"));
+    const leadStops = () =>
+      vi.mocked(f.host.stop).mock.calls.filter(([id]) => id === "lead").length;
+    const stopsBefore = leadStops();
+    await f.manager.pauseRun("lead");
+    expect(f.manager.run("lead")).toMatchObject({
+      status: "paused",
+      error: "The user paused this run.",
+    });
+    expect(f.tasks()[0].status).toBe("interrupted");
+    expect(leadStops()).toBe(stopsBefore + 1);
+    expect(f.lead.busy).toBe(false);
+    // Pausing twice is harmless.
+    await f.manager.pauseRun("lead");
+    expect(f.manager.run("lead")?.error).toBe("The user paused this run.");
+    await f.manager.start("lead", ["codex"], 2);
+    await vi.waitFor(() => expect(f.tasks()[0].status).toBe("running"));
+    await f.manager.stopRun("lead");
   });
   it("blocks ordinary sessions while a run owns their checkout", async () => {
     const f = setup();

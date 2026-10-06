@@ -61,6 +61,10 @@ Actions, with the JSON object each one takes:
             outside its scope is held as blocked instead.
   finish    {}
             End the run, once every task is accepted or cancelled.
+  pause     {"reason":"Why the work must stop"}
+            Pause the whole run: every running agent stops with its checkout
+            and work kept, and queued tasks wait. "reason" is optional and is
+            shown to the user. Only the user resumes, with Resume in MonoCode.
 
 A queued task whose dependency was cancelled is held as blocked: send it the
 full assignment with message to run it without that dependency, or cancel it.
@@ -71,7 +75,8 @@ Usual loop: list -> delegate ... -> wait or get -> steer an agent that drifts,
 unblock one with respond or answer -> inspect the changes yourself -> message
 for corrections -> review each task -> finish.
 
-When paused, list, get and wait still return the reason and recovery steps.
+When paused, by you, the user or an interruption, list, get and wait still
+return the reason and recovery steps.
 Do not keep polling or retry mutations. Explain the pause and ask the user to
 click Resume in MonoCode. Resume continues interrupted workers in their
 retained checkouts. A policy-blocked worker remains stopped until message,
@@ -95,9 +100,9 @@ MonoCode sets MONOCODE_CONTROL_ENDPOINT and MONOCODE_CONTROL_TOKEN for the lead
 agent's process only. They are already in your environment; never print them.
 "#;
 
-const ACTIONS: [&str; 12] = [
+const ACTIONS: [&str; 13] = [
     "list", "delegate", "get", "steer", "message", "retry", "cancel", "wait", "review", "finish",
-    "respond", "answer",
+    "respond", "answer", "pause",
 ];
 const APP_ACTIONS: [&str; 17] = [
     "models.list",
