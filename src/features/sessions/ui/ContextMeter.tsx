@@ -163,7 +163,7 @@ export function SessionTokenCount({ totals }: { totals?: SessionTokenTotals }) {
         aria-label={`${headline}: ${detail}`}
         className="flex items-center gap-1.5 text-[11px] leading-4 tabular-nums text-content/45"
       >
-        <span>↑{formatTokens(totals.input)}</span>
+        <span>↑{formatTokens(totals.uncached)}</span>
         <span>↓{formatTokens(totals.output)}</span>
       </span>
       {hovered ? (

@@ -12,7 +12,7 @@ function user(id: string, turnMetrics?: Block["turnMetrics"]): Block {
 }
 
 describe("sessionTokenTotals", () => {
-  it("sums every user turn and folds cache into input", () => {
+  it("sums every user turn and splits cached input out", () => {
     const totals = sessionTokenTotals([
       user("u1", {
         inputTokens: 10,
@@ -25,10 +25,10 @@ describe("sessionTokenTotals", () => {
       user("u3", { inputTokens: 5, outputTokens: 100, cacheReadTokens: 2_000 }),
     ]);
     expect(totals).toEqual({
-      input: 3_215,
-      output: 500,
+      uncached: 215,
       cacheRead: 3_000,
       cacheWrite: 200,
+      output: 500,
     });
   });
 
@@ -52,28 +52,17 @@ describe("sessionTokenTotals", () => {
 });
 
 describe("sessionTokensTooltip", () => {
-  it("names the cached share of input", () => {
+  it("lists uncached, cached and output", () => {
     expect(
       sessionTokensTooltip({
-        input: 1_200_000,
+        uncached: 120_000,
+        cacheRead: 5_800_000,
+        cacheWrite: 90_000,
         output: 45_000,
-        cacheRead: 1_100_000,
-        cacheWrite: 0,
       }),
     ).toEqual({
       headline: "Session tokens",
-      detail: "1.2M input (1.1M cached) · 45K output",
+      detail: "120K uncached · 5.8M cached · 45K output",
     });
-  });
-
-  it("leaves out the cached note without cache reads", () => {
-    expect(
-      sessionTokensTooltip({
-        input: 980,
-        output: 12,
-        cacheRead: 0,
-        cacheWrite: 0,
-      }).detail,
-    ).toBe("980 input · 12 output");
   });
 });

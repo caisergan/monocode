@@ -571,7 +571,7 @@ const LocalSessionPane = memo(function LocalSessionPane({
   }, [addSelectionToChat, addToChatTarget]);
   const workCwd = sessionWorkCwd(session);
   // Codex already folds cached reads into its input count, so the Claude
-  // normalization in sessionTokenTotals would double-count them there.
+  // reading in sessionTokenTotals would call them uncached there.
   const tokenTotals = useMemo(
     () =>
       session.harness === "claude"
