@@ -45,6 +45,9 @@ it("gives sites their own origin but keeps preview and app-origin pages opaque",
   expect(
     browserFrameSandbox("http://localhost:1420/", "http://localhost:1420"),
   ).not.toContain("allow-same-origin");
+  expect(
+    browserFrameSandbox("monocode-remote://localhost/env-1/a/index.html", app),
+  ).not.toContain("allow-same-origin");
 });
 
 it("labels previews by file and sites by host", () => {

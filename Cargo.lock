@@ -2354,6 +2354,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-user-notifications",
  "open",
+ "percent-encoding",
  "png 0.18.1",
  "portable-pty",
  "raw-window-handle",

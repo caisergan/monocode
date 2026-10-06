@@ -232,6 +232,10 @@ pub fn run() {
         .manage(window_transfer::WindowTransferState::new())
         .manage(browser_preview::PreviewRoots::default())
         .register_asynchronous_uri_scheme_protocol(browser_preview::SCHEME, browser_preview::handle)
+        .register_asynchronous_uri_scheme_protocol(
+            browser_preview::REMOTE_SCHEME,
+            browser_preview::handle_remote,
+        )
         .setup(|app| {
             harness::reap_orphaned_harness_processes();
             session_store::init(app.handle())?;

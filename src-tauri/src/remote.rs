@@ -322,6 +322,54 @@ pub fn remote_request(
             .find(|m| m.id == machine_id)
             .ok_or("Machine is no longer connected")?
     };
+    let result = request_machine(&state, &machine, &method, params)?;
+    if method == "environment.describe"
+        && result.get("environmentId").and_then(Value::as_str)
+            != Some(machine.environment_id.as_str())
+    {
+        return Err("Host identity changed. Add this machine again before continuing.".into());
+    }
+    Ok(result)
+}
+
+/// Read a file on the machine that serves `environment_id`, for the preview
+/// protocol. The host only reads inside its registered projects and caps a
+/// file at 10 MiB, as it does for the file viewer.
+pub(crate) fn read_host_file(
+    app: &AppHandle,
+    environment_id: &str,
+    host_path: &str,
+) -> Result<Vec<u8>, String> {
+    use base64::Engine;
+    let state = app.state::<RemoteConnections>();
+    let machine = {
+        let _guard = state
+            .store
+            .lock()
+            .map_err(|_| "Connection store is locked")?;
+        read(&store_path(app)?)?
+            .into_iter()
+            .find(|m| m.environment_id == environment_id)
+            .ok_or("This project’s machine isn’t connected on this computer.")?
+    };
+    let result = request_machine(
+        &state,
+        &machine,
+        "workspace.run",
+        json!({ "command": "read_binary_file", "args": { "path": host_path } }),
+    )?;
+    let encoded = result.as_str().ok_or("Invalid host response")?;
+    base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|_| "Invalid host response".into())
+}
+
+fn request_machine(
+    state: &RemoteConnections,
+    machine: &StoredMachine,
+    method: &str,
+    params: Value,
+) -> Result<Value, String> {
     let tunnel_lease = if let Some(target) = &machine.ssh {
         Some(state.tunnels.endpoint(&machine.id, target)?)
     } else {
@@ -335,7 +383,7 @@ pub fn remote_request(
         endpoint,
         &machine.token,
         Some(&machine.environment_id),
-        &method,
+        method,
         params,
     );
     if response
@@ -347,14 +395,7 @@ pub fn remote_request(
             state.tunnels.invalidate(&machine.id, lease);
         }
     }
-    let result = response?;
-    if method == "environment.describe"
-        && result.get("environmentId").and_then(Value::as_str)
-            != Some(machine.environment_id.as_str())
-    {
-        return Err("Host identity changed. Add this machine again before continuing.".into());
-    }
-    Ok(result)
+    response
 }
 
 fn supported_remote_method(method: &str) -> bool {
