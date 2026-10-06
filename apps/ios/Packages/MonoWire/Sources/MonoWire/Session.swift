@@ -264,6 +264,11 @@ public struct ContextUsage: Codable, Hashable, Sendable {
   public var used: Double
   /// The active model's context window, when the harness reports one.
   public var window: Double?
+
+  public init(used: Double, window: Double? = nil) {
+    self.used = used
+    self.window = window
+  }
 }
 
 /// `Session`. A delta's `value.session` has no `blocks`; it decodes with

@@ -20,7 +20,7 @@ struct SessionView: View {
   @State private var sheet: ComposerSheet?
 
   enum ComposerSheet: String, Identifiable {
-    case add, model, access
+    case add, model, access, context
     var id: String { rawValue }
   }
 
@@ -60,10 +60,12 @@ struct SessionView: View {
       effort: effort,
       access: AccessMode(draft.runtimeMode(for: session)),
       mode: draft.mode,
+      context: session?.context,
       add: { sheet = .add },
       pickModel: { sheet = .model },
       pickAccess: { sheet = .access },
-      clearMode: { draft.mode = nil })
+      clearMode: { draft.mode = nil },
+      showContext: { sheet = .context })
   }
 
   @ViewBuilder private func composerSheet(_ sheet: ComposerSheet) -> some View {
@@ -74,6 +76,8 @@ struct SessionView: View {
       AddSheet(mode: draft.mode) { draft.mode = $0 }
     case .model:
       ModelSheet(env: env, session: value?.session, running: running, draft: draft)
+    case .context:
+      if let usage = value?.session.context { ContextSheet(usage: usage) }
     case .access:
       AccessSheet(running: running, current: AccessMode(draft.runtimeMode(for: value?.session))) {
         draft.runtimeMode = $0.runtimeMode
@@ -93,7 +97,9 @@ struct SessionView: View {
     }
     .safeAreaBar(edge: .bottom) {
       SessionBottomBar(
-        branch: value?.session.branch,
+        // A session's value carries its branch only once the host knows it;
+        // the inbox row has it from the list.
+        branch: value?.session.branch ?? engine.inbox.item(env, sessionId)?.branch,
         worktree: value?.session.worktreeCwd != nil,
         chips: chips,
         collapsed: collapsed,

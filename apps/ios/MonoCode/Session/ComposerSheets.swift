@@ -474,3 +474,109 @@ private extension View {
       .clipShape(.rect(cornerRadius: Tokens.Radius.lg))
   }
 }
+
+/// How full the model's context window is (the desktop's `ContextMeter`):
+/// a ring that turns amber at 75% and red at 90%. It shows only when the
+/// harness reports both the level and the window.
+struct ContextMeter: View {
+  var ratio: Double
+  var size: CGFloat
+  @Environment(\.palette) private var palette
+
+  var body: some View {
+    let stroke = size / 7
+    ZStack {
+      Circle().stroke(color.opacity(0.25), lineWidth: stroke)
+      Circle()
+        .trim(from: 0, to: ratio)
+        .stroke(color, style: StrokeStyle(lineWidth: stroke, lineCap: .round))
+        .rotationEffect(.degrees(-90))
+    }
+    .padding(stroke / 2)
+    .frame(width: size, height: size)
+    .animation(.easeOut(duration: 0.3), value: ratio)
+  }
+
+  private var color: Color {
+    ratio >= 0.9 ? palette.status.danger.color
+      : ratio >= 0.75 ? palette.status.attention.color
+      : palette.content.color.opacity(0.45)
+  }
+
+  /// The fraction in use, or nil while the window is unknown.
+  static func ratio(_ usage: ContextUsage) -> Double? {
+    guard let window = usage.window, window > 0, usage.used.isFinite, usage.used >= 0 else { return nil }
+    return min(1, usage.used / window)
+  }
+
+  /// "69% context used".
+  static func headline(_ usage: ContextUsage) -> String {
+    ratio(usage).map { "\(Int(($0 * 100).rounded()))% context used" } ?? "Context used"
+  }
+
+  /// "176K / 256K tokens".
+  static func detail(_ usage: ContextUsage) -> String {
+    usage.window.map { "\(tokens(usage.used)) / \(tokens($0)) tokens" } ?? "\(tokens(usage.used)) tokens"
+  }
+
+  /// The desktop's `formatTokens`: 980, 1.5K, 176K, 1.2M.
+  static func tokens(_ count: Double) -> String {
+    guard count.isFinite, count >= 0 else { return "0" }
+    if count < 1000 { return String(Int(count.rounded())) }
+    func short(_ value: Double, _ unit: String) -> String {
+      value < 10 ? String(format: "%.1f", value).replacingOccurrences(of: ".0", with: "") + unit : "\(Int(value.rounded()))\(unit)"
+    }
+    return count < 1_000_000 ? short(count / 1000, "K") : short(count / 1_000_000, "M")
+  }
+}
+
+/// The ring's sheet (11 §11.17): the numbers and Compact now, which is
+/// `/compact` and waits for the write path.
+struct ContextSheet: View {
+  var usage: ContextUsage
+  @Environment(\.palette) private var palette
+  @Environment(\.dismiss) private var dismiss
+
+  var body: some View {
+    NavigationStack {
+      VStack(spacing: 16) {
+        HStack(spacing: 14) {
+          ContextMeter(ratio: ContextMeter.ratio(usage) ?? 0, size: 44)
+          VStack(alignment: .leading, spacing: 3) {
+            Text(ContextMeter.headline(usage))
+              .font(.mono(Tokens.TypeScale.row, .medium))
+              .foregroundStyle(palette.content.color)
+            Text(ContextMeter.detail(usage))
+              .font(.mono(Tokens.TypeScale.secondary))
+              .foregroundStyle(palette.text.tertiary.color)
+          }
+          Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .combine)
+        Button {} label: {
+          Text("Compact now")
+            .font(.mono(Tokens.TypeScale.row, .medium))
+            .foregroundStyle(palette.content.color)
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .background(palette.selection.normal.color, in: .rect(cornerRadius: Tokens.Radius.md))
+        }
+        .buttonStyle(.plain)
+        .disabled(true)
+        .opacity(0.45)
+        .accessibilityHint("Compacting from the phone arrives with the write path.")
+      }
+      .padding(16)
+      .frame(maxHeight: .infinity, alignment: .top)
+      .background(palette.base.color)
+      .navigationTitle("Context")
+      .toolbarTitleDisplayMode(.inline)
+      .toolbar {
+        ToolbarItem(placement: .topBarTrailing) {
+          Button("Close", systemImage: "xmark") { dismiss() }
+        }
+      }
+    }
+    .presentationDetents([.height(220)])
+    .presentationDragIndicator(.visible)
+  }
+}

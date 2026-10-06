@@ -1,4 +1,5 @@
 import MonoDesign
+import MonoWire
 import SwiftUI
 
 /// The bottom of the session screen (16 §16.6.4). Reading back folds the
@@ -55,10 +56,13 @@ struct ComposerChips {
   var effort: String?
   var access: AccessMode
   var mode: ComposerDraft.Mode?
+  /// The context window's fill, when the harness reports both halves.
+  var context: ContextUsage?
   var add: () -> Void
   var pickModel: () -> Void
   var pickAccess: () -> Void
   var clearMode: () -> Void
+  var showContext: () -> Void
 }
 
 /// The composer on the session screen (16 §16.6.4): the glass box, its top
@@ -124,15 +128,33 @@ struct ComposerPlaceholder: View {
         removal: .opacity.animation(.easeOut(duration: 0.12)))
   }
 
+  /// The desktop's identity row: the working copy, its branch, and the
+  /// context ring at the right (11 §11.17 "Top bar").
   private var topBar: some View {
     HStack(spacing: 6) {
       Image(systemName: worktree ? "folder.badge.gearshape" : "folder").font(.system(size: 12))
-      Text(worktree ? "Worktree" : "Current checkout")
+      Text(worktree ? "Worktree" : "Current checkout").lineLimit(1)
       if let branch {
-        Image(systemName: "arrow.triangle.branch").font(.system(size: 11))
-        Text(branch).font(.mono(Tokens.TypeScale.meta, design: .monospaced)).lineLimit(1)
+        HStack(spacing: 4) {
+          Image(systemName: "arrow.triangle.branch").font(.system(size: 11))
+          Text(branch).lineLimit(1).truncationMode(.middle)
+        }
+        .padding(.leading, 6)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Branch \(branch)")
       }
-      Spacer(minLength: 0)
+      Spacer(minLength: 8)
+      if let context = chips.context, let ratio = ContextMeter.ratio(context) {
+        Button(action: chips.showContext) {
+          ContextMeter(ratio: ratio, size: 16)
+            .frame(width: 20, height: 16)
+            .contentShape(.interaction, Rectangle().inset(by: -12))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(ContextMeter.headline(context))
+        .accessibilityValue(ContextMeter.detail(context))
+        .accessibilityHint("Shows context usage")
+      }
     }
     .font(.mono(Tokens.TypeScale.meta))
     .foregroundStyle(palette.text.secondary.color)
@@ -141,6 +163,13 @@ struct ComposerPlaceholder: View {
   /// The desktop's row: `+`, the model chip (harness mark, name, effort at
   /// α .50), the access chip (mode icon, label), then Send.
   private var chipRow: some View {
+    ViewThatFits(in: .horizontal) {
+      chipRow(accessLabel: true)
+      chipRow(accessLabel: false)
+    }
+  }
+
+  private func chipRow(accessLabel: Bool) -> some View {
     HStack(spacing: 6) {
       chip(action: chips.add, label: "Add to message") {
         Image(systemName: "plus").font(.system(size: 13, weight: .regular))
@@ -150,6 +179,7 @@ struct ComposerPlaceholder: View {
         HStack(spacing: 5) {
           HarnessMark(harness: chips.harness, size: 15)
           Text(shortName).foregroundStyle(palette.content.color).lineLimit(1)
+            .fixedSize(horizontal: accessLabel, vertical: false)
           if let effort = chips.effort {
             Text(effort).foregroundStyle(palette.text.secondary.color).lineLimit(1).fixedSize()
           }
@@ -159,7 +189,7 @@ struct ComposerPlaceholder: View {
       chip(action: chips.pickAccess, label: "Access, \(chips.access.label)") {
         HStack(spacing: 5) {
           AccessIcon(mode: chips.access, size: 14)
-          if chips.mode == nil {
+          if chips.mode == nil && accessLabel {
             Text(chips.access.label).foregroundStyle(palette.content.color).lineLimit(1)
           }
           chevron

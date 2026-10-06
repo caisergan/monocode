@@ -11,7 +11,16 @@ final class ComposerChipsUITests: XCTestCase {
     app.launch()
     XCTAssertTrue(app.navigationBars["Profile the transcript scroll"].waitForExistence(timeout: 30))
     sleep(2)
+    XCTAssertTrue(app.descendants(matching: .any)["Branch main"].exists, "the composer shows no branch")
+    // The demo's turn reports its context; the ring opens the numbers.
+    let ring = app.buttons.matching(NSPredicate(format: "label ENDSWITH %@", "% context used")).firstMatch
+    XCTAssertTrue(ring.waitForExistence(timeout: 15), "the context ring did not appear")
     shot("chips-row")
+    ring.tap()
+    XCTAssertTrue(app.navigationBars["Context"].waitForExistence(timeout: 3), "the ring did not open its sheet")
+    shot("chips-context")
+    app.navigationBars["Context"].buttons["Close"].tap()
+    XCTAssertFalse(app.navigationBars["Context"].waitForExistence(timeout: 2))
 
     app.buttons["Add to message"].tap()
     XCTAssertTrue(app.navigationBars["Add to message"].waitForExistence(timeout: 3), "+ did not open its sheet")

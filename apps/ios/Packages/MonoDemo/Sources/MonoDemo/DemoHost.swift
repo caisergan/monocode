@@ -563,6 +563,9 @@ public actor DemoHost {
     }
     try await sleep(ms: 800)
     save(id) { value in
+      // Each turn reports the context it used, as Claude does on its result:
+      // the level climbs with the turns and wraps, as after a compaction.
+      value.session.context = ContextUsage(used: Double(48_000 + (runs * 23_000) % 150_000), window: 200_000)
       if let i = value.session.blocks.firstIndex(where: { $0.id == "\(runId)-r" }) { value.session.blocks[i].streaming = false }
       var read = Block(id: "\(runId)-t1", role: .tool, text: "Read src/auth/session.ts")
       read.tool = .init(kind: "read", status: "completed", preview: ToolPreview(kind: .read, path: "src/auth/session.ts"))
