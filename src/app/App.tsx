@@ -11,6 +11,17 @@ import {
   type AppSessionListing,
   type AppSessionPlacement,
 } from "../features/agent-app/model/agentApp";
+import { createChangeFeed } from "../features/agent-app/model/changeFeed";
+import {
+  MAX_OPERATOR_WAKES,
+  addOperatorWatch,
+  collectOperatorNotices,
+  markOperatorWatchesSeen,
+  operatorWakePrompt,
+  sameWatch,
+  type OperatorWatch,
+} from "../features/agent-app/model/operatorWatches";
+import { appSessionState } from "../features/agent-app/model/sessionState";
 import { submitWithSettlement } from "./model/managedSubmission";
 import {
   submitAfterProjectSync,
@@ -326,12 +337,14 @@ import {
   beginSessionTurn,
   applySessionCheckpoint,
   captureSessionCheckpoint,
+  captureWorkerCheckout,
   forgetSessionCheckpoint,
   flushSessionCheckpoint,
   keepSessionChanges,
   notifyReviewChanged,
   prepareSessionCheckpoint,
   sessionCheckpointCleanupSafe,
+  workerBaseIntact,
 } from "../features/sessions/model/checkpoint";
 import { notifyDirsChanged } from "../features/files/model/fileTree";
 import {
@@ -7125,6 +7138,10 @@ function Workspace({
             revealHandoff(wrap.text);
           }
           nudgeOpenEditors(event, workCwd);
+          // Orchestration sessions skip per-edit tracking. A worker's whole
+          // checkout delta is captured when its turn settles, so shell edits
+          // count too; recording edits here would replace its baseline. The
+          // lead receives integrated files outside its own tool events.
           if (!orchestrator.forSession(sessionId))
             trackSessionEdits(sessionId, workCwd, event);
           const routed = routePlanEvent(event);
@@ -7163,7 +7180,9 @@ function Workspace({
           });
         };
 
-        if (!current.inboxAsk && !orchestrator.forSession(sessionId)) {
+        // A worker's first turn records the seeded checkout as the baseline
+        // that review integrates from; later turns keep that baseline.
+        if (!current.inboxAsk && !orchestrator.run(sessionId)) {
           await beginSessionTurn(sessionId, workCwd).catch(() => undefined);
         }
         if (turnGen.current.get(sessionId) !== gen) return;
@@ -7282,7 +7301,7 @@ function Workspace({
           );
           if (operatorCommand.matched) {
             const cli = `${shellPath(await invoke<string>("app_cli_path"))} app`;
-            sendText += `\n\n<monocode_app>\nThe user's Operator command enables app access in this thread, including later turns without the command. You can start session tabs or split session panes right or down, list and create project worktrees, choose a new session's checkout, read and continue other project sessions, save unsent drafts, organize session folders, and read or write saved notes through its local CLI. Run \`${cli} --help\` for exact commands and JSON fields, then use it as needed for the user's request. When reading another session, start with its latest two or three user/assistant exchanges. Request older exchanges with nextBefore or a larger excerpt only if needed. The CLI uses a session credential already in your environment; never print it. New sessions inherit this session's permission mode unless runtimeMode is set explicitly. For a new session with a draft, call sessions.start with its prompt and draft:true; do not submit a seed prompt. The returned ID can be used as besideSessionId to split its pane again or moved into a folder immediately. A normal sessions.start submits its prompt but returns after acceptance, so do not wait for that agent to finish before organizing it.\n</monocode_app>`;
+            sendText += `\n\n<monocode_app>\nThe user's Operator command enables app access in this thread, including later turns without the command. You can start session tabs or split session panes right or down, list and create project worktrees, choose a new session's checkout, read and continue other project sessions, save unsent drafts, organize session folders, and read or write saved notes through its local CLI. Run \`${cli} --help\` for exact commands and JSON fields, then use it as needed for the user's request. When reading another session, start with its latest two or three user/assistant exchanges. Request older exchanges with nextBefore or a larger excerpt only if needed. The CLI uses a session credential already in your environment; never print it. New sessions inherit this session's permission mode unless runtimeMode is set explicitly. For a new session with a draft, call sessions.start with its prompt and draft:true; do not submit a seed prompt. The returned ID can be used as besideSessionId to split its pane again or moved into a folder immediately. A normal sessions.start submits its prompt but returns after acceptance; organize it right away rather than waiting. To delegate work and use the result, give the session a name, then either follow it with sessions.wait (or sessions.send with wait) or pass notify:true and end your turn: MonoCode wakes this thread when it settles. A blocked session you started reports needsInput; decide it with sessions.respond or sessions.answer, or ask the user when the call is theirs. Use sessions.steer to correct a session that is going the wrong way mid-turn.\n</monocode_app>`;
           }
           await sendTurn(sendText);
           acceptEditedResend();
@@ -7709,6 +7728,14 @@ function Workspace({
   const appReceipts = useRef(
     new Map<string, { signature: string; promise: Promise<unknown> }>(),
   );
+  /** Session changes that `sessions.wait` long-polls on. */
+  const sessionChanges = useRef(createChangeFeed());
+  /** Turns operators asked to be woken for, held until they settle. */
+  const operatorWatches = useRef<OperatorWatch[]>([]);
+  const operatorWakes = useRef(
+    new Map<string, { count: number; userTurnId?: string }>(),
+  );
+  const wakingOperators = useRef(new Set<string>());
 
   const ensureAutomationRecovery = useCallback(() => {
     if (!automationRecoveryRef.current) {
@@ -9124,6 +9151,42 @@ function Workspace({
     if (next.activeTabId !== activeTabId) setActiveTabId(next.activeTabId);
   }, [tabs, activeTabId, orchestrationRuns]);
 
+  /** Guide a running turn on another agent's behalf; `followUp` names the
+   * caller's command for a fresh turn. */
+  const steerSession = useCallback(
+    async (id: string, text: string, followUp: string) => {
+      flushHarnessEvents();
+      const session = sessionsRef.current.find((entry) => entry.id === id);
+      if (!session) throw new Error("This agent is no longer available");
+      if (!session.busy)
+        throw new Error(
+          `This agent is not running a turn; send it a fresh one with ${followUp}.`,
+        );
+      if (!isLiveHarness(session.harness) || !canSteerHarness(session.harness))
+        throw new Error(
+          `${session.harness} cannot take guidance mid-turn. Wait for the turn to finish, then use ${followUp}.`,
+        );
+      // Record it on the agent before dispatch, so its own transcript shows
+      // why it changed course even if the harness call then fails.
+      const next = sessionsRef.current.map((entry) =>
+        entry.id === id ? appendSteerUser(entry, text) : entry,
+      );
+      sessionsRef.current = next;
+      setSessions(next);
+      await steerHarnessTurn({
+        harness: session.harness,
+        sessionId: id,
+        cwd: sessionWorkCwd(session),
+        model: session.model,
+        modelSettings: session.modelSettings,
+        text,
+      });
+    },
+    [flushHarnessEvents],
+  );
+  const steerSessionRef = useRef(steerSession);
+  steerSessionRef.current = steerSession;
+
   useLayoutEffect(() => {
     orchestrator.bind({
       session: (id) => sessionsRef.current.find((session) => session.id === id),
@@ -9268,6 +9331,13 @@ function Workspace({
         // Workers belong to the lead's agent panel; no workspace tab is created.
         return { scratchDir, workspace };
       },
+      captureWorker: async (_run, task) => {
+        const cwd = task.workspace?.checkoutCwd;
+        if (!cwd)
+          throw new Error("This worker's isolated checkout is unavailable");
+        await flushSessionCheckpoint(task.sessionId);
+        return captureWorkerCheckout(task.sessionId, cwd);
+      },
       integrateWorker: async (run, task) => {
         const fromCwd = task.workspace?.checkoutCwd;
         if (!fromCwd)
@@ -9295,10 +9365,14 @@ function Workspace({
           throw new Error(
             "The worker or lead checkout is no longer registered. The worker worktree was kept.",
           );
-        if (workerTree.head !== leadTree.head)
+        // The lead may commit between reviews; a worker commit is refused.
+        if (!(await workerBaseIntact(fromCwd, orchestrationCheckoutCwd(run))))
           throw new Error(
-            "The worker or lead branch moved while this task was running. The worker worktree was kept for manual review.",
+            "The worker committed, or the lead's branch no longer contains the worker's starting commit. The worker worktree was kept for manual review.",
           );
+        // Settling already recorded the delta; refresh it in case the
+        // checkout changed since, so review applies exactly what is there.
+        await captureWorkerCheckout(task.sessionId, fromCwd);
         return applySessionCheckpoint(
           task.sessionId,
           fromCwd,
@@ -9323,11 +9397,13 @@ function Workspace({
         );
         if (
           exists &&
-          (!workerTree || !leadTree || workerTree.head !== leadTree.head)
+          (!workerTree ||
+            !leadTree ||
+            !(await workerBaseIntact(path, orchestrationCheckoutCwd(run))))
         ) {
           if (onlyIfUnchanged) return false;
           throw new Error(
-            "The worker or lead branch moved before cleanup. The worker worktree was kept for manual review.",
+            "The worker committed, or the lead's branch moved past its starting commit, before cleanup. The worker worktree was kept for manual review.",
           );
         }
         if (onlyIfUnchanged) {
@@ -9429,37 +9505,7 @@ function Workspace({
             "The selected agent session could not accept this turn.",
         }).catch(console.error);
       },
-      steer: async (id, text) => {
-        flushHarnessEvents();
-        const session = sessionsRef.current.find((entry) => entry.id === id);
-        if (!session) throw new Error("This agent is no longer available");
-        if (!session.busy)
-          throw new Error(
-            "This agent is not running a turn; send it a fresh one with message.",
-          );
-        if (
-          !isLiveHarness(session.harness) ||
-          !canSteerHarness(session.harness)
-        )
-          throw new Error(
-            `${session.harness} cannot take guidance mid-turn. Wait for the turn to finish, then use message.`,
-          );
-        // Record it on the worker before dispatch, so its own transcript shows
-        // why it changed course even if the harness call then fails.
-        const next = sessionsRef.current.map((entry) =>
-          entry.id === id ? appendSteerUser(entry, text) : entry,
-        );
-        sessionsRef.current = next;
-        setSessions(next);
-        await steerHarnessTurn({
-          harness: session.harness,
-          sessionId: id,
-          cwd: sessionWorkCwd(session),
-          model: session.model,
-          modelSettings: session.modelSettings,
-          text,
-        });
-      },
+      steer: (id, text) => steerSession(id, text, "message"),
       respondApproval: (id, requestId, decision) => {
         const session = sessionsRef.current.find((entry) => entry.id === id);
         if (session)
@@ -9488,11 +9534,120 @@ function Workspace({
         }
       },
     });
-  }, [checkOpenWorktreeFiles, submitSession, onStop, flushHarnessEvents]);
+  }, [
+    checkOpenWorktreeFiles,
+    submitSession,
+    onStop,
+    flushHarnessEvents,
+    steerSession,
+  ]);
+
+  /**
+   * Wake an idle operator with the turns it asked to hear about, the way a
+   * lead hears from its workers. Updates wait while the operator is busy.
+   */
+  const deliverOperatorNotices = useCallback(() => {
+    const operators = new Set(
+      operatorWatches.current.map((watch) => watch.operatorId),
+    );
+    for (const operatorId of operators) {
+      if (wakingOperators.current.has(operatorId)) continue;
+      const operator = sessionsRef.current.find(
+        (session) => session.id === operatorId,
+      );
+      if (
+        !operator ||
+        operator.busy ||
+        operator.queuedMessages?.length ||
+        operator.usageLimit ||
+        operator.pendingSwitch ||
+        sessionDraftBlock(operator) ||
+        !operatorEnabledInThread(operator.blocks) ||
+        // Wake-ups are managed turns, which skip the submission guard; keep
+        // them out of leads and checkouts an orchestrator controls.
+        orchestrator.run(operatorId) ||
+        orchestrator.submissionError(operatorId)
+      )
+        continue;
+      const mine = operatorWatches.current.filter(
+        (watch) => watch.operatorId === operatorId,
+      );
+      const { notices, remaining } = collectOperatorNotices(mine, (id) =>
+        sessionsRef.current.find((session) => session.id === id),
+      );
+      if (!notices.length) continue;
+      const others = operatorWatches.current.filter(
+        (watch) => watch.operatorId !== operatorId,
+      );
+      // The budget resets whenever the user writes to the operator again.
+      const userTurnId = [...operator.blocks]
+        .reverse()
+        .find((block) => block.role === "user" && !block.internal)?.id;
+      const wakes = operatorWakes.current.get(operatorId);
+      const count =
+        wakes && wakes.userTurnId === userTurnId ? wakes.count : 0;
+      if (count >= MAX_OPERATOR_WAKES) {
+        operatorWatches.current = others;
+        enqueueHarnessEvent(operatorId, {
+          type: "status",
+          text: `MonoCode stopped sending session updates after ${MAX_OPERATOR_WAKES} in a row. Send a message to continue.`,
+        });
+        flushHarnessEvents();
+        continue;
+      }
+      operatorWatches.current = [...others, ...remaining];
+      operatorWakes.current.set(operatorId, { count: count + 1, userTurnId });
+      wakingOperators.current.add(operatorId);
+      const text = operatorWakePrompt(notices);
+      const restore = () => {
+        // Put the reported watches back unannounced, so a later wake retries.
+        const reported = mine.filter((watch) =>
+          notices.some(
+            (notice) =>
+              notice.watch.sessionId === watch.sessionId &&
+              notice.watch.appRequestId === watch.appRequestId,
+          ),
+        );
+        operatorWatches.current = [
+          ...operatorWatches.current.filter(
+            (watch) => !reported.some((entry) => sameWatch(entry, watch)),
+          ),
+          ...reported,
+        ];
+      };
+      // Let the triggering update commit before starting the operator's turn.
+      window.setTimeout(() => {
+        void submitWithSettlement({
+          submit: (onSettled) => {
+            let acceptance: SubmissionAcceptance = false;
+            flushSync(() => {
+              acceptance = submitSessionRef.current(operatorId, text, [], {
+                managed: true,
+                onSettled,
+              });
+            });
+            return acceptance;
+          },
+          onSettled: () => undefined,
+          rejectionMessage: "The operator could not take the session update.",
+        })
+          .then((accepted) => {
+            if (!accepted) restore();
+          })
+          .catch((error: unknown) => {
+            restore();
+            console.error(error);
+          })
+          .finally(() => wakingOperators.current.delete(operatorId));
+      }, 0);
+    }
+  }, [enqueueHarnessEvent, flushHarnessEvents]);
 
   useEffect(() => {
     orchestrator.sync();
-  }, [sessions]);
+    sessionChanges.current.bump();
+    deliverOperatorNotices();
+  }, [sessions, deliverOperatorNotices]);
 
   useEffect(() => {
     const listening = listen<{
@@ -9578,6 +9733,7 @@ function Workspace({
                   harness: session.harness,
                   model: session.model,
                   busy: false,
+                  state: "idle",
                   hasDraft: !!session.draft,
                 });
               }
@@ -9593,6 +9749,7 @@ function Workspace({
                   harness: session.harness,
                   model: session.model,
                   busy: !!session.busy,
+                  state: appSessionState(session),
                   hasDraft: !!sessionDraftBlock(session),
                 });
               }
@@ -9627,7 +9784,7 @@ function Workspace({
                   );
                 if (previous.draft)
                   throw new Error("Request ID belongs to an unsent draft");
-                return { alreadySubmitted: true };
+                return { alreadySubmitted: true, turnId: previous.id };
               }
               if (target.busy)
                 throw new Error("Session is busy; try again when it finishes");
@@ -9635,12 +9792,56 @@ function Workspace({
                 throw new Error(
                   "Session already has a draft; send or remove it first",
                 );
-              const accepted = await submitSessionRef.current(id, prompt, [], {
-                appRequestId: requestId,
+              let acceptance: SubmissionAcceptance = false;
+              // Commit an immediate turn now, so its turnId can be returned.
+              flushSync(() => {
+                acceptance = submitSessionRef.current(id, prompt, [], {
+                  appRequestId: requestId,
+                });
               });
-              if (!accepted)
+              if (!(await acceptance))
                 throw new Error("Session could not accept the follow-up");
-              return { alreadySubmitted: false };
+              // A deferred submission may land its turn after acceptance.
+              const turn = sessionsRef.current
+                .find((session) => session.id === id)
+                ?.blocks.find((block) => block.appRequestId === requestId);
+              return { alreadySubmitted: false, turnId: turn?.id };
+            },
+            steer: (id, prompt) =>
+              steerSessionRef.current(id, prompt, "sessions.send"),
+            respond: (id, requestId, decision) => {
+              const session = sessionsRef.current.find(
+                (entry) => entry.id === id,
+              );
+              if (!session) throw new Error("Session is no longer open");
+              respondHarnessApproval(session.harness, id, requestId, decision);
+            },
+            answer: (id, requestId, reply) => {
+              const session = sessionsRef.current.find(
+                (entry) => entry.id === id,
+              );
+              if (!session) throw new Error("Session is no longer open");
+              respondHarnessQuestion(session.harness, id, requestId, reply);
+            },
+            revision: () => sessionChanges.current.revision(),
+            changed: (since, timeoutMs) =>
+              sessionChanges.current.changed(since, timeoutMs),
+            watch: (watch) => {
+              operatorWatches.current = addOperatorWatch(
+                operatorWatches.current,
+                watch,
+              );
+            },
+            seen: (operatorId, sessionId) => {
+              const session = sessionsRef.current.find(
+                (entry) => entry.id === sessionId,
+              );
+              if (session)
+                operatorWatches.current = markOperatorWatchesSeen(
+                  operatorWatches.current,
+                  operatorId,
+                  session,
+                );
             },
             draft: async (id, prompt, requestId) => {
               const target = await ensureOpenSessionRef.current(id);

@@ -86,13 +86,21 @@ function fixture() {
         harness: "codex",
         model: "codex:test",
         busy: false,
+        state: "idle" as const,
         hasDraft: false,
       },
     ]),
     session: vi.fn(async (id) =>
       id === "other" ? { ...newSession("codex", source.cwd), id } : null,
     ),
-    send: vi.fn(async () => ({ alreadySubmitted: false })),
+    send: vi.fn(async () => ({ alreadySubmitted: false, turnId: "turn" })),
+    steer: vi.fn(async () => {}),
+    respond: vi.fn(),
+    answer: vi.fn(),
+    revision: () => 0,
+    changed: vi.fn(async () => {}),
+    watch: vi.fn(),
+    seen: vi.fn(),
     draft: vi.fn(async () => ({ alreadySaved: false, draft: true })),
     worktrees: vi.fn(async () => ({
       worktrees: [

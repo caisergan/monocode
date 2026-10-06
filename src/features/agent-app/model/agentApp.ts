@@ -2,9 +2,9 @@ import { isHarnessAvailable } from "../../../integrations/harness/core/availabil
 import { looksLikeProject } from "../../projects/model/recents";
 import {
   mergeModelSettings,
-  modelEffortSetting,
   modelsFor,
   preferredModelId,
+  requestedModelSettings,
   resolveModel,
 } from "../../sessions/model/models";
 import {
@@ -31,7 +31,21 @@ import type { Worktree, Worktrees } from "../../source-control/model/worktrees";
 import { pathKey } from "../../../shared/lib/paths";
 import type { SplitDir } from "../../workspace/model/layout";
 import { consumeOperatorCommand } from "../../sessions/model/operatorCommand";
-import { sessionConversationPage } from "./sessionConversation";
+import { pendingInputForSession } from "../../notifications/model/approvalToast";
+import type { ApprovalDecision } from "../../../integrations/harness/core/types";
+import type { UserQuestionReply } from "../../sessions/model/userQuestion";
+import { questionAnswers } from "../../orchestration/model/orchestration";
+import { sessionConversationPage, sessionTurn } from "./sessionConversation";
+import type { OperatorWatch } from "./operatorWatches";
+import {
+  APP_SESSION_STATES,
+  SETTLED_STATES,
+  appSessionState,
+  latestTurnId,
+  turnForRequest,
+  turnState,
+  type AppSessionState,
+} from "./sessionState";
 
 export type AppSessionListing = {
   id: string;
@@ -39,6 +53,7 @@ export type AppSessionListing = {
   harness: HarnessId;
   model: string;
   busy: boolean;
+  state: AppSessionState;
   hasDraft: boolean;
 };
 
@@ -59,7 +74,19 @@ export type AgentAppHost = {
     id: string,
     prompt: string,
     requestId: string,
-  ): Promise<{ alreadySubmitted: boolean }>;
+  ): Promise<{ alreadySubmitted: boolean; turnId?: string }>;
+  /** Guide a running turn without discarding its work. */
+  steer(id: string, prompt: string): Promise<void>;
+  respond(id: string, requestId: number, decision: ApprovalDecision): void;
+  answer(id: string, requestId: number, reply: UserQuestionReply): void;
+  /** Advances whenever any session changes. */
+  revision(): number;
+  /** Resolves once the revision passes `since`, or after the timeout. */
+  changed(since: number, timeoutMs: number): Promise<void>;
+  /** Wake the operator when this turn settles. */
+  watch(watch: OperatorWatch): void;
+  /** The operator saw this session's state, so it needs no wake for it. */
+  seen(operatorId: string, sessionId: string): void;
   draft(
     id: string,
     prompt: string,
@@ -80,13 +107,22 @@ export type AgentAppHost = {
 const FIELDS = new Map<string, readonly string[]>([
   ["models.list", []],
   ["sessions.list", []],
-  ["sessions.read", ["sessionId", "before", "limit", "maxChars"]],
-  ["sessions.send", ["sessionId", "prompt"]],
+  ["sessions.read", ["sessionId", "turnId", "before", "limit", "maxChars"]],
+  ["sessions.send", ["sessionId", "prompt", "wait", "notify"]],
+  [
+    "sessions.wait",
+    ["sessionId", "sessionIds", "turnId", "until", "timeoutSeconds"],
+  ],
+  ["sessions.steer", ["sessionId", "prompt"]],
+  ["sessions.respond", ["sessionId", "requestId", "decision"]],
+  ["sessions.answer", ["sessionId", "requestId", "answers", "skip"]],
   ["sessions.draft", ["sessionId", "prompt"]],
   [
     "sessions.start",
     [
       "prompt",
+      "name",
+      "notify",
       "draft",
       "harness",
       "model",
@@ -178,6 +214,141 @@ async function projectSession(
   return target;
 }
 
+/** A name an operator gives a session it starts; IDs are longer than this. */
+const SESSION_NAME = /^[a-z][a-z0-9_-]{0,31}$/;
+
+const namedSessionId = (source: Session, name: string) =>
+  `app-${source.id}-${name}`;
+
+/** The name this operator gave a session, when it started it with one. */
+function sessionName(source: Session, id: string): string | undefined {
+  const prefix = `app-${source.id}-`;
+  if (!id.startsWith(prefix)) return undefined;
+  const suffix = id.slice(prefix.length);
+  return SESSION_NAME.test(suffix) ? suffix : undefined;
+}
+
+/** Sessions this operator started; only these take decisions from it. */
+const startedBy = (source: Session, id: string) =>
+  id.startsWith(`app-${source.id}-`);
+
+/**
+ * A name this operator gave one of its sessions, as that session's ID. Any
+ * other value is returned unchanged, so short IDs keep working.
+ */
+async function resolveSessionRef(
+  source: Session,
+  ref: string,
+  host: AgentAppHost,
+): Promise<string> {
+  if (ref === source.id || !SESSION_NAME.test(ref)) return ref;
+  const named = namedSessionId(source, ref);
+  const listed = await host.sessions(requireProject(source));
+  return listed.some((session) => session.id === named) ? named : ref;
+}
+
+/** Resolve a session ID, or a name this operator gave one of its sessions. */
+async function targetSession(
+  source: Session,
+  value: unknown,
+  host: AgentAppHost,
+  field = "sessionId",
+): Promise<Session> {
+  const ref = requiredString(value, field, 256);
+  if (ref === source.id) return source;
+  return projectSession(
+    source,
+    await resolveSessionRef(source, ref, host),
+    host,
+  );
+}
+
+function label(source: Session, session: Session) {
+  return sessionName(source, session.id) ?? session.id;
+}
+
+/** The fields every driving command reports about a session. */
+function describe(source: Session, session: Session, turnId?: string) {
+  const state = turnId ? turnState(session, turnId) : appSessionState(session);
+  const name = sessionName(source, session.id);
+  const needsInput =
+    state === "blocked" ? pendingInputForSession(session) : undefined;
+  return {
+    sessionId: session.id,
+    ...(name ? { name } : {}),
+    state,
+    ...(needsInput ? { needsInput } : {}),
+    ...(state === "usageLimited" && session.usageLimit?.resetsAt != null
+      ? {
+          usageLimitResetsAt: new Date(
+            session.usageLimit.resetsAt,
+          ).toISOString(),
+        }
+      : {}),
+    latestTurnId: latestTurnId(session) ?? null,
+  };
+}
+
+/** The CLI and app relay give up after 35 seconds; leave room for the reply. */
+const MAX_WAIT_SECONDS = 25;
+const MAX_SEND_WAIT_SECONDS = 20;
+
+function waitSeconds(value: unknown, max: number): number {
+  const seconds = value ?? Math.min(20, max);
+  if (
+    typeof seconds !== "number" ||
+    !Number.isFinite(seconds) ||
+    seconds < 0 ||
+    seconds > max
+  )
+    throw new Error(`timeoutSeconds must be 0 to ${max}`);
+  return seconds;
+}
+
+function untilStates(value: unknown): readonly AppSessionState[] {
+  if (value === undefined) return SETTLED_STATES;
+  if (
+    !Array.isArray(value) ||
+    !value.length ||
+    value.some(
+      (state) => !APP_SESSION_STATES.includes(state as AppSessionState),
+    )
+  )
+    throw new Error(
+      `until must be a non-empty array of: ${APP_SESSION_STATES.join(", ")}`,
+    );
+  return value as AppSessionState[];
+}
+
+/** Re-check after every session change until `check` answers or time runs out. */
+async function waitUntil<T>(
+  host: AgentAppHost,
+  timeoutMs: number,
+  check: () => Promise<T | undefined>,
+): Promise<T | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const since = host.revision();
+    const hit = await check();
+    if (hit !== undefined) return hit;
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return undefined;
+    await host.changed(since, remaining);
+  }
+}
+
+function blockedMessage(source: Session, target: Session): string {
+  const pending = pendingInputForSession(target);
+  const what = pending
+    ? `${pending.kind === "question" ? "a question" : "an approval"} "${pending.label}" (requestId ${pending.requestId})`
+    : "a decision";
+  return `${label(source, target)} is blocked on ${what}. ${
+    startedBy(source, target.id)
+      ? "Decide it with sessions.respond or sessions.answer"
+      : "Ask the user to answer it in MonoCode"
+  }, then send.`;
+}
+
 /** Two short body paragraphs, with a hard cap independent of Markdown length. */
 export function notePreview(body: string): string {
   return body
@@ -215,36 +386,12 @@ function startLaunch(
       );
   if (!model || model.harness !== chosenHarness)
     throw new Error("Unknown model; run models.list for exact model IDs");
-  const rawSettings = input.modelSettings;
-  if (
-    rawSettings !== undefined &&
-    (!rawSettings ||
-      typeof rawSettings !== "object" ||
-      Array.isArray(rawSettings))
-  )
-    throw new Error(
-      "modelSettings must be an object of setting IDs and values",
-    );
-  const requestedSettings = {
-    ...((rawSettings ?? {}) as Record<string, unknown>),
-  };
-  if (input.effort !== undefined) {
-    const effort = modelEffortSetting(model);
-    if (!effort)
-      throw new Error(`${model.id} does not expose an effort setting`);
-    requestedSettings[effort.id] = requiredString(input.effort, "effort", 128);
-  }
-  for (const [key, value] of Object.entries(requestedSettings)) {
-    const setting = model.settings?.find((entry) => entry.id === key);
-    if (
-      !setting ||
-      typeof value !== "string" ||
-      !setting.options.some((option) => option.value === value)
-    )
-      throw new Error(
-        `Invalid model setting ${key}; run models.list for allowed values`,
-      );
-  }
+  const requestedSettings = requestedModelSettings(
+    model,
+    input.modelSettings,
+    input.effort,
+    "models.list",
+  );
   const runtimeMode = input.runtimeMode ?? source.runtimeMode;
   if (!RUNTIME_MODES.includes(runtimeMode as Session["runtimeMode"]))
     throw new Error(`runtimeMode must be one of: ${RUNTIME_MODES.join(", ")}`);
@@ -269,7 +416,7 @@ function startLaunch(
       ...(chosenHarness === source.harness && model.id === source.model
         ? source.modelSettings
         : {}),
-      ...(requestedSettings as Record<string, string>),
+      ...requestedSettings,
     }),
     runtimeMode: runtimeMode as Session["runtimeMode"],
     reveal,
@@ -310,33 +457,250 @@ export async function handleAgentApp(
     case "sessions.list":
       return {
         cwd: requireProject(source),
-        sessions: await host.sessions(source.cwd),
+        sessions: (await host.sessions(source.cwd)).map((listing) => {
+          const name = sessionName(source, listing.id);
+          return name ? { ...listing, name } : listing;
+        }),
       };
     case "sessions.read": {
-      const id = requiredString(input.sessionId, "sessionId", 256);
-      const target = await projectSession(source, id, host);
-      return sessionConversationPage(target, {
-        before: optionalString(input.before, "before", 256),
-        limit: input.limit as number | undefined,
-        maxChars: input.maxChars as number | undefined,
-      });
+      const target = await targetSession(source, input.sessionId, host);
+      if (input.turnId !== undefined) {
+        if (input.before !== undefined || input.limit !== undefined)
+          throw new Error("turnId reads one turn; omit before and limit");
+        const turnId = requiredString(input.turnId, "turnId", 256);
+        return {
+          title: target.title,
+          ...describe(source, target),
+          turn: sessionTurn(
+            target,
+            turnId,
+            input.maxChars as number | undefined,
+          ),
+        };
+      }
+      return {
+        ...sessionConversationPage(target, {
+          before: optionalString(input.before, "before", 256),
+          limit: input.limit as number | undefined,
+          maxChars: input.maxChars as number | undefined,
+        }),
+        ...describe(source, target),
+      };
     }
     case "sessions.send": {
-      const id = requiredString(input.sessionId, "sessionId", 256);
+      const target = await targetSession(source, input.sessionId, host);
       const prompt = agentPrompt(input.prompt);
-      if (id === source.id)
+      if (target.id === source.id)
         throw new Error(
           "Use the current conversation to continue this session",
         );
       if (!/^[A-Za-z0-9_-]{1,128}$/.test(requestId))
         throw new Error("Invalid request ID");
-      await projectSession(source, id, host);
-      const result = await host.send(
-        id,
-        prompt,
-        `app-${source.id}-${requestId}`,
+      const notify = input.notify ?? false;
+      if (typeof notify !== "boolean")
+        throw new Error("notify must be a boolean");
+      const wait =
+        input.wait === undefined || input.wait === false
+          ? undefined
+          : input.wait === true
+            ? {}
+            : input.wait;
+      if (
+        wait !== undefined &&
+        (typeof wait !== "object" || Array.isArray(wait))
+      )
+        throw new Error(
+          "wait must be true or an object with timeoutSeconds and until",
+        );
+      const waitOptions = wait as Record<string, unknown> | undefined;
+      const unknownWait = Object.keys(waitOptions ?? {}).filter(
+        (key) => key !== "timeoutSeconds" && key !== "until",
       );
-      return { sessionId: id, submitted: true, ...result };
+      if (unknownWait.length)
+        throw new Error(
+          `Unknown sessions.send wait fields: ${unknownWait.join(", ")}`,
+        );
+      const timeoutMs = waitOptions
+        ? waitSeconds(waitOptions.timeoutSeconds, MAX_SEND_WAIT_SECONDS) * 1000
+        : 0;
+      const until = waitOptions ? untilStates(waitOptions.until) : [];
+      const appRequestId = `app-${source.id}-${requestId}`;
+      // A retry of a turn that already started is not a send to a busy session.
+      if (!turnForRequest(target, appRequestId)) {
+        const state = appSessionState(target);
+        if (state === "blocked")
+          throw new Error(blockedMessage(source, target));
+        if (state === "working")
+          throw new Error(
+            target.busy
+              ? `${label(source, target)} is still working. Wait for it with sessions.wait, or redirect the running turn with sessions.steer.`
+              : `${label(source, target)} has queued follow-ups to run first. Wait for them with sessions.wait.`,
+          );
+      }
+      const result = await host.send(target.id, prompt, appRequestId);
+      if (notify)
+        host.watch({
+          operatorId: source.id,
+          sessionId: target.id,
+          appRequestId,
+          label: label(source, target),
+        });
+      // A submission that waited on project sync lands its turn shortly after.
+      const turnId =
+        result.turnId ??
+        (await waitUntil(host, waitOptions ? 0 : 2000, async () => {
+          const live = await host.session(target.id);
+          return (live && turnForRequest(live, appRequestId)?.id) || undefined;
+        }));
+      const sent = {
+        sessionId: target.id,
+        submitted: true,
+        alreadySubmitted: result.alreadySubmitted,
+        turnId: turnId ?? null,
+      };
+      if (!waitOptions)
+        return turnId
+          ? sent
+          : {
+              ...sent,
+              note: "The turn has not started yet. Find it with sessions.wait on this session.",
+            };
+      const settled = await waitUntil(host, timeoutMs, async () => {
+        const live = await host.session(target.id);
+        if (!live) return { live: null, turnId: null };
+        const turn = turnForRequest(live, appRequestId);
+        return turn && until.includes(turnState(live, turn.id))
+          ? { live, turnId: turn.id }
+          : undefined;
+      });
+      const live = settled ? settled.live : await host.session(target.id);
+      const waitedTurnId =
+        settled?.turnId ?? (live && turnForRequest(live, appRequestId)?.id);
+      if (!live) return { ...sent, matched: true, state: "closed" };
+      host.seen(source.id, live.id);
+      if (!waitedTurnId)
+        return {
+          ...sent,
+          matched: false,
+          state: "pending",
+          note: "The turn has not started yet. Check it again with sessions.wait.",
+        };
+      const current = describe(source, live, waitedTurnId);
+      return {
+        ...sent,
+        turnId: waitedTurnId,
+        matched: !!settled,
+        ...current,
+        ...(current.state === "idle"
+          ? { turn: sessionTurn(live, waitedTurnId) }
+          : {}),
+      };
+    }
+    case "sessions.wait": {
+      const single = input.sessionId !== undefined;
+      if (single === (input.sessionIds !== undefined))
+        throw new Error("Supply exactly one of sessionId or sessionIds");
+      const refs = single ? [input.sessionId] : input.sessionIds;
+      if (
+        !Array.isArray(refs) ||
+        !refs.length ||
+        refs.length > 8 ||
+        new Set(refs).size !== refs.length
+      )
+        throw new Error("sessionIds must hold 1 to 8 distinct sessions");
+      const turnId =
+        input.turnId === undefined
+          ? undefined
+          : requiredString(input.turnId, "turnId", 256);
+      if (turnId && !single)
+        throw new Error("turnId waits on one session; use sessionId");
+      const until = untilStates(input.until);
+      const timeoutMs =
+        waitSeconds(input.timeoutSeconds, MAX_WAIT_SECONDS) * 1000;
+      const targets = await Promise.all(
+        refs.map((ref) => targetSession(source, ref, host, "sessionIds")),
+      );
+      if (targets.some((target) => target.id === source.id))
+        throw new Error("A session cannot wait on itself");
+      // Validate the turn before waiting on it.
+      if (turnId) turnState(targets[0], turnId);
+      const snapshot = () =>
+        Promise.all(targets.map((target) => host.session(target.id)));
+      const ready = await waitUntil(host, timeoutMs, async () => {
+        const live = await snapshot();
+        return live.some(
+          (session) =>
+            !session ||
+            until.includes(
+              turnId ? turnState(session, turnId) : appSessionState(session),
+            ),
+        )
+          ? live
+          : undefined;
+      });
+      const live = ready ?? (await snapshot());
+      for (const session of live) if (session) host.seen(source.id, session.id);
+      const sessions = live.map((session, index) =>
+        session
+          ? describe(source, session, turnId)
+          : { sessionId: targets[index].id, state: "closed" as const },
+      );
+      const first = live[0];
+      return {
+        matched: !!ready,
+        sessions,
+        ...(turnId && first && sessions[0].state === "idle"
+          ? { turn: sessionTurn(first, turnId) }
+          : {}),
+      };
+    }
+    case "sessions.steer": {
+      const target = await targetSession(source, input.sessionId, host);
+      const prompt = agentPrompt(input.prompt);
+      if (target.id === source.id)
+        throw new Error("A session cannot steer itself");
+      if (!target.busy)
+        throw new Error(
+          `${label(source, target)} is not running a turn; use sessions.send.`,
+        );
+      if (appSessionState(target) === "blocked")
+        throw new Error(blockedMessage(source, target));
+      await host.steer(target.id, prompt);
+      return { sessionId: target.id, steered: true };
+    }
+    case "sessions.respond":
+    case "sessions.answer": {
+      const target = await targetSession(source, input.sessionId, host);
+      if (!startedBy(source, target.id))
+        throw new Error(
+          "Only sessions you started can take your decisions; ask the user to answer this one in MonoCode",
+        );
+      const kind = action === "sessions.respond" ? "approval" : "question";
+      const pending = pendingInputForSession(target);
+      if (pending?.kind !== kind)
+        throw new Error(
+          `${label(source, target)} is not waiting on ${kind === "approval" ? "an approval" : "a question"}. Check needsInput from sessions.wait or sessions.list first.`,
+        );
+      if (input.requestId !== pending.requestId)
+        throw new Error(
+          `Stale requestId. ${label(source, target)} is waiting on ${pending.requestId}.`,
+        );
+      if (kind === "approval") {
+        const decision = input.decision;
+        if (decision !== "allow" && decision !== "deny")
+          throw new Error('decision must be "allow" or "deny"');
+        host.respond(target.id, pending.requestId, decision);
+        return { sessionId: target.id, decision };
+      }
+      const reply: UserQuestionReply =
+        input.skip === true
+          ? { kind: "skipped" }
+          : {
+              kind: "answered",
+              answers: questionAnswers(input.answers, pending.questions),
+            };
+      host.answer(target.id, pending.requestId, reply);
+      return { sessionId: target.id, answered: reply.kind === "answered" };
     }
     case "sessions.draft": {
       const id = requiredString(input.sessionId, "sessionId", 256);
@@ -359,6 +723,26 @@ export async function handleAgentApp(
           "request ID must use letters, digits, underscores or hyphens",
         );
       const launch = startLaunch(source, input);
+      const name =
+        input.name === undefined
+          ? undefined
+          : requiredString(input.name, "name", 32);
+      if (name !== undefined && !SESSION_NAME.test(name))
+        throw new Error(
+          "name must start with a lowercase letter and use up to 32 lowercase letters, digits, - or _",
+        );
+      const notify = input.notify ?? false;
+      if (typeof notify !== "boolean")
+        throw new Error("notify must be a boolean");
+      if (notify && launch.draft)
+        throw new Error("notify needs a submitted prompt; omit draft:true");
+      const id = name
+        ? namedSessionId(source, name)
+        : `app-${source.id}-${requestId}`;
+      if (name && (await host.session(id)))
+        throw new Error(
+          `You already have a session named "${name}". Send to it with sessions.send, or choose another name.`,
+        );
       if (input.worktreeCwd !== undefined) {
         const chosen = (await host.worktrees(launch.cwd)).worktrees.find(
           (tree) =>
@@ -379,20 +763,34 @@ export async function handleAgentApp(
         throw new Error("placement must be tab, right or down");
       if (input.besideSessionId !== undefined && placement === "tab")
         throw new Error("besideSessionId requires placement right or down");
+      const beside = optionalString(
+        input.besideSessionId,
+        "besideSessionId",
+        256,
+      );
       const besideSessionId =
         placement === "tab"
           ? undefined
-          : (optionalString(input.besideSessionId, "besideSessionId", 256) ??
-            source.id);
-      const id = `app-${source.id}-${requestId}`;
+          : beside
+            ? await resolveSessionRef(source, beside, host)
+            : source.id;
       if (besideSessionId)
         await host.start(launch, id, {
           direction: placement as SplitDir,
           besideSessionId,
         });
       else await host.start(launch, id);
+      // The launch turn carries the session ID as its request ID.
+      if (notify)
+        host.watch({
+          operatorId: source.id,
+          sessionId: id,
+          appRequestId: id,
+          label: name ?? id,
+        });
       return {
         id,
+        ...(name ? { name } : {}),
         cwd: launch.cwd,
         harness: launch.harness,
         model: launch.model,

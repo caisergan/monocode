@@ -1,8 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { HARNESSES, type HarnessId, type Session } from "../../sessions/model/session";
+import {
+  requestedModelSettings,
+  resolveModel,
+} from "../../sessions/model/models";
 import { pathKey } from "../../../shared/lib/paths";
 import type { ApprovalDecision, HarnessEvent } from "../../../integrations/harness/core/types";
-import { pendingApprovalForSession } from "../../notifications/model/approvalToast";
+import { pendingInputForSession } from "../../notifications/model/approvalToast";
 import type { UserQuestionReply } from "../../sessions/model/userQuestion";
 import { CONTINUE_PROMPT } from "../../sessions/model/inFlight";
 import {
@@ -57,6 +61,14 @@ export type OrchestrationHost = {
     run: OrchestrationRun,
     task: OrchestrationTask,
   ): Promise<WorkerPreparation>;
+  /**
+   * Record an isolated worker's whole checkout delta since its baseline and
+   * return the changed checkout-relative paths.
+   */
+  captureWorker(
+    run: OrchestrationRun,
+    task: OrchestrationTask,
+  ): Promise<string[]>;
   integrateWorker(
     run: OrchestrationRun,
     task: OrchestrationTask,
@@ -202,12 +214,24 @@ function strings(value: unknown, label: string, max = 64): string[] {
  */
 const FIELDS = new Map<string, string[]>([
   ["list", []],
-  ["delegate", ["title", "harness", "model", "prompt", "files", "dependsOn"]],
+  [
+    "delegate",
+    [
+      "title",
+      "harness",
+      "model",
+      "effort",
+      "modelSettings",
+      "prompt",
+      "files",
+      "dependsOn",
+    ],
+  ],
   ["get", ["taskId"]],
   ["message", ["taskId", "text"]],
   ["retry", ["taskId", "text", "files"]],
   ["cancel", ["taskId"]],
-  ["wait", ["timeoutSeconds"]],
+  ["wait", ["timeoutSeconds", "since"]],
   ["review", ["taskId"]],
   ["finish", []],
   ["steer", ["taskId", "text"]],
@@ -239,7 +263,7 @@ export function shellPath(path: string): string {
   return /[\s"]/.test(path) ? `"${path.replace(/"/g, "")}"` : path;
 }
 /** Map the lead's chosen option IDs onto the worker's own question shape. */
-function questionAnswers(
+export function questionAnswers(
   value: unknown,
   questions: { id: string; options: { id: string }[] }[] = [],
 ): Record<string, string[]> {
@@ -272,6 +296,30 @@ const listed = (values: string[], max = 12) =>
   values.length > max
     ? `${values.slice(0, max).join(", ")} (+${values.length - max} more)`
     : values.join(", ");
+const RESULT_PREVIEW_CHARS = 2000;
+
+/** The end of a worker's final message, where its summary usually is. */
+function resultPreview(result: string) {
+  return result.length > RESULT_PREVIEW_CHARS
+    ? {
+        result: result.slice(-RESULT_PREVIEW_CHARS),
+        resultTruncated: true,
+      }
+    : { result };
+}
+
+/** A worker whose checkout was seeded and whose changes are not yet in. */
+const ownsLeadFile = (task: OrchestrationTask) =>
+  !!task.workspace &&
+  task.workspacePolicy !== "shared" &&
+  !task.accepted &&
+  task.status !== "cancelled";
+
+/** Dependencies that can still be accepted; a cancelled one never will be. */
+const liveDependencies = (run: OrchestrationRun, task: OrchestrationTask) =>
+  task.dependsOn.filter(
+    (id) => run.tasks.find((entry) => entry.id === id)?.status !== "cancelled",
+  );
 
 export class Orchestrator {
   private runs: OrchestrationRun[] = [];
@@ -393,8 +441,30 @@ export class Orchestrator {
   private emit() {
     for (const listener of this.listeners) listener();
   }
+  /**
+   * Cursor for `wait {since}`: each task records the revision of its last
+   * change. Revisions start from the clock, so a cursor a lead kept from
+   * before an app restart is older than every change made after it.
+   */
+  private revision = Date.now();
+  private taskRevisions = new Map<
+    string,
+    { signature: string; revision: number }
+  >();
+  private track(run: OrchestrationRun) {
+    for (const task of run.tasks) {
+      const signature = JSON.stringify(task);
+      if (this.taskRevisions.get(task.id)?.signature === signature) continue;
+      this.revision += 1;
+      this.taskRevisions.set(task.id, { signature, revision: this.revision });
+    }
+  }
+  private changedSince(task: OrchestrationTask, since: number) {
+    return (this.taskRevisions.get(task.id)?.revision ?? Infinity) > since;
+  }
   private async commit(run: OrchestrationRun) {
     run = normalizeOrchestrationRun(run);
+    this.track(run);
     this.runs = [
       ...this.runs.filter((entry) => entry.leadId !== run.leadId),
       run,
@@ -890,7 +960,7 @@ export class Orchestrator {
     const run = this.run(id);
     if (!run || run.status !== "active") return prompt;
     const cli = `${shellPath(run.cli)} control`;
-    return `${prompt}\n\n<monocode_orchestration>\nYou are the lead of a local MonoCode run. Coordinate the user's task using ${cli}. Run \`${cli} --help\` before your first command; it documents every action, its exact JSON fields and the retry rule. Credentials are already in your environment; never print them.\nEach call prints one JSON line and exits non-zero unless "ok" is true; read the "error" text, it says what to do next. Unknown JSON fields are rejected rather than ignored, so fix the field name instead of guessing. If a call fails before reaching MonoCode, retry it with the "requestId" from that response so the work is never queued twice.\nUse list to discover allowed harness/model IDs. Delegate bounded tasks with project-relative files (directories reserve their descendants), self-contained prompts and dependsOn task IDs. Use the checkout selected for this run. You may read and plan; leave project file edits to workers. Never start workers outside this CLI. Workers with overlapping files are queued. For project-wide validation, generators or broad formatting, assign a separate task with files ["."] and wait for other workers to finish. Workers must never commit, push, switch branches or write outside the selected checkout. If the user requested those final operations, review and integrate every worker, call finish, then perform the explicitly authorized finalization yourself from the lead checkout.\nAgents never prompt the user. When one needs an approval or answers a question, list, get and wait report it as needsInput on that task, and you decide with respond or answer; it stays stopped until you do. Judge the request against the task you assigned, and put it to the user in this conversation only when the call is genuinely theirs.\nSteer a running agent with steer to correct its course without losing its work; use message only once it has stopped. Read results with get or wait; completed means a turn finished, not that the work passed review. Review the actual changes, message a worker for fixes, and use review to accept each completed task. A scope-blocked worker is isolated to that task: use message if it should stay within its existing scope, retry with corrected project-relative files if the assignment was too narrow, or cancel it if no longer needed. Never expand scope merely to excuse an unexpected write. Call finish only when required work and combined validation are complete. You receive worker results automatically when idle; use bounded wait calls while supervising. If the run is paused, list/get/wait remain readable and explain the reason. Stop polling, report that reason, and ask the user to click Resume; Resume automatically continues interrupted workers from their retained checkouts. Do not expose credentials, create worktrees, switch branches or silently escalate worker permissions.\n</monocode_orchestration>`;
+    return `${prompt}\n\n<monocode_orchestration>\nYou are the lead of a local MonoCode run. Coordinate the user's task using ${cli}. Run \`${cli} --help\` before your first command; it documents every action, its exact JSON fields and the retry rule. Credentials are already in your environment; never print them.\nEach call prints one JSON line and exits non-zero unless "ok" is true; read the "error" text, it says what to do next. Unknown JSON fields are rejected rather than ignored, so fix the field name instead of guessing. If a call fails before reaching MonoCode, retry it with the "requestId" from that response so the work is never queued twice.\nUse list to discover allowed harness/model IDs. Delegate bounded tasks with project-relative files (directories reserve their descendants), self-contained prompts and dependsOn task IDs. Use the checkout selected for this run. You may read and plan; leave project file edits to workers. Never start workers outside this CLI. Workers with overlapping files are queued. For project-wide validation, generators or broad formatting, assign a separate task with files ["."] and wait for other workers to finish. Workers must never commit, push, switch branches or write outside the selected checkout. If the user requested those final operations, review and integrate every worker, call finish, then perform the explicitly authorized finalization yourself from the lead checkout.\nAgents never prompt the user. When one needs an approval or answers a question, list, get and wait report it as needsInput on that task, and you decide with respond or answer; it stays stopped until you do. Judge the request against the task you assigned, and put it to the user in this conversation only when the call is genuinely theirs.\nSteer a running agent with steer to correct its course without losing its work; use message only once it has stopped. Read results with get or wait; completed means a turn finished, not that the work passed review. Review the actual changes, message a worker for fixes, and use review to accept each completed task. A scope-blocked worker is isolated to that task: use message if it should stay within its existing scope, retry with corrected project-relative files if the assignment was too narrow, or cancel it if no longer needed. Never expand scope merely to excuse an unexpected write. Call finish only when required work and combined validation are complete. You receive worker results automatically when idle; use bounded wait calls while supervising, passing the revision from your last list or wait as since so only changes come back. list and wait show the end of each result; get returns it in full. If the run is paused, list/get/wait remain readable and explain the reason. Stop polling, report that reason, and ask the user to click Resume; Resume automatically continues interrupted workers from their retained checkouts. Do not expose credentials, create worktrees, switch branches or silently escalate worker permissions.\n</monocode_orchestration>`;
   }
   async handle(
     leadId: string,
@@ -949,18 +1019,39 @@ export class Orchestrator {
       void this.pump();
     }
   }
-  private view(run: OrchestrationRun) {
+  /**
+   * The run as the lead sees it. Results are previews; get returns one in
+   * full. With `since`, only tasks changed after that revision or waiting on
+   * the lead are included.
+   */
+  private view(run: OrchestrationRun, since?: number) {
+    const cursor = since !== undefined && since <= this.revision ? since : undefined;
+    const tasks = run.tasks
+      .map((task) => ({ task, needsInput: this.pendingInput(task) }))
+      .filter(
+        ({ task, needsInput }) =>
+          cursor === undefined || needsInput || this.changedSince(task, cursor),
+      );
     return {
       ...run,
       cli: undefined,
       requests: undefined,
+      dispatches: undefined,
+      revision: this.revision,
       recovery: run.status === "active" ? undefined : this.inactiveReason(run),
-      tasks: run.tasks.map((task) => ({
+      ...(this.leadWarnings(run).length
+        ? { warnings: this.leadWarnings(run) }
+        : {}),
+      ...(cursor !== undefined
+        ? { unchangedTasks: run.tasks.length - tasks.length }
+        : {}),
+      tasks: tasks.map(({ task, needsInput }) => ({
         ...task,
         prompt: undefined,
         scopes: undefined,
+        ...resultPreview(task.result),
         waitingFor: this.waitingFor(run, task),
-        needsInput: this.pendingInput(task),
+        needsInput,
       })),
     };
   }
@@ -976,18 +1067,7 @@ export class Orchestrator {
    */
   pendingInput(task: OrchestrationTask) {
     const worker = this.host?.session(task.sessionId);
-    const pending = worker && pendingApprovalForSession(worker);
-    if (!pending) return undefined;
-    return {
-      kind: pending.kind,
-      requestId: pending.requestId,
-      label: pending.label,
-      detail:
-        pending.kind === "approval"
-          ? (pending.block?.tool?.detail?.trim() ?? pending.block?.text)
-          : undefined,
-      questions: worker?.pendingQuestion?.questions,
-    };
+    return worker && pendingInputForSession(worker);
   }
   waitingFor(
     run: OrchestrationRun,
@@ -1054,15 +1134,28 @@ export class Orchestrator {
             .filter((choice) => run.allowedHarnesses.includes(choice.harness))
             .map((choice) => ({
               ...choice,
-              models: choice.models.filter(
-                (model) =>
-                  !run.allowedModels ||
-                  run.allowedModels.some(
-                    (allowed) =>
-                      allowed.harness === choice.harness &&
-                      allowed.model === model.id,
-                  ),
-              ),
+              models: choice.models
+                .filter(
+                  (model) =>
+                    !run.allowedModels ||
+                    run.allowedModels.some(
+                      (allowed) =>
+                        allowed.harness === choice.harness &&
+                        allowed.model === model.id,
+                    ),
+                )
+                .map((model) => {
+                  // Effort and other options delegate may set for this model.
+                  const settings = resolveModel(
+                    choice.harness,
+                    model.id,
+                  ).settings?.map(({ id, label, options }) => ({
+                      id,
+                      label,
+                      options: options.map((option) => option.value),
+                    }));
+                  return settings?.length ? { ...model, settings } : model;
+                }),
             })),
         };
       case "get": {
@@ -1109,6 +1202,12 @@ export class Orchestrator {
           throw new Error(
             `Choose a model ID returned by list for ${harness}: ${listed(permittedModels.map((item) => item.id)) || "none available"}.`,
           );
+        const modelSettings = requestedModelSettings(
+          resolveModel(harness, model),
+          input.modelSettings,
+          input.effort,
+          "list",
+        );
         const title = text(input.title, "title", 160);
         const prompt = text(input.prompt, "prompt");
         const files = strings(input.files, "files");
@@ -1141,6 +1240,7 @@ export class Orchestrator {
           dependsOn,
           harness,
           model,
+          ...(Object.keys(modelSettings).length ? { modelSettings } : {}),
           status: "queued",
           accepted: false,
           result: "",
@@ -1180,6 +1280,7 @@ export class Orchestrator {
           target.id,
           {
             prompt: text(input.text, "text"),
+            dependsOn: liveDependencies(this.run(run.leadId)!, target),
             status: "queued",
             accepted: false,
             result: "",
@@ -1226,6 +1327,7 @@ export class Orchestrator {
             files,
             scopes,
             writeScopes: undefined,
+            dependsOn: liveDependencies(current, target),
             status: "queued",
             accepted: false,
             result: "",
@@ -1255,9 +1357,16 @@ export class Orchestrator {
           steered: true,
         });
       }
-      case "cancel":
-        await this.cancelTask(run.leadId, task().id);
+      case "cancel": {
+        const target = task();
+        // Cancelling cannot take integrated files back out of the checkout.
+        if (target.accepted)
+          throw new Error(
+            `${target.title} was already accepted, so its changes are in your checkout and cancel cannot remove them. Revert those files yourself if you no longer want them.`,
+          );
+        await this.cancelTask(run.leadId, target.id);
         return record(this.run(run.leadId)!, { cancelled: true });
+      }
       case "respond": {
         const target = task();
         const pending = this.pendingInput(target);
@@ -1485,14 +1594,26 @@ export class Orchestrator {
       seconds > 25
     )
       throw new Error("timeoutSeconds must be 0 to 25");
+    const since = input.since;
+    if (
+      since !== undefined &&
+      (typeof since !== "number" || !Number.isInteger(since) || since < 0)
+    )
+      throw new Error(
+        "since must be the revision number from an earlier list or wait",
+      );
     // A worker blocking on the lead changes no run state, so watch for that
     // separately; otherwise the lead sleeps while an agent waits on it.
     const blocked = this.blocked.get(leadId);
-    // Input that arrived before `wait` is already actionable. Only long-poll
-    // while every running worker can still make progress without the lead.
+    // Input that arrived before `wait` is already actionable, and so is a
+    // change the lead has not seen yet. Only long-poll while every running
+    // worker can still make progress without the lead.
     if (
       run.status === "active" &&
       this.blockedKeys(run).length === 0 &&
+      (since === undefined ||
+        since > this.revision ||
+        !run.tasks.some((task) => this.changedSince(task, since))) &&
       (run.tasks.some(activeTask) ||
         run.tasks.some((task) => task.status === "queued"))
     ) {
@@ -1509,7 +1630,99 @@ export class Orchestrator {
         const timer = setTimeout(finish, seconds * 1000);
       });
     }
-    return this.view(this.run(leadId)!);
+    return this.view(this.run(leadId)!, since as number | undefined);
+  }
+  /**
+   * A cancelled task is never accepted, so its queued dependents would wait
+   * forever. Hold them, whether or not a worker slot is free, and let the
+   * lead decide what each one still needs.
+   */
+  private async holdCancelledDependents(leadId: string) {
+    const run = this.run(leadId);
+    if (!run) return;
+    let held = false;
+    for (const task of run.tasks) {
+      if (task.status !== "queued") continue;
+      const cancelled = this.run(leadId)!.tasks.filter(
+        (entry) =>
+          task.dependsOn.includes(entry.id) && entry.status === "cancelled",
+      );
+      if (!cancelled.length) continue;
+      await this.patchTask(leadId, task.id, {
+        status: "blocked",
+        delivered: false,
+        error: `Dependency ${listed(cancelled.map((entry) => `"${entry.title}"`))} was cancelled, so this task was held before it started. Run it without that dependency by sending the full assignment with message, or cancel it.`,
+      });
+      held = true;
+    }
+    if (held) this.sync();
+  }
+  /** Lead edits to files a dispatched, unreviewed worker owns, by lead. */
+  private leadEdits = new Map<string, Map<string, string[]>>();
+  /**
+   * The lead should leave project files to its workers. When it edits one a
+   * worker already started on, that worker's review will refuse the file, so
+   * list and wait say so now rather than at review.
+   */
+  private observeLead(
+    run: OrchestrationRun,
+    event: Extract<HarnessEvent, { type: "tool.started" | "tool.updated" }>,
+  ) {
+    if (
+      run.status !== "active" ||
+      event.preview?.kind !== "write" ||
+      ["failed", "error", "cancelled"].includes(event.status ?? "")
+    )
+      return;
+    const checkout = orchestrationCheckoutCwd(run);
+    const paths =
+      event.paths ?? (event.preview.path ? [event.preview.path] : []);
+    void (async () => {
+      for (const path of paths) {
+        const absolute = /^(?:[\\/]|[a-z]:[\\/])/i.test(path)
+          ? path
+          : `${checkout}/${path}`;
+        let resolved: string;
+        try {
+          resolved = orchestrationPathKey(await this.store.resolvePath(absolute));
+        } catch {
+          continue;
+        }
+        const owners = (this.run(run.leadId)?.tasks ?? []).filter(
+          (task) =>
+            ownsLeadFile(task) &&
+            task.scopes.some((scope) =>
+              scopeContains(orchestrationPathKey(scope), resolved),
+            ),
+        );
+        if (!owners.length) continue;
+        const edits = this.leadEdits.get(run.leadId) ?? new Map();
+        const root = orchestrationPathKey(checkout);
+        const shown = resolved.startsWith(`${root}/`)
+          ? resolved.slice(root.length + 1)
+          : resolved;
+        edits.set(
+          shown,
+          owners.map((task) => task.id),
+        );
+        this.leadEdits.set(run.leadId, edits);
+        this.emit();
+      }
+    })().catch(console.error);
+  }
+  /** Warnings for lead edits whose owning workers are still unreviewed. */
+  private leadWarnings(run: OrchestrationRun): string[] {
+    const warnings: string[] = [];
+    for (const [path, ids] of this.leadEdits.get(run.leadId) ?? []) {
+      const owners = run.tasks.filter(
+        (task) => ids.includes(task.id) && ownsLeadFile(task),
+      );
+      if (owners.length)
+        warnings.push(
+          `You edited ${path}, which ${listed(owners.map((task) => `"${task.title}"`))} already started on. Its review will refuse that file unless you restore it; leave project edits to workers.`,
+        );
+    }
+    return warnings;
   }
   private async pump() {
     if (this.pumping) {
@@ -1522,6 +1735,7 @@ export class Orchestrator {
       for (const initial of this.runs) {
         const initialRun = this.run(initial.leadId);
         if (!initialRun || initialRun.status !== "active") continue;
+        await this.holdCancelledDependents(initialRun.leadId);
         for (const initialTask of initialRun.tasks) {
           const run = this.run(initial.leadId);
           if (
@@ -1719,6 +1933,17 @@ export class Orchestrator {
       this.sync();
       return;
     }
+    const blocker =
+      outcome.status === "completed"
+        ? await this.reviewBlocker(leadId, task)
+        : undefined;
+    task = this.run(leadId)?.tasks.find((entry) => entry.id === taskId);
+    if (
+      !task ||
+      task.status !== "running" ||
+      task.activeDispatchId !== dispatchId
+    )
+      return;
     const run = this.run(leadId)!;
     await this.commit({
       ...run,
@@ -1726,10 +1951,10 @@ export class Orchestrator {
         entry.id === taskId
           ? {
               ...entry,
-              status: outcome.status,
+              status: blocker ? "blocked" : outcome.status,
               usageLimit: undefined,
               result: outcome.text.slice(-20_000),
-              error: outcome.error,
+              error: blocker ?? outcome.error,
               recoveryPrompt: undefined,
               delivered: false,
               accepted: false,
@@ -1755,6 +1980,41 @@ export class Orchestrator {
       await this.cleanupUnchangedWorker(leadId, taskId);
     void this.pump();
     this.sync();
+  }
+  /**
+   * Record a finished isolated worker's whole checkout delta, shell edits
+   * included, and hold it against the task's write scope. Returns why the
+   * task cannot be reviewed yet, if it cannot.
+   */
+  private async reviewBlocker(
+    leadId: string,
+    task: OrchestrationTask,
+  ): Promise<string | undefined> {
+    if (task.workspacePolicy === "shared" || !task.workspace) return undefined;
+    const checkout = task.workspace.checkoutCwd;
+    let changed: string[];
+    try {
+      changed = await this.host!.captureWorker(this.run(leadId)!, task);
+    } catch (error) {
+      return `Could not record ${task.title}'s changes for review: ${messageOf(error)}. Its checkout was kept at ${checkout}. Integrate it by hand and cancel the task, or message the worker to narrow its change.`;
+    }
+    const scopes = (task.writeScopes ?? task.scopes).map(orchestrationPathKey);
+    const outside: string[] = [];
+    for (const relative of changed) {
+      let resolved: string;
+      try {
+        resolved = orchestrationPathKey(
+          await this.store.resolvePath(`${checkout}/${relative}`),
+        );
+      } catch {
+        outside.push(relative);
+        continue;
+      }
+      if (!scopes.some((scope) => scopeContains(scope, resolved)))
+        outside.push(relative);
+    }
+    if (!outside.length) return undefined;
+    return `${task.title} changed files outside its assignment: ${listed(outside)}. Its checkout was retained. Retry with corrected project-relative files only if those changes are genuinely required; otherwise message it to revert them, or cancel it.`;
   }
   async cancelTask(leadId: string, taskId: string) {
     const task = this.run(leadId)?.tasks.find((entry) => entry.id === taskId);
@@ -2172,6 +2432,11 @@ export class Orchestrator {
   }
   observe(id: string, event: HarnessEvent) {
     if (event.type !== "tool.started" && event.type !== "tool.updated") return;
+    const lead = this.run(id);
+    if (lead) {
+      this.observeLead(lead, event);
+      return;
+    }
     const run = this.forSession(id);
     const task = run?.tasks.find(
       (entry) => entry.sessionId === id && entry.status === "running",
