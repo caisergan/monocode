@@ -31,6 +31,7 @@ import {
   matchCustomKeybinding,
   loadQuickComposerShortcut,
   loadResumeAfterUsageLimit,
+  loadContinueOnAccountSwitch,
   loadTabAnimationsEnabled,
   RESUME_AFTER_USAGE_LIMIT_DEFAULT,
   NOTES_ENABLED_DEFAULT,
@@ -49,6 +50,7 @@ import {
   type KeybindingOverride,
   saveQuickComposerShortcut,
   saveResumeAfterUsageLimit,
+  saveContinueOnAccountSwitch,
   saveTabAnimationsEnabled,
 } from "./settings";
 import { IS_MAC, MOD, SHIFT } from "../../../platform/tauri/platform";
@@ -114,6 +116,20 @@ function mockLocalStorage() {
     configurable: true,
   });
 }
+
+describe("continue on account switch setting", () => {
+  beforeEach(mockLocalStorage);
+
+  it("defaults to off", () => {
+    expect(loadContinueOnAccountSwitch()).toBe(false);
+  });
+
+  it("persists an on switch", () => {
+    saveContinueOnAccountSwitch(true);
+    expect(localStorage.getItem("monocode.continueOnAccountSwitch")).toBe("1");
+    expect(loadContinueOnAccountSwitch()).toBe(true);
+  });
+});
 
 describe("resume after usage limit setting", () => {
   beforeEach(mockLocalStorage);

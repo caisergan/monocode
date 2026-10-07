@@ -304,6 +304,7 @@ pub fn run() {
             agent_sessions::agent_list_sessions,
             agent_sessions::agent_read_session,
             agent_sessions::agent_session_stat,
+            agent_sessions::agent_copy_session_to_account,
             automations::automations_list,
             automations::automations_upsert,
             automations::automations_delete,

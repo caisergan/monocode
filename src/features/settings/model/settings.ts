@@ -385,6 +385,13 @@ export const SETTINGS_INDEX: SettingsEntry[] = [
       "account sign in login rename remove delete credentials profile usage limit quota exhausted",
   },
   {
+    id: "continue-on-account-switch",
+    section: "providers",
+    label: "Continue conversations on a new account",
+    keywords:
+      "account switch move conversation resume session history keep pinned limit",
+  },
+  {
     id: "show-remaining-usage",
     section: "providers",
     label: "Show remaining usage",
@@ -560,6 +567,8 @@ const FOLLOW_UP_BEHAVIOR_KEY = "monocode.followUpBehavior";
 
 const RESUME_AFTER_USAGE_LIMIT_KEY = "monocode.resumeAfterUsageLimit";
 
+const CONTINUE_ON_ACCOUNT_SWITCH_KEY = "monocode.continueOnAccountSwitch";
+
 const COMPOSER_EFFORT_VISIBLE_KEY = "monocode.composerEffortVisible";
 
 const MODEL_CONTROLS_KEY = "monocode.modelControls";
@@ -604,6 +613,20 @@ export function loadResumeAfterUsageLimit(): boolean {
 
 export function saveResumeAfterUsageLimit(value: boolean) {
   writeFlag(RESUME_AFTER_USAGE_LIMIT_KEY, value);
+}
+
+export const CONTINUE_ON_ACCOUNT_SWITCH_DEFAULT = false;
+
+/** Switching provider accounts moves the open conversation to the new one. */
+export function loadContinueOnAccountSwitch(): boolean {
+  return (
+    readFlag(CONTINUE_ON_ACCOUNT_SWITCH_KEY) ??
+    CONTINUE_ON_ACCOUNT_SWITCH_DEFAULT
+  );
+}
+
+export function saveContinueOnAccountSwitch(value: boolean) {
+  writeFlag(CONTINUE_ON_ACCOUNT_SWITCH_KEY, value);
 }
 
 export type FileTabMode = "pane" | "workspace";
