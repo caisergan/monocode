@@ -17,6 +17,7 @@ const pty = vi.hoisted(() => ({
   unsubscribe: vi.fn(),
   lines: [] as string[],
 }));
+const xterm = vi.hoisted(() => ({ options: [] as { fontFamily?: string }[] }));
 
 vi.mock("../../../platform/tauri/pty", () => ({
   spawnPty: pty.spawnPty,
@@ -32,6 +33,9 @@ vi.mock("../../../platform/tauri/pty", () => ({
 vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
 vi.mock("@xterm/xterm", () => ({
   Terminal: class {
+    constructor(options: { fontFamily?: string }) {
+      xterm.options.push(options);
+    }
     cols = 80;
     rows = 24;
     element = document.createElement("div");
@@ -115,6 +119,7 @@ beforeEach(() => {
   );
   pty.lines.length = 0;
   pty.exitHandler = undefined;
+  xterm.options.length = 0;
   for (const fn of [
     pty.spawnPty,
     pty.killPty,
@@ -255,4 +260,15 @@ describe("a persistent terminal", () => {
     expect(pty.spawnPty).not.toHaveBeenCalled();
     expect(pty.killPty).toHaveBeenCalledWith("session:s1");
   });
+});
+
+it("uses the terminal-specific font stack", async () => {
+  const stack = '"Test Nerd Font", monospace';
+  document.documentElement.style.setProperty("--font-terminal", stack);
+  try {
+    await render();
+    expect(xterm.options[0]?.fontFamily).toBe(stack);
+  } finally {
+    document.documentElement.style.removeProperty("--font-terminal");
+  }
 });

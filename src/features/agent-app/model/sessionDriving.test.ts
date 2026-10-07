@@ -80,6 +80,7 @@ function fixture() {
         busy: !!session.busy,
         state: appSessionState(session),
         hasDraft: false,
+        archived: false,
       })),
     ),
     session: vi.fn(async (id) => sessions.get(id) ?? null),
@@ -107,6 +108,12 @@ function fixture() {
     notes: vi.fn(async () => []),
     note: vi.fn(async () => null),
     saveNote: vi.fn(),
+    stop: vi.fn(async () => {}),
+    remove: vi.fn(async () => {}),
+    isMono: () => false,
+    agentFiles: vi.fn(),
+    readAgentFile: vi.fn(),
+    writeAgentFile: vi.fn(),
   };
   const call = (action: string, input: Record<string, unknown>, id = "r1") =>
     handleAgentApp(source, id, action, input, host) as Promise<
