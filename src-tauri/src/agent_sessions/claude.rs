@@ -46,13 +46,17 @@ const LINK_KEYS: &[&str] = &[
     "isSidechain",
 ];
 
-pub(super) fn root() -> Option<PathBuf> {
+/// The default account's `projects` folder, whether or not it exists yet.
+pub(super) fn default_root() -> Option<PathBuf> {
     let base = std::env::var_os("CLAUDE_CONFIG_DIR")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| dirs_home().map(|home| Path::new(&home).join(".claude")))?;
-    let root = base.join("projects");
-    root.is_dir().then_some(root)
+    Some(base.join("projects"))
+}
+
+pub(super) fn root() -> Option<PathBuf> {
+    default_root().filter(|root| root.is_dir())
 }
 
 /// Claude names a project directory by replacing every non-alphanumeric

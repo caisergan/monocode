@@ -24,13 +24,17 @@ const MAX_DEPTH: usize = 3;
 /// A conversation id is a UUID.
 const ID_LEN: usize = 36;
 
-pub(super) fn root() -> Option<PathBuf> {
+/// The default account's `sessions` folder, whether or not it exists yet.
+pub(super) fn default_root() -> Option<PathBuf> {
     let base = std::env::var_os("CODEX_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
         .or_else(|| dirs_home().map(|home| Path::new(&home).join(".codex")))?;
-    let root = base.join("sessions");
-    root.is_dir().then_some(root)
+    Some(base.join("sessions"))
+}
+
+pub(super) fn root() -> Option<PathBuf> {
+    default_root().filter(|root| root.is_dir())
 }
 
 /// The conversation id at the end of `rollout-<timestamp>-<uuid>.jsonl`.

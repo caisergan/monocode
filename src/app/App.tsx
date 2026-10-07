@@ -323,6 +323,10 @@ import {
 } from "../features/sessions/model/handoff";
 import { requestOutgoingHandoff } from "../features/sessions/model/handoffTurn";
 import {
+  planProviderAccountSwitch,
+  sessionOnProviderAccount,
+} from "../features/sessions/model/accountSwitch";
+import {
   applyBtwHarnessEvent,
   btwTurnHarness,
   buildBtwPrompt,
@@ -429,9 +433,11 @@ import {
   REMOVED_PROVIDER_ACCOUNT_MESSAGE,
   pinnedProviderAccountId,
   providerAccountRemoved,
+  sameProviderAccountId,
   sessionProviderAccountId,
   type ProviderAccountProvider,
 } from "../features/providers/model/providerAccounts";
+import { copyAgentSessionToAccount } from "../platform/tauri/agentSessions";
 import {
   HARNESSES,
   HARNESS_LABEL,
@@ -641,6 +647,7 @@ import {
 import {
   loadCloseToTray,
   loadAutosave,
+  loadContinueOnAccountSwitch,
   loadCollapsedProjectRailMode,
   loadFileTabMode,
   loadLiveAgentsEnabled,
@@ -2378,13 +2385,75 @@ function Workspace({
     [insertBesideActive],
   );
 
+  const moveSessionToProviderAccount = useCallback(
+    async (
+      session: Session,
+      provider: ProviderAccountProvider,
+      accountId: string,
+      plan: { providerSessionId: string; fromAccountId?: string },
+    ) => {
+      const sessionId = session.id;
+      let copied = true;
+      try {
+        await copyAgentSessionToAccount({
+          harness: provider,
+          cwd: sessionWorkCwd(session),
+          sessionId: plan.providerSessionId,
+          fromAccountId: plan.fromAccountId,
+          toAccountId: accountId,
+        });
+      } catch (error) {
+        console.warn("[accounts] transcript copy failed", error);
+        copied = false;
+      }
+      // The old account's process holds the thread; the next turn starts the
+      // new account's.
+      await stopHarnessSession(provider, sessionId);
+      const latest = sessionsRef.current.find((s) => s.id === sessionId);
+      // A turn started or another switch landed while the copy ran.
+      if (
+        !latest ||
+        latest.busy ||
+        latest.providerSessionId !== plan.providerSessionId ||
+        !sameProviderAccountId(
+          latest.providerAccountId,
+          session.providerAccountId,
+        )
+      ) {
+        return;
+      }
+      if (copied) {
+        bindHarnessSession(
+          provider,
+          sessionId,
+          plan.providerSessionId,
+          sessionWorkCwd(latest),
+          accountId,
+          latest.blocks,
+        );
+      } else {
+        void forgetHarnessSession(provider, sessionId);
+      }
+      setSessions((current) =>
+        current.map((s) =>
+          s.id === sessionId ? sessionOnProviderAccount(s, accountId, copied) : s,
+        ),
+      );
+    },
+    [],
+  );
+
   const onSelectProviderAccount = useCallback(
     (provider: ProviderAccountProvider, accountId: string) => {
       if (!active || active.harness !== provider) return;
       const currentId = active.providerAccountId ?? DEFAULT_PROVIDER_ACCOUNT_ID;
       if (currentId === accountId) return;
 
-      if (active.blocks.length === 0 && !active.busy) {
+      const plan = planProviderAccountSwitch(
+        active,
+        loadContinueOnAccountSwitch(),
+      );
+      if (plan.kind === "assign") {
         setSessions((current) =>
           current.map((session) =>
             session.id === active.id
@@ -2392,6 +2461,10 @@ function Workspace({
               : session,
           ),
         );
+        return;
+      }
+      if (plan.kind === "move") {
+        void moveSessionToProviderAccount(active, provider, accountId, plan);
         return;
       }
 
@@ -2413,7 +2486,7 @@ function Workspace({
       setActiveTabId(tab.id);
       setComposerFocused(true);
     },
-    [active, appendTab],
+    [active, appendTab, moveSessionToProviderAccount],
   );
 
   const onOpenWhatsNew = useCallback((version: string) => {

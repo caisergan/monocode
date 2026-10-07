@@ -316,6 +316,132 @@ pub fn agent_session_stat(
     Ok(stat_transcript(source.as_ref(), &cwd, &session_id))
 }
 
+/// Copy a conversation's transcript from one account's config folder to
+/// another's, so the CLI signed in to `to_account_id` can resume it. Both CLIs
+/// find a conversation by its file alone: Claude under `projects/<cwd>/`,
+/// Codex under `sessions/` (it rebuilds its thread index from the rollout).
+/// The source stays in place, so the old account still has its history.
+#[tauri::command(async)]
+pub fn agent_copy_session_to_account(
+    app: AppHandle,
+    harness: Harness,
+    cwd: String,
+    session_id: String,
+    from_account_id: Option<String>,
+    to_account_id: Option<String>,
+) -> Result<(), String> {
+    validate_session_id(&session_id)?;
+    // A removed account's folder is gone; looking it up must not recreate it.
+    let from = match named_account(from_account_id.as_deref()) {
+        Some(account) => transcript_root(
+            harness,
+            crate::harness::provider_account_path(&app, harness.id(), account)?,
+        ),
+        None => default_transcript_root(harness)?,
+    };
+    let to =
+        match crate::harness::provider_account_dir(&app, harness.id(), to_account_id.as_deref())? {
+            Some(dir) => transcript_root(harness, dir),
+            None => default_transcript_root(harness)?,
+        };
+    copy_session(harness, &from, &to, &cwd, &session_id)
+}
+
+fn named_account(account: Option<&str>) -> Option<&str> {
+    account.filter(|id| *id != "default")
+}
+
+fn transcript_root(harness: Harness, account_dir: PathBuf) -> PathBuf {
+    account_dir.join(if harness == Harness::Claude {
+        "projects"
+    } else {
+        "sessions"
+    })
+}
+
+fn default_transcript_root(harness: Harness) -> Result<PathBuf, String> {
+    match harness {
+        Harness::Claude => claude::default_root(),
+        Harness::Codex => codex::default_root(),
+        Harness::Pi | Harness::Omp => None,
+    }
+    .ok_or_else(|| format!("{}'s session folder was not found", harness.label()))
+}
+
+fn copy_session(
+    harness: Harness,
+    from: &Path,
+    to: &Path,
+    cwd: &str,
+    session_id: &str,
+) -> Result<(), String> {
+    if !matches!(harness, Harness::Claude | Harness::Codex) {
+        return Err(format!("{} has no account profiles", harness.label()));
+    }
+    if from == to {
+        return Ok(());
+    }
+    let source = locate(
+        &Source {
+            harness,
+            root: from.to_path_buf(),
+        },
+        cwd,
+        session_id,
+    )
+    .ok_or_else(|| format!("That {} session no longer exists", harness.label()))?;
+    let relative = source
+        .strip_prefix(from)
+        .map_err(|error| error.to_string())?;
+    copy_file(&source, &to.join(relative))?;
+    // Claude keeps a conversation's subagent transcripts and large tool
+    // results in a folder named after it, beside the transcript.
+    if harness == Harness::Claude {
+        let extras = source.with_extension("");
+        if extras.is_dir() {
+            copy_dir(&extras, &to.join(relative).with_extension(""))?;
+        }
+    }
+    Ok(())
+}
+
+/// Write through a temporary file so a CLI never reads a half-copied
+/// transcript. The source is the conversation's latest state, so it replaces
+/// an older copy left by an earlier switch.
+fn copy_file(source: &Path, target: &Path) -> Result<(), String> {
+    let parent = target
+        .parent()
+        .ok_or_else(|| format!("Invalid transcript path {}", target.display()))?;
+    std::fs::create_dir_all(parent)
+        .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+    let name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("transcript");
+    let partial = parent.join(format!(".{name}.monocode-copy"));
+    std::fs::copy(source, &partial)
+        .and_then(|_| std::fs::rename(&partial, target))
+        .map_err(|error| {
+            let _ = std::fs::remove_file(&partial);
+            format!("Could not copy {}: {error}", source.display())
+        })
+}
+
+fn copy_dir(source: &Path, target: &Path) -> Result<(), String> {
+    let entries = std::fs::read_dir(source)
+        .map_err(|error| format!("Could not read {}: {error}", source.display()))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|error| error.to_string())?;
+        if file_type.is_dir() {
+            copy_dir(&path, &target.join(entry.file_name()))?;
+        } else if file_type.is_file() {
+            copy_file(&path, &target.join(entry.file_name()))?;
+        }
+    }
+    Ok(())
+}
+
 /// Latest listing per owner. The picker lists again on every search pause;
 /// an older listing still reading transcripts gives way to the newer one.
 static LISTING_GENERATIONS: LazyLock<Mutex<HashMap<String, u64>>> =
@@ -870,6 +996,65 @@ mod test_support {
 mod tests {
     use super::test_support::*;
     use super::*;
+
+    #[test]
+    fn copies_a_claude_conversation_with_its_subagents() {
+        let root = temp_root("copy-claude");
+        let (from, to) = (root.join("a/projects"), root.join("b/projects"));
+        let id = "d35a3d8b-d7b9-4b7a-b919-01cd52ccd01a";
+        let project = from.join("-work-app");
+        std::fs::create_dir_all(project.join(id).join("subagents")).unwrap();
+        std::fs::write(project.join(format!("{id}.jsonl")), "latest\n").unwrap();
+        std::fs::write(project.join(id).join("subagents/agent-1.jsonl"), "sub\n").unwrap();
+        // An older copy from an earlier switch is replaced.
+        std::fs::create_dir_all(to.join("-work-app")).unwrap();
+        std::fs::write(to.join(format!("-work-app/{id}.jsonl")), "stale\n").unwrap();
+
+        copy_session(Harness::Claude, &from, &to, "/work/app", id).unwrap();
+
+        let copied = to.join("-work-app");
+        assert_eq!(
+            std::fs::read_to_string(copied.join(format!("{id}.jsonl"))).unwrap(),
+            "latest\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(copied.join(id).join("subagents/agent-1.jsonl")).unwrap(),
+            "sub\n"
+        );
+        assert!(project.join(format!("{id}.jsonl")).is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn copies_a_codex_rollout_to_the_same_dated_folder() {
+        let root = temp_root("copy-codex");
+        let (from, to) = (root.join("a/sessions"), root.join("b/sessions"));
+        let id = "019c822d-4829-7152-9c9a-71f70a3d595c";
+        let name = format!("rollout-2026-02-22T00-48-51-{id}.jsonl");
+        std::fs::create_dir_all(from.join("2026/02/22")).unwrap();
+        std::fs::write(from.join("2026/02/22").join(&name), "{}\n").unwrap();
+
+        copy_session(Harness::Codex, &from, &to, "/work/app", id).unwrap();
+
+        assert!(to.join("2026/02/22").join(&name).is_file());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn copying_a_missing_conversation_fails() {
+        let root = temp_root("copy-missing");
+        let error = copy_session(
+            Harness::Claude,
+            &root.join("a/projects"),
+            &root.join("b/projects"),
+            "/work/app",
+            "d35a3d8b-d7b9-4b7a-b919-01cd52ccd01a",
+        )
+        .unwrap_err();
+        assert!(error.contains("no longer exists"), "{error}");
+        assert!(!root.join("b").exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn rejects_path_like_session_ids() {

@@ -311,6 +311,7 @@ import {
   loadQuickComposerEnabled,
   loadQuickComposerShortcut,
   loadResumeAfterUsageLimit,
+  loadContinueOnAccountSwitch,
   loadTabAnimationsEnabled,
   saveClaudeHooks,
   saveCloseToTray,
@@ -326,6 +327,7 @@ import {
   saveNotesEnabled,
   saveKeybindingOverride,
   saveResumeAfterUsageLimit,
+  saveContinueOnAccountSwitch,
   validateKeybindingShortcut,
   saveQuickComposerEnabled,
   saveQuickComposerShortcut,
@@ -3355,11 +3357,19 @@ function ProviderAccountsSettings() {
   const [editor, setEditor] = useState<AccountEditor | null>(null);
   const [working, setWorking] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [continueOnSwitch, setContinueOnSwitch] = useState(
+    loadContinueOnAccountSwitch,
+  );
 
   useEffect(
     () => subscribeProviderAccounts(() => setVersion((value) => value + 1)),
     [],
   );
+
+  const onContinueOnSwitch = (next: boolean) => {
+    saveContinueOnAccountSwitch(next);
+    setContinueOnSwitch(next);
+  };
 
   const startAdd = (provider: ProviderAccountProvider) => {
     setError(null);
@@ -3601,6 +3611,17 @@ function ProviderAccountsSettings() {
           {error}
         </p>
       ) : null}
+      <Row
+        id="continue-on-account-switch"
+        label="Continue conversations on a new account"
+        description="Switching accounts from the usage control moves the open conversation to the account you pick, history included. Off keeps each conversation on the account that started it and opens a new one instead."
+      >
+        <Toggle
+          label="Continue conversations on a new account"
+          on={continueOnSwitch}
+          onChange={onContinueOnSwitch}
+        />
+      </Row>
     </Group>
   );
 }

@@ -112,3 +112,24 @@ export function statAgentSession(
     ...(providerAccountId ? { providerAccountId } : {}),
   });
 }
+
+/**
+ * Copy a conversation's transcript from one account's config folder to
+ * another's, so that account's CLI can resume it. Rejects when the source
+ * transcript is gone (a removed account, say).
+ */
+export function copyAgentSessionToAccount(input: {
+  harness: "claude" | "codex";
+  cwd: string;
+  sessionId: string;
+  fromAccountId?: string;
+  toAccountId?: string;
+}): Promise<void> {
+  return invoke<void>("agent_copy_session_to_account", {
+    harness: input.harness,
+    cwd: input.cwd,
+    sessionId: input.sessionId,
+    ...(input.fromAccountId ? { fromAccountId: input.fromAccountId } : {}),
+    ...(input.toAccountId ? { toAccountId: input.toAccountId } : {}),
+  });
+}
