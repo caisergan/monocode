@@ -111,7 +111,7 @@ const ACTIONS: [&str; 15] = [
     "list", "delegate", "get", "steer", "message", "retry", "cancel", "wait", "review", "finish",
     "respond", "answer", "pause", "hold", "release",
 ];
-const APP_ACTIONS: [&str; 17] = [
+const APP_ACTIONS: [&str; 36] = [
     "models.list",
     "sessions.list",
     "sessions.read",
@@ -122,6 +122,9 @@ const APP_ACTIONS: [&str; 17] = [
     "sessions.answer",
     "sessions.draft",
     "sessions.start",
+    "sessions.stop",
+    "sessions.archive",
+    "sessions.delete",
     "worktrees.list",
     "worktrees.create",
     "folders.list",
@@ -129,6 +132,22 @@ const APP_ACTIONS: [&str; 17] = [
     "notes.list",
     "notes.read",
     "notes.write",
+    "artifacts.list",
+    "artifacts.read",
+    "artifacts.write",
+    "soul.read",
+    "soul.update",
+    "memory.read",
+    "memory.search",
+    "memory.add",
+    "memory.replace",
+    "memory.remove",
+    "habits.list",
+    "habits.add",
+    "habits.update",
+    "habits.run",
+    "habits.remove",
+    "chat.card",
 ];
 const APP_USAGE: &str = r#"MonoCode app access — use in a thread enabled by /operator.
 
@@ -138,9 +157,14 @@ Session state is one of idle, working, blocked (an approval or question is
 waiting; needsInput says which) or usageLimited. Wherever a sessionId is
 taken, a name you gave with sessions.start works too.
 
+A Mono works on several projects: add "project":"<path or name>" to the
+sessions.*, worktrees.* and folders.* actions to choose which one. It may be
+left out when the Mono has a single project.
+
 Actions:
   models.list    {}  Available providers, models, settings and permission modes.
-  sessions.list  {}  Project sessions with IDs, names, state and hasDraft.
+  sessions.list  {}  Project sessions with IDs, names, state, hasDraft and
+                  archived.
   sessions.read  {"sessionId":"...","before":"<turnId>","limit":3,"maxChars":1200}
                   Read up to 3 recent user/assistant exchanges. Tools and
                   reasoning are omitted. Omit before for the newest page;
@@ -154,8 +178,10 @@ Actions:
                   with what to do instead. "wait" (true, or
                   {"timeoutSeconds":20,"until":["idle"]}, up to 20s) returns
                   once that turn settles, with its final message when idle.
-                  "notify":true wakes this thread with the result if the turn
-                  outlasts this one. Reuse --request-id on retries.
+                  "notify":true (or "notifyOnComplete":true) wakes this
+                  thread with the result if the turn outlasts this one; in a
+                  Mono's chat it asks for a completion report instead, sent
+                  once the Mono is idle. Reuse --request-id on retries.
   sessions.wait  {"sessionId":"...","turnId":"...","until":["idle","blocked"],
                   "timeoutSeconds":20}
                   Block until the session (or that turn) reaches a state in
@@ -188,11 +214,25 @@ Actions:
                   session in this project, including one just created. Set
                   draft:true to save the prompt unsent; no agent turn runs.
                   Otherwise the turn is submitted.
+                  From a Mono, submitted sessions notify it by default when
+                  this turn completes, fails or is cancelled. The Mono reviews
+                  it and reports back once idle. Set notifyOnComplete:false
+                  when the user asks not to receive a report. Drafts do not
+                  notify; notifyOnComplete:true cannot be combined with draft:true.
+                  Sessions monitored during the same Mono turn form one group:
+                  their results arrive together after every session stops.
+                  The Mono reviews the whole group and gives one combined report.
+                  Rejected launches or follow-ups return a CLI error without
+                  a later completion report. When a Mono successfully stops,
+                  archives or deletes a monitored session, its pending report
+                  for that session is dismissed; acknowledge the action in
+                  the current reply. Other sessions' reports are kept.
                   Returns after creation/acceptance, not agent completion;
                   use its ID with folders.move immediately. "name" (lowercase,
                   up to 32 of a-z 0-9 - _) addresses it in later calls.
-                  "notify":true wakes this thread with its result when its
-                  turn settles; or follow it with sessions.wait. Optional model,
+                  Outside a Mono, "notify":true (or "notifyOnComplete":true)
+                  wakes this thread with its result when its turn settles; or
+                  follow it with sessions.wait. Optional model,
                   effort, modelSettings, permission mode and workspace choice
                   use composer values. Set worktreeCwd to a path from
                   worktrees.list to choose a specific existing checkout, or
@@ -201,6 +241,22 @@ Actions:
                   runtimeMode to inherit this
                   session's permission mode; set it to override. Run
                   models.list for allowed IDs. cwd is your project; no attachments.
+  sessions.stop {"sessionId":"..."}
+                  Stop a session's current turn and pause its queued messages.
+                  The conversation and checkout are kept. Idle sessions are
+                  unchanged. Reuse --request-id on retries.
+  sessions.archive {"sessionId":"..."}
+                  Stop the session if running, save its conversation, and
+                  archive it. It can be restored from MonoCode's archive.
+                  Open files, terminals and worktrees are kept.
+                  Reuse --request-id on retries.
+  sessions.delete {"sessionId":"..."}
+                  Stop the session if running and permanently delete its
+                  saved conversation. Open files, terminals and worktrees
+                  are kept. Reuse --request-id on retries.
+                  stop, archive and delete cannot target the calling session,
+                  Mono chats, habit runs or orchestration workers. Sessions
+                  must belong to the chosen project.
   worktrees.list {}  Working copies in this project, with paths and branches.
   worktrees.create {"branch":"feature/name","base":"HEAD","existing":false}
                   Create a worktree on a named new branch from base (a branch
@@ -217,6 +273,58 @@ Actions:
                   to derive it from the body. Use {"id":"...","body":"..."}
                   to edit an existing note; title and tags are also optional.
                   Omitted fields stay unchanged. Reuse --request-id on retries.
+  artifacts.list {"limit":30,"offset":0}  Mono or habit only. Saved artifact titles.
+  artifacts.read {"id":"..."}  Full content of one artifact.
+  artifacts.write {"kind":"document","title":"PR review",
+                   "summary":"Merge queue and blockers",
+                   "body":"<complete Markdown>"}
+                  Save a document and attach its card below your chat reply.
+                  Artifacts are separate from Notes. Currently only kind "document"
+                  (Markdown) is supported. Reply briefly; do not
+                  repeat the document body in chat. Returns metadata only.
+                  To revise, pass {"id":"...","body":"<updated Markdown>"};
+                  omitted title stays unchanged. Reuse --request-id on retries.
+  soul.read      {}  Mono's own conversation only. Current SOUL.md text and hash.
+  soul.update    {"text":"<complete Markdown>","expectedHash":"<hash from soul.read>"}
+                  Update your standing instructions only when the user asks.
+                  Preserve the other instructions. If the file changed since
+                  soul.read, read it again and reapply the requested changes.
+                  Habit runs and other sessions cannot change a Mono's soul.
+  memory.read    {"topic":"releases"}  Mono only. Without topic:
+                  MEMORY.md, how much of it loads, and the topic names.
+  memory.search  {"query":"release tags","since":"7d"}
+                  Entries across MEMORY.md, topic notes and the archive that
+                  share words with query, best first. since is a date or a
+                  span (24h, 7d, 2w) and keeps dated entries from then on.
+  memory.add     {"fact":"...","topic":"releases","until":"2026-11-01"}
+                  Add one dated entry to MEMORY.md, or to a topic file when
+                  topic is set. until is optional, for facts that expire.
+                  Oldest entries move to the archive when MEMORY.md is full.
+  memory.replace {"find":"text of the old entry","fact":"...","topic":"..."}
+                  Strike the one entry containing find through and add fact.
+  memory.remove  {"find":"text of the entry","topic":"..."}
+                  Delete the one entry containing find, for a wrong entry.
+  habits.list    {}  Mono only. Your habits: what each does, when it runs
+                  next, and how its last run went.
+  habits.add     {"name":"Morning CI check","instructions":"...",
+                  "schedule":{"kind":"weekdays","time":"09:00"}}
+                  Add only after the user agreed to it in this chat. kind is
+                  hourly (with "minute"), daily, weekdays or weekly (with
+                  "dayOfWeek", 0 = Sunday); time is local 24-hour HH:MM.
+                  Each run is a hidden session that posts to this chat only
+                  when it has something worth saying.
+  habits.update  {"id":"...","name":"...","instructions":"...",
+                  "schedule":{...},"enabled":false}  Change or pause one.
+  habits.run     {"id":"..."}  Run one within a minute, to try it out.
+  habits.remove  {"id":"..."}
+  chat.card      Mono or habit only. Post a card to the Mono's chat:
+                  {"type":"pr","repo":"owner/repo","number":123,"note":"..."}
+                  {"type":"session","sessionId":"...","note":"..."}
+                  {"type":"choices","options":["First choice","Second choice"]}
+                  {"type":"habit","name":"...","instructions":"...",
+                   "schedule":{"kind":"daily","time":"09:00"}}
+                  choices accepts 1–4 options. A habit card is a suggestion;
+                  the user must start it before it is scheduled.
 
 The output is one JSON line: {"ok":true,"result":...} or {"ok":false,"error":"..."}.
 Use --input - to pass JSON on stdin. Never print MonoCode credentials.
@@ -597,12 +705,16 @@ mod tests {
             "sessions.respond",
             "sessions.answer",
             "sessions.draft",
+            "sessions.stop",
+            "sessions.archive",
+            "sessions.delete",
         ] {
             assert!(matches!(
                 parse_args_for(&args(&[action, "--json", r#"{"sessionId":"other"}"#]), true),
                 Ok(Parsed::Call(_, _, _))
             ));
             assert!(app_help().contains(action));
+            assert!(parse_args_for(&args(&[action]), false).is_err());
         }
         assert!(app_help().contains("draft:true"));
         assert!(app_help().contains("inherit this"));
@@ -612,13 +724,21 @@ mod tests {
         );
         assert!(app_help().contains("notes.read"));
         assert!(app_help().contains("notes.write"));
-        for action in ["worktrees.list", "worktrees.create"] {
+        for action in [
+            "worktrees.list",
+            "worktrees.create",
+            "artifacts.list",
+            "artifacts.read",
+            "artifacts.write",
+        ] {
             assert!(matches!(
                 parse_args_for(&args(&[action]), true),
                 Ok(Parsed::Call(_, _, _))
             ));
             assert!(app_help().contains(action));
         }
+        assert!(app_help().contains(r#""kind":"document""#));
+        assert!(app_help().contains("Artifacts are separate from Notes"));
     }
 
     #[test]
@@ -628,5 +748,51 @@ mod tests {
         assert!(denied.get("requestId").is_none());
         let uncertain = with_retry_hint(json!({"ok":false,"error":"timeout"}), "id-1");
         assert_eq!(uncertain["retryWith"], "--request-id id-1");
+    }
+
+    #[test]
+    fn app_mode_accepts_chat_cards_and_documents_every_type() {
+        for input in [
+            r#"{"type":"pr","repo":"owner/repo","number":123}"#,
+            r#"{"type":"session","sessionId":"other"}"#,
+            r#"{"type":"choices","options":["Review","Ship"]}"#,
+            r#"{"type":"habit","name":"Check CI","instructions":"Check CI","schedule":{"kind":"daily","time":"09:00"}}"#,
+        ] {
+            assert!(matches!(
+                parse_args_for(&args(&["chat.card", "--json", input]), true),
+                Ok(Parsed::Call(action, parsed_input, _))
+                    if action == "chat.card"
+                        && parsed_input == serde_json::from_str::<Value>(input).unwrap()
+            ));
+        }
+        assert!(parse_args_for(&args(&["chat.card"]), false).is_err());
+        let help = app_help();
+        assert!(help.contains("chat.card"));
+        for kind in ["pr", "session", "choices", "habit"] {
+            assert!(help.contains(&format!(r#""type":"{kind}""#)));
+        }
+    }
+
+    #[test]
+    fn app_mode_exposes_soul_actions_and_documents_requested_updates() {
+        for (action, input) in [
+            ("soul.read", r#"{}"#),
+            (
+                "soul.update",
+                r##"{"text":"# Soul\n","expectedHash":"old-hash"}"##,
+            ),
+        ] {
+            assert!(matches!(
+                parse_args_for(&args(&[action, "--json", input]), true),
+                Ok(Parsed::Call(parsed_action, parsed_input, _))
+                    if parsed_action == action
+                        && parsed_input == serde_json::from_str::<Value>(input).unwrap()
+            ));
+            assert!(parse_args_for(&args(&[action]), false).is_err());
+            assert!(app_help().contains(action));
+        }
+        assert!(app_help().contains("only when the user asks"));
+        assert!(app_help().contains("expectedHash"));
+        assert!(app_help().contains("Habit runs and other sessions cannot change"));
     }
 }

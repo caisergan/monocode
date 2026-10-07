@@ -26,16 +26,26 @@ import {
   type Note,
   type NoteUpsert,
 } from "../../notes";
+import type {
+  Artifact,
+  ArtifactCard,
+  ArtifactKind,
+  ArtifactUpsert,
+} from "../../artifacts/artifacts";
 import type { QuickLaunch } from "../../quick-composer/model/quickComposer";
 import type { Worktree, Worktrees } from "../../source-control/model/worktrees";
-import { pathKey } from "../../../shared/lib/paths";
+import { pathKey, projectName } from "../../../shared/lib/paths";
 import type { SplitDir } from "../../workspace/model/layout";
 import { consumeOperatorCommand } from "../../sessions/model/operatorCommand";
 import { pendingInputForSession } from "../../notifications/model/approvalToast";
 import type { ApprovalDecision } from "../../../integrations/harness/core/types";
 import type { UserQuestionReply } from "../../sessions/model/userQuestion";
 import { questionAnswers } from "../../orchestration/model/orchestration";
-import { sessionConversationPage, sessionTurn } from "./sessionConversation";
+import {
+  sessionConversationPage,
+  sessionTurn,
+  type SessionReadOptions,
+} from "./sessionConversation";
 import type { OperatorWatch } from "./operatorWatches";
 import {
   APP_SESSION_STATES,
@@ -46,6 +56,39 @@ import {
   turnState,
   type AppSessionState,
 } from "./sessionState";
+import {
+  CARD_FIELDS,
+  parseCard,
+  type MonoCard,
+} from "../../monos/model/monoCards";
+import {
+  HABITS_MAX,
+  checkHabitsNow,
+  habitRunningSince,
+  habitSchedule,
+  habitScheduleLabel,
+  newHabit,
+  nextHabitRunAt,
+  type Habit,
+} from "../../monos/model/monoHabits";
+import {
+  memoryWithinBudget,
+  MonoFileConflict,
+  type AgentFilePath,
+  type MonoFiles,
+} from "../../monos/model/monoFiles";
+import {
+  addMemoryEntry,
+  archiveMemoryEntries,
+  fitMemoryBudget,
+  memoryDate,
+  memoryEntry,
+  removeMemoryEntry,
+  searchMemory,
+  sinceDate,
+  supersedeMemoryEntry,
+  topicName,
+} from "../../monos/model/monoMemory";
 
 export type AppSessionListing = {
   id: string;
@@ -55,6 +98,7 @@ export type AppSessionListing = {
   busy: boolean;
   state: AppSessionState;
   hasDraft: boolean;
+  archived: boolean;
 };
 
 export type AppSessionPlacement = {
@@ -67,13 +111,16 @@ export type AgentAppHost = {
     launch: QuickLaunch,
     id: string,
     placement?: AppSessionPlacement,
+    notifyMonoId?: string,
   ): Promise<void>;
   sessions(cwd: string): Promise<AppSessionListing[]>;
   session(id: string): Promise<Session | null>;
+  readConversation?(session: Session, options: SessionReadOptions): Promise<ReturnType<typeof sessionConversationPage>>;
   send(
     id: string,
     prompt: string,
     requestId: string,
+    notifyMonoId?: string,
   ): Promise<{ alreadySubmitted: boolean; turnId?: string }>;
   /** Guide a running turn without discarding its work. */
   steer(id: string, prompt: string): Promise<void>;
@@ -92,6 +139,8 @@ export type AgentAppHost = {
     prompt: string,
     requestId: string,
   ): Promise<{ alreadySaved: boolean; draft: boolean }>;
+  stop(id: string): Promise<void>;
+  remove(id: string, mode: "archive" | "delete"): Promise<void>;
   worktrees(cwd: string): Promise<Worktrees>;
   createWorktree(
     cwd: string,
@@ -102,21 +151,70 @@ export type AgentAppHost = {
   notes(): Promise<Note[]>;
   note(id: string): Promise<Note | null>;
   saveNote(note: NoteUpsert): Promise<Note>;
+  artifacts?(): Promise<Artifact[]>;
+  artifact?(id: string): Promise<Artifact | null>;
+  saveArtifact?(artifact: ArtifactUpsert): Promise<Artifact>;
+  postArtifact?(sourceSessionId: string, card: ArtifactCard): void | Promise<void>;
+  /** Whether the session is a Mono's own conversation, which owns memory. */
+  isMono(sessionId: string): boolean;
+  /**
+   * The Mono a session works for: its own conversation or one of its habit
+   * runs. Its projects are the ones it may name with "project".
+   */
+  monoOf?(sessionId: string): {
+    id: string;
+    projects: readonly string[];
+    showStartedSessionsInSidebar?: boolean;
+  } | undefined;
+  /** A hidden run of one of a Mono's habits: it may remember, not schedule. */
+  isHabitRun?(sessionId: string): boolean;
+  /** Puts a card in the Mono's chat, or holds it for a habit run's report. */
+  postCard?(sourceSessionId: string, card: MonoCard): void;
+  habits?: {
+    load(monoId: string): Promise<Habit[]>;
+    update<T>(
+      monoId: string,
+      change: (habits: Habit[]) => { habits: Habit[]; result: T },
+    ): Promise<T>;
+  };
+  agentFiles(monoId: string): Promise<MonoFiles>;
+  readAgentFile(
+    monoId: string,
+    path: AgentFilePath,
+  ): Promise<{ text: string | null; hash: string }>;
+  /** Throws `MonoFileConflict` when the file moved past `hash`. */
+  writeAgentFile(
+    monoId: string,
+    path: AgentFilePath,
+    text: string,
+    hash: string,
+  ): Promise<string>;
+  /** The clock entries are dated by; tests pin it. */
+  now?(): Date;
 };
 
 const FIELDS = new Map<string, readonly string[]>([
   ["models.list", []],
-  ["sessions.list", []],
-  ["sessions.read", ["sessionId", "turnId", "before", "limit", "maxChars"]],
-  ["sessions.send", ["sessionId", "prompt", "wait", "notify"]],
+  ["sessions.list", ["project"]],
+  [
+    "sessions.read",
+    ["sessionId", "turnId", "before", "limit", "maxChars", "project"],
+  ],
+  [
+    "sessions.send",
+    ["sessionId", "prompt", "wait", "notify", "notifyOnComplete", "project"],
+  ],
   [
     "sessions.wait",
-    ["sessionId", "sessionIds", "turnId", "until", "timeoutSeconds"],
+    ["sessionId", "sessionIds", "turnId", "until", "timeoutSeconds", "project"],
   ],
-  ["sessions.steer", ["sessionId", "prompt"]],
-  ["sessions.respond", ["sessionId", "requestId", "decision"]],
-  ["sessions.answer", ["sessionId", "requestId", "answers", "skip"]],
-  ["sessions.draft", ["sessionId", "prompt"]],
+  ["sessions.steer", ["sessionId", "prompt", "project"]],
+  ["sessions.respond", ["sessionId", "requestId", "decision", "project"]],
+  ["sessions.answer", ["sessionId", "requestId", "answers", "skip", "project"]],
+  ["sessions.draft", ["sessionId", "prompt", "project"]],
+  ["sessions.stop", ["sessionId", "project"]],
+  ["sessions.archive", ["sessionId", "project"]],
+  ["sessions.delete", ["sessionId", "project"]],
   [
     "sessions.start",
     [
@@ -135,15 +233,33 @@ const FIELDS = new Map<string, readonly string[]>([
       "worktreeCwd",
       "placement",
       "besideSessionId",
+      "project",
+      "notifyOnComplete",
     ],
   ],
-  ["worktrees.list", []],
-  ["worktrees.create", ["branch", "base", "existing"]],
-  ["folders.list", []],
-  ["folders.move", ["sessionId", "folderId", "newFolderName"]],
+  ["worktrees.list", ["project"]],
+  ["worktrees.create", ["branch", "base", "existing", "project"]],
+  ["folders.list", ["project"]],
+  ["folders.move", ["sessionId", "folderId", "newFolderName", "project"]],
   ["notes.list", ["limit", "offset"]],
   ["notes.read", ["id"]],
   ["notes.write", ["id", "title", "body", "tags"]],
+  ["artifacts.list", ["kind", "limit", "offset"]],
+  ["artifacts.read", ["id"]],
+  ["artifacts.write", ["id", "kind", "title", "body", "summary"]],
+  ["soul.read", []],
+  ["soul.update", ["text", "expectedHash"]],
+  ["memory.read", ["topic"]],
+  ["memory.search", ["query", "since"]],
+  ["memory.add", ["fact", "topic", "until"]],
+  ["memory.replace", ["find", "fact", "topic", "until"]],
+  ["memory.remove", ["find", "topic"]],
+  ["habits.list", []],
+  ["habits.add", ["name", "instructions", "schedule"]],
+  ["habits.update", ["id", "name", "instructions", "schedule", "enabled"]],
+  ["habits.run", ["id"]],
+  ["habits.remove", ["id"]],
+  ["chat.card", [...CARD_FIELDS]],
 ]);
 
 function fields(action: string, input: Record<string, unknown>) {
@@ -167,6 +283,39 @@ function agentPrompt(value: unknown): string {
   if (consumeOperatorCommand(prompt).matched)
     throw new Error("App calls cannot enable /operator in another session");
   return prompt;
+}
+
+/**
+ * How the caller hears that a turn it sent has finished. `notify` and
+ * `notifyOnComplete` are the same request: a Mono gets a report in its chat
+ * once it is idle, and any other session is woken in its thread.
+ */
+function completionTarget(
+  source: Session,
+  input: Record<string, unknown>,
+  host: AgentAppHost,
+  defaultForMono = false,
+): { monoId?: string; watch: boolean } {
+  for (const field of ["notify", "notifyOnComplete"] as const)
+    if (input[field] !== undefined && typeof input[field] !== "boolean")
+      throw new Error(`${field} must be a boolean`);
+  if (
+    input.notify !== undefined &&
+    input.notifyOnComplete !== undefined &&
+    input.notify !== input.notifyOnComplete
+  )
+    throw new Error("notify and notifyOnComplete disagree; pass one of them");
+  const requested = (input.notifyOnComplete ?? input.notify) as
+    | boolean
+    | undefined;
+  const isMono = host.isMono(source.id);
+  if (!(requested ?? (defaultForMono && isMono && !input.draft)))
+    return { watch: false };
+  if (input.draft === true)
+    throw new Error(
+      "An unsent draft cannot send a completion notification; omit draft:true",
+    );
+  return isMono ? { monoId: source.id, watch: false } : { watch: true };
 }
 
 function optionalString(
@@ -195,22 +344,70 @@ function noteTags(value: unknown): string[] {
   return normalizeNoteTags(value as string[]);
 }
 
-function requireProject(source: Session): string {
-  if (!looksLikeProject(source.cwd))
-    throw new Error("Choose a project folder in this session first");
-  return source.cwd;
+/**
+ * The project an action works in. A session works in its own; a Mono works on
+ * several, so it names one with "project" (its path or name), and may leave it
+ * out when it has one project or is in one of its own.
+ */
+function requireProject(
+  source: Session,
+  input: Record<string, unknown>,
+  host: AgentAppHost,
+): string {
+  const mono = host.monoOf?.(source.id);
+  const named = optionalString(input.project, "project", 4096);
+  if (!mono) {
+    if (named) throw new Error("project is only for a Mono");
+    if (!looksLikeProject(source.cwd))
+      throw new Error("Choose a project folder in this session first");
+    return source.cwd;
+  }
+  const choices = () =>
+    mono.projects.length
+      ? mono.projects.map((path) => `${projectName(path)} (${path})`).join(", ")
+      : "none yet; the user adds them from your details panel";
+  if (named) {
+    const byPath = mono.projects.find(
+      (path) => pathKey(path) === pathKey(named),
+    );
+    const byName = mono.projects.filter(
+      (path) => projectName(path) === named,
+    );
+    const match = byPath ?? (byName.length === 1 ? byName[0] : undefined);
+    if (!match) throw new Error(`Not one of your projects. Yours: ${choices()}`);
+    return match;
+  }
+  const own = mono.projects.find(
+    (path) => pathKey(path) === pathKey(source.cwd),
+  );
+  if (own) return own;
+  if (mono.projects.length === 1) return mono.projects[0];
+  throw new Error(`Pass "project" to choose one. Yours: ${choices()}`);
+}
+
+/** A Mono's chat lives outside its projects; project access follows its roster. */
+export function canAccessAgentAppProject(
+  source: Session,
+  cwd: string,
+  monoProjects?: readonly string[],
+): boolean {
+  return (monoProjects ?? [source.cwd]).some(
+    (project) => pathKey(project) === pathKey(cwd),
+  );
 }
 
 async function projectSession(
   source: Session,
   id: string,
+  input: Record<string, unknown>,
   host: AgentAppHost,
 ): Promise<Session> {
-  const cwd = requireProject(source);
+  const cwd = requireProject(source, input, host);
   if (!(await host.sessions(cwd)).some((session) => session.id === id))
     throw new Error("Session was not found in this project");
   const target = await host.session(id);
-  if (!target) throw new Error("Session was not found in this project");
+  if (!target || pathKey(target.cwd) !== pathKey(cwd))
+    throw new Error("Session was not found in this project");
   return target;
 }
 
@@ -239,26 +436,29 @@ const startedBy = (source: Session, id: string) =>
 async function resolveSessionRef(
   source: Session,
   ref: string,
+  input: Record<string, unknown>,
   host: AgentAppHost,
 ): Promise<string> {
   if (ref === source.id || !SESSION_NAME.test(ref)) return ref;
   const named = namedSessionId(source, ref);
-  const listed = await host.sessions(requireProject(source));
+  const listed = await host.sessions(requireProject(source, input, host));
   return listed.some((session) => session.id === named) ? named : ref;
 }
 
 /** Resolve a session ID, or a name this operator gave one of its sessions. */
 async function targetSession(
   source: Session,
-  value: unknown,
+  input: Record<string, unknown>,
   host: AgentAppHost,
+  value: unknown = input.sessionId,
   field = "sessionId",
 ): Promise<Session> {
   const ref = requiredString(value, field, 256);
   if (ref === source.id) return source;
   return projectSession(
     source,
-    await resolveSessionRef(source, ref, host),
+    await resolveSessionRef(source, ref, input, host),
+    input,
     host,
   );
 }
@@ -364,8 +564,9 @@ export function notePreview(body: string): string {
 function startLaunch(
   source: Session,
   input: Record<string, unknown>,
+  host: AgentAppHost,
 ): QuickLaunch {
-  const cwd = requireProject(source);
+  const cwd = requireProject(source, input, host);
   const prompt = agentPrompt(input.prompt);
   const draft = input.draft ?? false;
   if (typeof draft !== "boolean") throw new Error("draft must be a boolean");
@@ -406,9 +607,15 @@ function startLaunch(
   const worktreeCwd = optionalString(input.worktreeCwd, "worktreeCwd");
   if (worktreeCwd && workspaceMode !== "current")
     throw new Error("worktreeCwd requires workspaceMode current");
+  const currentWorktree =
+    worktreeCwd ||
+    (pathKey(cwd) === pathKey(source.cwd) ? source.worktreeCwd : undefined);
   return {
     cwd,
     prompt,
+    ...(host.monoOf?.(source.id)?.showStartedSessionsInSidebar === false
+      ? { sidebarHidden: true }
+      : {}),
     ...(draft ? { draft: true } : {}),
     harness: chosenHarness,
     model: model.id,
@@ -419,13 +626,457 @@ function startLaunch(
       ...requestedSettings,
     }),
     runtimeMode: runtimeMode as Session["runtimeMode"],
-    reveal,
+    // A Mono delegates work without navigating the user out of their chat.
+    reveal: host.isMono(source.id) ? false : reveal,
     workspaceMode,
-    ...(workspaceMode === "current" && (worktreeCwd || source.worktreeCwd)
-      ? { worktreeCwd: worktreeCwd || source.worktreeCwd }
+    ...(workspaceMode === "current" && currentWorktree
+      ? { worktreeCwd: currentWorktree }
       : {}),
     ...(worktreeBase ? { worktreeBase } : {}),
   };
+}
+
+function memoryPath(topic: unknown): AgentFilePath {
+  return topic === undefined
+    ? "MEMORY.md"
+    : `memory/${topicName(requiredString(topic, "topic", 80))}.md`;
+}
+
+async function handleSoul(
+  source: Session,
+  action: string,
+  input: Record<string, unknown>,
+  host: AgentAppHost,
+): Promise<unknown> {
+  const monoId = host.isMono(source.id)
+    ? host.monoOf?.(source.id)?.id
+    : undefined;
+  if (!monoId)
+    throw new Error("Only a Mono's own conversation can manage its soul");
+  if (action === "soul.read") {
+    const files = await host.agentFiles(monoId);
+    return { file: "SOUL.md", text: files.soul, hash: files.soulHash };
+  }
+  if (typeof input.text !== "string" || input.text.length > 240_000)
+    throw new Error("text must be a string under 240000 characters");
+  const expectedHash = requiredString(input.expectedHash, "expectedHash", 128);
+  try {
+    const hash = await host.writeAgentFile(
+      monoId,
+      "SOUL.md",
+      input.text,
+      expectedHash,
+    );
+    return { file: "SOUL.md", updated: true, hash };
+  } catch (error) {
+    if (error instanceof MonoFileConflict)
+      throw new Error(
+        "SOUL.md changed since you read it. Run soul.read and reapply the user's requested changes to the current text before calling soul.update again.",
+      );
+    throw error;
+  }
+}
+
+/**
+ * Read, change and write one memory file over the version it read, again
+ * from the top when the user saved the same file in between.
+ */
+async function editAgentFile<T>(
+  host: AgentAppHost,
+  monoId: string,
+  path: AgentFilePath,
+  edit: (text: string) => { text: string; result: T },
+): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    const current = await host.readAgentFile(monoId, path);
+    const fallback =
+      current.text == null && path !== "MEMORY.md"
+        ? `# ${path.slice("memory/".length, -".md".length)}\n\n`
+        : "";
+    const next = edit(current.text ?? fallback);
+    try {
+      if (next.text !== (current.text ?? ""))
+        await host.writeAgentFile(monoId, path, next.text, current.hash);
+      return next.result;
+    } catch (error) {
+      if (!(error instanceof MonoFileConflict) || attempt >= 2)
+        throw error;
+    }
+  }
+}
+
+/**
+ * Keeps MEMORY.md within what loads. The archive is written first, so a line
+ * is never out of one file without already being in the other. If the user
+ * saved MEMORY.md in between, the trim waits for the next write.
+ */
+async function keepMemoryInBudget(
+  host: AgentAppHost,
+  monoId: string,
+  keep: string,
+  date: string,
+): Promise<string[]> {
+  const memory = await host.readAgentFile(monoId, "MEMORY.md");
+  const fitted = fitMemoryBudget(memory.text ?? "", keep, date);
+  if (!fitted.moved.length) return [];
+  await editAgentFile(host, monoId, "memory/archive.md", (archive) => ({
+    text: archiveMemoryEntries(archive, fitted.moved, date),
+    result: undefined,
+  }));
+  try {
+    await host.writeAgentFile(monoId, "MEMORY.md", fitted.text, memory.hash);
+  } catch (error) {
+    if (!(error instanceof MonoFileConflict)) throw error;
+    return [];
+  }
+  return fitted.moved;
+}
+
+async function handleMemory(
+  source: Session,
+  action: string,
+  input: Record<string, unknown>,
+  host: AgentAppHost,
+): Promise<unknown> {
+  const monoId = host.monoOf?.(source.id)?.id;
+  if (!monoId) throw new Error("Memory belongs to the Mono's conversation");
+  const path = memoryPath(input.topic);
+  const date = memoryDate(host.now?.() ?? new Date());
+  const until = optionalString(input.until, "until", 10);
+  const report = async (result: Record<string, unknown>, keep?: string) => {
+    const moved =
+      path === "MEMORY.md" && keep
+        ? await keepMemoryInBudget(host, monoId, keep, date)
+        : [];
+    return {
+      file: path,
+      ...result,
+      ...(moved.length
+        ? { movedToArchive: moved.length, moved: moved.slice(0, 5) }
+        : {}),
+    };
+  };
+  switch (action) {
+    case "memory.search": {
+      const query =
+        input.query === undefined
+          ? ""
+          : requiredString(input.query, "query", 500);
+      const since =
+        input.since === undefined
+          ? undefined
+          : sinceDate(
+              requiredString(input.since, "since", 20),
+              host.now?.() ?? new Date(),
+            );
+      const files = await host.agentFiles(monoId);
+      const paths: AgentFilePath[] = [
+        "MEMORY.md",
+        ...files.topics.map((topic) => `memory/${topic}.md` as const),
+        "memory/archive.md",
+      ];
+      const texts = await Promise.all(
+        paths.map(async (file) => ({
+          file,
+          text:
+            file === "MEMORY.md"
+              ? files.memory
+              : ((await host.readAgentFile(monoId, file)).text ?? ""),
+        })),
+      );
+      const hits = searchMemory(texts, query, { since });
+      return hits.length
+        ? { hits }
+        : { hits, note: "Nothing in memory matches. It may never have been saved." };
+    }
+    case "memory.read": {
+      if (path !== "MEMORY.md") {
+        const topic = await host.readAgentFile(monoId, path);
+        if (topic.text == null) throw new Error("No such memory topic");
+        return { file: path, text: topic.text };
+      }
+      const files = await host.agentFiles(monoId);
+      const budget = memoryWithinBudget(files.memory);
+      return {
+        file: path,
+        text: files.memory,
+        lines: budget.lines,
+        notLoaded: budget.droppedLines,
+        topics: files.topics,
+      };
+    }
+    case "memory.add": {
+      const entry = memoryEntry(requiredString(input.fact, "fact"), date, until);
+      const added = await editAgentFile(host, monoId, path, (text) => {
+        const next = addMemoryEntry(text, entry);
+        return { text: next.text, result: next.added };
+      });
+      return added
+        ? report({ added: entry }, entry)
+        : { file: path, alreadyRemembered: true };
+    }
+    case "memory.replace": {
+      const find = requiredString(input.find, "find", 2000);
+      const entry = memoryEntry(requiredString(input.fact, "fact"), date, until);
+      await editAgentFile(host, monoId, path, (text) => ({
+        text: supersedeMemoryEntry(text, find, entry, date),
+        result: undefined,
+      }));
+      return report({ superseded: find, added: entry }, entry);
+    }
+    case "memory.remove": {
+      const find = requiredString(input.find, "find", 2000);
+      const removed = await editAgentFile(host, monoId, path, (text) => {
+        const next = removeMemoryEntry(text, find);
+        return { text: next.text, result: next.removed };
+      });
+      return { file: path, removed };
+    }
+  }
+  throw new Error(`Unknown app action: ${action}`);
+}
+
+function habitView(habit: Habit) {
+  return {
+    id: habit.id,
+    name: habit.name,
+    instructions: habit.instructions,
+    schedule: habitScheduleLabel(habit.schedule),
+    enabled: habit.enabled,
+    nextRun: habit.enabled ? new Date(habit.nextRunAt).toLocaleString() : null,
+    ...(habitRunningSince(habit.id) != null ? { running: true } : {}),
+    ...(habit.lastRunAt
+      ? {
+          lastRun: new Date(habit.lastRunAt).toLocaleString(),
+          lastOutcome: habit.lastOutcome,
+          ...(habit.lastError ? { lastError: habit.lastError } : {}),
+        }
+      : {}),
+  };
+}
+
+async function handleHabits(
+  source: Session,
+  action: string,
+  input: Record<string, unknown>,
+  host: AgentAppHost,
+): Promise<unknown> {
+  const habits = host.habits;
+  // A habit's own run cannot schedule more runs.
+  const monoId = host.isMono(source.id)
+    ? host.monoOf?.(source.id)?.id
+    : undefined;
+  if (!habits || !monoId)
+    throw new Error("Only a Mono's own conversation can manage its habits");
+  const now = host.now?.() ?? new Date();
+  const find = (list: Habit[]) => {
+    const id = requiredString(input.id, "id", 128);
+    const habit = list.find((entry) => entry.id === id);
+    if (!habit) throw new Error("No habit with that id; run habits.list");
+    return habit;
+  };
+  switch (action) {
+    case "habits.list":
+      return { habits: (await habits.load(monoId)).map(habitView) };
+    case "habits.add": {
+      const name = requiredString(input.name, "name", 80);
+      const instructions = requiredString(input.instructions, "instructions", 4_000);
+      const schedule = habitSchedule(input.schedule);
+      const habit = await habits.update(monoId, (list) => {
+        if (list.length >= HABITS_MAX)
+          throw new Error(`A Mono can have at most ${HABITS_MAX} habits`);
+        const created = newHabit(
+          { name, instructions, schedule },
+          now.getTime(),
+        );
+        return { habits: [...list, created], result: created };
+      });
+      return { habit: habitView(habit) };
+    }
+    case "habits.update": {
+      const patch = {
+        ...(input.name === undefined
+          ? {}
+          : { name: requiredString(input.name, "name", 80) }),
+        ...(input.instructions === undefined
+          ? {}
+          : {
+              instructions: requiredString(
+                input.instructions,
+                "instructions",
+                4_000,
+              ),
+            }),
+        ...(input.schedule === undefined
+          ? {}
+          : { schedule: habitSchedule(input.schedule) }),
+      };
+      if (input.enabled !== undefined && typeof input.enabled !== "boolean")
+        throw new Error("enabled must be true or false");
+      const habit = await habits.update(monoId, (list) => {
+        const current = find(list);
+        const next: Habit = {
+          ...current,
+          ...patch,
+          ...(input.enabled === undefined
+            ? {}
+            : { enabled: input.enabled as boolean }),
+        };
+        // A new schedule, or turning it back on, counts from now.
+        if (patch.schedule || (next.enabled && !current.enabled))
+          next.nextRunAt = nextHabitRunAt(next.schedule, now.getTime());
+        return {
+          habits: list.map((entry) => (entry.id === next.id ? next : entry)),
+          result: next,
+        };
+      });
+      return { habit: habitView(habit) };
+    }
+    case "habits.run": {
+      const running = habitRunningSince(requiredString(input.id, "id", 128));
+      if (running != null)
+        throw new Error(
+          `That habit is already running (started ${new Date(running).toLocaleTimeString()}); its result will be posted here when it ends`,
+        );
+      const habit = await habits.update(monoId, (list) => {
+        const next = { ...find(list), runRequested: true };
+        return {
+          habits: list.map((entry) => (entry.id === next.id ? next : entry)),
+          result: next,
+        };
+      });
+      checkHabitsNow();
+      return {
+        habit: habitView(habit),
+        note: "It starts now, on its own. Whatever it finds is posted to this chat, or nothing if there is nothing to say.",
+      };
+    }
+    case "habits.remove": {
+      const removed = await habits.update(monoId, (list) => {
+        const habit = find(list);
+        return {
+          habits: list.filter((entry) => entry.id !== habit.id),
+          result: habit,
+        };
+      });
+      return { removed: removed.name };
+    }
+  }
+  throw new Error(`Unknown app action: ${action}`);
+}
+
+function artifactKind(value: unknown): ArtifactKind {
+  if (value === undefined || value === "document") return "document";
+  throw new Error('Unsupported artifact kind; only "document" is supported');
+}
+
+async function handleArtifacts(
+  source: Session,
+  requestId: string,
+  action: string,
+  input: Record<string, unknown>,
+  host: AgentAppHost,
+): Promise<unknown> {
+  if (!(host.isMono(source.id) || host.isHabitRun?.(source.id)))
+    throw new Error("Only a Mono can create or read artifacts");
+  if (!host.artifact) throw new Error("Artifacts are unavailable");
+  if (action === "artifacts.list") {
+    if (!host.artifacts) throw new Error("Artifacts are unavailable");
+    const kind =
+      input.kind === undefined ? undefined : artifactKind(input.kind);
+    const limit = input.limit ?? 30;
+    const offset = input.offset ?? 0;
+    if (
+      !Number.isInteger(limit) ||
+      (limit as number) < 1 ||
+      (limit as number) > 100
+    )
+      throw new Error("limit must be an integer from 1 to 100");
+    if (!Number.isInteger(offset) || (offset as number) < 0)
+      throw new Error("offset must be a non-negative integer");
+    const artifacts = (await host.artifacts()).filter(
+      (artifact) => kind === undefined || artifact.kind === kind,
+    );
+    return {
+      total: artifacts.length,
+      offset,
+      artifacts: artifacts
+        .slice(offset as number, (offset as number) + (limit as number))
+        .map(({ id, kind, title, updatedAt }) => ({
+          id,
+          kind,
+          title,
+          updatedAt,
+        })),
+    };
+  }
+  if (action === "artifacts.read") {
+    const artifact = await host.artifact(requiredString(input.id, "id", 256));
+    if (!artifact) throw new Error("Artifact was not found");
+    return artifact;
+  }
+  if (!host.saveArtifact || !host.postArtifact)
+    throw new Error("Artifacts are unavailable");
+  const kind = artifactKind(input.kind);
+  const id = optionalString(input.id, "id", 256);
+  if (id && !/^[A-Za-z0-9_-]+$/.test(id))
+    throw new Error("Invalid artifact ID");
+  const title =
+    input.title === undefined
+      ? undefined
+      : requiredString(input.title, "title", 200);
+  const body = input.body === undefined ? undefined : noteBody(input.body);
+  const summary =
+    input.summary === undefined
+      ? undefined
+      : requiredString(input.summary, "summary", 280);
+  let artifact: Artifact;
+  if (id) {
+    if (title === undefined && body === undefined)
+      throw new Error("Supply title or body to update an artifact");
+    const current = await host.artifact(id);
+    if (!current) throw new Error("Artifact was not found");
+    if (current.kind !== kind)
+      throw new Error("An artifact's kind cannot be changed");
+    artifact = await host.saveArtifact({
+      id,
+      kind,
+      title: title ?? current.title,
+      body: body ?? current.body,
+    });
+  } else {
+    if (body === undefined)
+      throw new Error("body is required to create an artifact");
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(requestId))
+      throw new Error("Invalid request ID");
+    const createdId = `artifact-${source.id}-${requestId}`;
+    const existing = await host.artifact(createdId);
+    if (
+      existing &&
+      (existing.kind !== kind ||
+        existing.title !== (title ?? noteTitle(body)) ||
+        existing.body !== body)
+    )
+      throw new Error("Request ID was already used for another artifact");
+    artifact =
+      existing ??
+      (await host.saveArtifact({
+        id: createdId,
+        kind,
+        title: title ?? noteTitle(body),
+        body,
+        sourceSessionId: source.id,
+        ...(looksLikeProject(source.cwd) ? { sourceCwd: source.cwd } : {}),
+      }));
+  }
+  const card: ArtifactCard = {
+    id: artifact.id,
+    kind: artifact.kind,
+    title: artifact.title,
+    ...(summary ? { summary } : {}),
+  };
+  await host.postArtifact(source.id, card);
+  return { ...card, saved: true, attached: true };
 }
 
 export async function handleAgentApp(
@@ -436,6 +1087,29 @@ export async function handleAgentApp(
   host: AgentAppHost,
 ): Promise<unknown> {
   fields(action, input);
+  if (action.startsWith("artifacts."))
+    return handleArtifacts(source, requestId, action, input, host);
+  if (action.startsWith("soul."))
+    return handleSoul(source, action, input, host);
+  if (action.startsWith("memory."))
+    return handleMemory(source, action, input, host);
+  if (action.startsWith("habits."))
+    return handleHabits(source, action, input, host);
+  if (action === "chat.card") {
+    if (
+      !host.postCard ||
+      !(host.isMono(source.id) || host.isHabitRun?.(source.id))
+    )
+      throw new Error("Only a Mono can put cards in its chat");
+    const card = parseCard(input);
+    host.postCard(source.id, card);
+    return {
+      posted: card.type,
+      note: host.isMono(source.id)
+        ? "It shows in the chat where you are in your reply."
+        : "It goes out with your report, after its text; if you stay quiet, it is dropped.",
+    };
+  }
   switch (action) {
     case "models.list":
       return {
@@ -454,16 +1128,18 @@ export async function handleAgentApp(
           })),
         })),
       };
-    case "sessions.list":
+    case "sessions.list": {
+      const cwd = requireProject(source, input, host);
       return {
-        cwd: requireProject(source),
-        sessions: (await host.sessions(source.cwd)).map((listing) => {
+        cwd,
+        sessions: (await host.sessions(cwd)).map((listing) => {
           const name = sessionName(source, listing.id);
           return name ? { ...listing, name } : listing;
         }),
       };
+    }
     case "sessions.read": {
-      const target = await targetSession(source, input.sessionId, host);
+      const target = await targetSession(source, input, host);
       if (input.turnId !== undefined) {
         if (input.before !== undefined || input.limit !== undefined)
           throw new Error("turnId reads one turn; omit before and limit");
@@ -478,27 +1154,28 @@ export async function handleAgentApp(
           ),
         };
       }
+      const options = {
+        before: optionalString(input.before, "before", 256),
+        limit: input.limit as number | undefined,
+        maxChars: input.maxChars as number | undefined,
+      };
       return {
-        ...sessionConversationPage(target, {
-          before: optionalString(input.before, "before", 256),
-          limit: input.limit as number | undefined,
-          maxChars: input.maxChars as number | undefined,
-        }),
+        ...(host.readConversation
+          ? await host.readConversation(target, options)
+          : sessionConversationPage(target, options)),
         ...describe(source, target),
       };
     }
     case "sessions.send": {
-      const target = await targetSession(source, input.sessionId, host);
+      const target = await targetSession(source, input, host);
       const prompt = agentPrompt(input.prompt);
+      const completion = completionTarget(source, input, host);
       if (target.id === source.id)
         throw new Error(
           "Use the current conversation to continue this session",
         );
       if (!/^[A-Za-z0-9_-]{1,128}$/.test(requestId))
         throw new Error("Invalid request ID");
-      const notify = input.notify ?? false;
-      if (typeof notify !== "boolean")
-        throw new Error("notify must be a boolean");
       const wait =
         input.wait === undefined || input.wait === false
           ? undefined
@@ -537,8 +1214,13 @@ export async function handleAgentApp(
               : `${label(source, target)} has queued follow-ups to run first. Wait for them with sessions.wait.`,
           );
       }
-      const result = await host.send(target.id, prompt, appRequestId);
-      if (notify)
+      const result = await host.send(
+        target.id,
+        prompt,
+        appRequestId,
+        ...(completion.monoId ? [completion.monoId] : []),
+      );
+      if (completion.watch)
         host.watch({
           operatorId: source.id,
           sessionId: target.id,
@@ -557,6 +1239,7 @@ export async function handleAgentApp(
         submitted: true,
         alreadySubmitted: result.alreadySubmitted,
         turnId: turnId ?? null,
+        ...(completion.monoId ? { notifyOnComplete: true } : {}),
       };
       if (!waitOptions)
         return turnId
@@ -618,7 +1301,9 @@ export async function handleAgentApp(
       const timeoutMs =
         waitSeconds(input.timeoutSeconds, MAX_WAIT_SECONDS) * 1000;
       const targets = await Promise.all(
-        refs.map((ref) => targetSession(source, ref, host, "sessionIds")),
+        refs.map((ref) =>
+          targetSession(source, input, host, ref, "sessionIds"),
+        ),
       );
       if (targets.some((target) => target.id === source.id))
         throw new Error("A session cannot wait on itself");
@@ -655,7 +1340,7 @@ export async function handleAgentApp(
       };
     }
     case "sessions.steer": {
-      const target = await targetSession(source, input.sessionId, host);
+      const target = await targetSession(source, input, host);
       const prompt = agentPrompt(input.prompt);
       if (target.id === source.id)
         throw new Error("A session cannot steer itself");
@@ -670,7 +1355,7 @@ export async function handleAgentApp(
     }
     case "sessions.respond":
     case "sessions.answer": {
-      const target = await targetSession(source, input.sessionId, host);
+      const target = await targetSession(source, input, host);
       if (!startedBy(source, target.id))
         throw new Error(
           "Only sessions you started can take your decisions; ask the user to answer this one in MonoCode",
@@ -703,13 +1388,12 @@ export async function handleAgentApp(
       return { sessionId: target.id, answered: reply.kind === "answered" };
     }
     case "sessions.draft": {
-      const id = requiredString(input.sessionId, "sessionId", 256);
       const prompt = agentPrompt(input.prompt);
-      if (id === source.id)
-        throw new Error("Use the composer to save a draft in this session");
       if (!/^[A-Za-z0-9_-]{1,128}$/.test(requestId))
         throw new Error("Invalid request ID");
-      await projectSession(source, id, host);
+      const { id } = await targetSession(source, input, host);
+      if (id === source.id)
+        throw new Error("Use the composer to save a draft in this session");
       const result = await host.draft(
         id,
         prompt,
@@ -717,12 +1401,38 @@ export async function handleAgentApp(
       );
       return { sessionId: id, saved: true, ...result };
     }
+    case "sessions.stop":
+    case "sessions.archive":
+    case "sessions.delete": {
+      if (!/^[A-Za-z0-9_-]{1,128}$/.test(requestId))
+        throw new Error("Invalid request ID");
+      const target = await targetSession(source, input, host);
+      const id = target.id;
+      if (id === source.id)
+        throw new Error("Cannot stop, archive or delete the calling session");
+      if (
+        target.orchestrationLeadId ||
+        host.isMono(id) ||
+        host.isHabitRun?.(id)
+      )
+        throw new Error("Only regular project sessions can be managed here");
+      if (action === "sessions.stop") {
+        await host.stop(id);
+        return { sessionId: id, stopped: true };
+      }
+      const mode = action === "sessions.archive" ? "archive" : "delete";
+      await host.remove(id, mode);
+      return {
+        sessionId: id,
+        [mode === "archive" ? "archived" : "deleted"]: true,
+      };
+    }
     case "sessions.start": {
       if (!/^[A-Za-z0-9_-]{1,128}$/.test(requestId))
         throw new Error(
           "request ID must use letters, digits, underscores or hyphens",
         );
-      const launch = startLaunch(source, input);
+      const launch = startLaunch(source, input, host);
       const name =
         input.name === undefined
           ? undefined
@@ -731,11 +1441,7 @@ export async function handleAgentApp(
         throw new Error(
           "name must start with a lowercase letter and use up to 32 lowercase letters, digits, - or _",
         );
-      const notify = input.notify ?? false;
-      if (typeof notify !== "boolean")
-        throw new Error("notify must be a boolean");
-      if (notify && launch.draft)
-        throw new Error("notify needs a submitted prompt; omit draft:true");
+      const completion = completionTarget(source, input, host, true);
       const id = name
         ? namedSessionId(source, name)
         : `app-${source.id}-${requestId}`;
@@ -772,16 +1478,20 @@ export async function handleAgentApp(
         placement === "tab"
           ? undefined
           : beside
-            ? await resolveSessionRef(source, beside, host)
+            ? await resolveSessionRef(source, beside, input, host)
             : source.id;
       if (besideSessionId)
-        await host.start(launch, id, {
-          direction: placement as SplitDir,
-          besideSessionId,
-        });
+        await host.start(
+          launch,
+          id,
+          { direction: placement as SplitDir, besideSessionId },
+          ...(completion.monoId ? [completion.monoId] : []),
+        );
+      else if (completion.monoId)
+        await host.start(launch, id, undefined, completion.monoId);
       else await host.start(launch, id);
       // The launch turn carries the session ID as its request ID.
-      if (notify)
+      if (completion.watch)
         host.watch({
           operatorId: source.id,
           sessionId: id,
@@ -796,12 +1506,13 @@ export async function handleAgentApp(
         model: launch.model,
         submitted: !launch.draft,
         draft: !!launch.draft,
+        ...(completion.monoId ? { notifyOnComplete: true } : {}),
       };
     }
     case "worktrees.list":
-      return host.worktrees(requireProject(source));
+      return host.worktrees(requireProject(source, input, host));
     case "worktrees.create": {
-      const cwd = requireProject(source);
+      const cwd = requireProject(source, input, host);
       const branch = requiredString(input.branch, "branch", 400);
       const existing = input.existing ?? false;
       if (typeof existing !== "boolean")
@@ -812,7 +1523,7 @@ export async function handleAgentApp(
       return host.createWorktree(cwd, branch, base ?? "HEAD", existing);
     }
     case "folders.list": {
-      const cwd = requireProject(source);
+      const cwd = requireProject(source, input, host);
       return {
         cwd,
         folders: loadSessionFolders(cwd).map(({ id, name, sessionIds }) => ({
@@ -823,7 +1534,7 @@ export async function handleAgentApp(
       };
     }
     case "folders.move": {
-      const cwd = requireProject(source);
+      const cwd = requireProject(source, input, host);
       const sessionId = requiredString(input.sessionId, "sessionId", 256);
       const folderId = optionalString(input.folderId, "folderId", 256);
       const newFolderName = optionalString(
