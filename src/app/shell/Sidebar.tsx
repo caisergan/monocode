@@ -325,6 +325,8 @@ type Props = {
   onRenameChat?: (sessionId: string, title: string) => void;
   onArchiveChat?: (sessionId: string) => void;
   onDeleteChat?: (sessionId: string) => void;
+  /** Starts a chat that belongs to no project. */
+  onNewChat?: () => void;
   onSelectProject?: (path: string) => void;
   onOpenProject?: () => void;
   onRemoveProject?: (path: string, options: { purgeData: boolean }) => void;
@@ -428,6 +430,7 @@ function SidebarComponent({
   onRenameChat,
   onArchiveChat,
   onDeleteChat,
+  onNewChat,
   onSelectProject,
   onOpenProject,
   onRemoveProject,
@@ -2320,6 +2323,7 @@ function SidebarComponent({
           onRenameChat={onRenameChat}
           onArchiveChat={onArchiveChat}
           onDeleteChat={onDeleteChat}
+          onNewChat={onNewChat}
           canGoBack={canGoBack}
           canGoForward={canGoForward}
           onGoBack={onGoBack}

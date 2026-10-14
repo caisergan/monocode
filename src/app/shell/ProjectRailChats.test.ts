@@ -54,6 +54,7 @@ async function renderRail(props: {
   onRenameChat?: (id: string, title: string) => void;
   onArchiveChat?: (id: string) => void;
   onDeleteChat?: (id: string) => void;
+  onNewChat?: () => void;
 }) {
   await act(async () =>
     root.render(
@@ -66,6 +67,7 @@ async function renderRail(props: {
         onRenameChat: props.onRenameChat,
         onArchiveChat: props.onArchiveChat,
         onDeleteChat: props.onDeleteChat,
+        onNewChat: props.onNewChat,
         chats: props.chats,
         activeSessionId: props.activeSessionId,
       }),
@@ -96,6 +98,24 @@ describe("ProjectRail chats", () => {
   it("has no Chats section until a chat exists", async () => {
     await renderRail({ chats: [] });
     expect(container.textContent).not.toContain("Chats");
+  });
+
+  it("starts a new chat from the header, even before any chat exists", async () => {
+    const start = vi.fn();
+    await renderRail({ chats: [], onNewChat: start });
+    expect(container.textContent).toContain("Chats");
+
+    await act(async () => button("New chat").click());
+    expect(start).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows hidden chats again when a new one starts", async () => {
+    await renderRail({ chats: chats(2), onNewChat: vi.fn() });
+    await act(async () => button("Hide chats").click());
+    expect(chatRows()).toHaveLength(0);
+
+    await act(async () => button("New chat").click());
+    expect(chatRows()).toHaveLength(2);
   });
 
   it("lists the newest chats and opens the one clicked", async () => {

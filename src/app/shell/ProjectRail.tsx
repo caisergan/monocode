@@ -137,6 +137,8 @@ type Props = {
   onRenameChat?: (sessionId: string, title: string) => void;
   onArchiveChat?: (sessionId: string) => void;
   onDeleteChat?: (sessionId: string) => void;
+  /** Starts a chat that belongs to no project. */
+  onNewChat?: () => void;
   settingsOpen?: boolean;
   settingsSection?: SettingsSectionId;
   onOpenSettings?: () => void;
@@ -181,6 +183,7 @@ export function ProjectRail({
   onRenameChat,
   onArchiveChat,
   onDeleteChat,
+  onNewChat,
   settingsOpen = false,
   settingsSection = "general",
   onOpenSettings,
@@ -546,7 +549,7 @@ export function ProjectRail({
               groupMascots={groupMascots}
             />
 
-            {chats.length > 0 && onSelectChat ? (
+            {onSelectChat && (chats.length > 0 || onNewChat) ? (
               <ChatsSection
                 chats={chats}
                 activeSessionId={
@@ -561,6 +564,7 @@ export function ProjectRail({
                 onRename={onRenameChat}
                 onArchive={onArchiveChat}
                 onDelete={onDeleteChat}
+                onNew={onNewChat}
               />
             ) : null}
           </div>
@@ -704,6 +708,7 @@ function ProjectSection({
 function ProjectSectionHeader({
   label,
   onAdd,
+  onNew,
   onImport,
   onAddGroup,
   hidden,
@@ -711,6 +716,8 @@ function ProjectSectionHeader({
 }: {
   label: string;
   onAdd?: () => void;
+  /** A plain plus that creates a row of this section. */
+  onNew?: { label: string; run: () => void };
   onImport?: () => void;
   onAddGroup?: (x: number, y: number) => void;
   /** The section's rows are hidden; only with `onToggleHidden`. */
@@ -766,6 +773,17 @@ function ProjectSectionHeader({
         </button>
       ) : null}
       {onAdd ? <AddProjectButton onOpenFolder={onAdd} /> : null}
+      {onNew ? (
+        <button
+          type="button"
+          title={onNew.label}
+          aria-label={onNew.label}
+          onClick={onNew.run}
+          className="grid size-5 shrink-0 place-items-center rounded-md text-content/50 hover:bg-content/8 hover:text-content"
+        >
+          <Plus className="size-3.5" strokeWidth={1.75} />
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -986,6 +1004,7 @@ function ChatsSection({
   onRename,
   onArchive,
   onDelete,
+  onNew,
 }: {
   chats: ProjectlessChat[];
   activeSessionId?: string;
@@ -993,6 +1012,8 @@ function ChatsSection({
   onRename?: (sessionId: string, title: string) => void;
   onArchive?: (sessionId: string) => void;
   onDelete?: (sessionId: string) => void;
+  /** Starts a new chat where the others run, the home folder. */
+  onNew?: () => void;
 }) {
   const [hidden, setHidden] = useState(loadChatsHidden);
   const [showAll, setShowAll] = useState(false);
@@ -1042,6 +1063,20 @@ function ChatsSection({
           setHidden(!hidden);
           saveChatsHidden(!hidden);
         }}
+        onNew={
+          onNew
+            ? {
+                label: "New chat",
+                run: () => {
+                  if (hidden) {
+                    setHidden(false);
+                    saveChatsHidden(false);
+                  }
+                  onNew();
+                },
+              }
+            : undefined
+        }
       />
       {hidden ? null : (
         <div className="flex flex-col gap-px px-2" aria-label="Chats">

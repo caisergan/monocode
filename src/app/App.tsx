@@ -2776,6 +2776,24 @@ function Workspace({
     projectCwd,
   ]);
 
+  /** A chat that belongs to no project runs from home, as the rail's other
+   * chats do, and opens without switching projects. */
+  const onNewChat = useCallback(() => {
+    closeMonoView();
+    setSearchViewOpen(false);
+    setInboxViewOpen(false);
+    setNotesViewOpen(false);
+    setAutomationsViewOpen(false);
+    setSettingsOpen(false);
+    setFilePickerOpen(false);
+    const session = newDefaultSession("~", sessionDefaults?.runtimeMode);
+    const tab = newTab(session.id);
+    setSessions((prev) => [...prev, session]);
+    appendTab(tab, "~");
+    setActiveTabId(tab.id);
+    setComposerFocused(true);
+  }, [appendTab, closeMonoView, sessionDefaults?.runtimeMode]);
+
   const onSelectRemoteSession = useCallback(
     (project: string, remoteSessionId: string) => {
       setSearchViewOpen(false);
@@ -13074,6 +13092,7 @@ function Workspace({
               onRenameChat={onRenameHistorySession}
               onArchiveChat={onArchiveChat}
               onDeleteChat={onDeleteHistorySession}
+              onNewChat={onNewChat}
               onSelectProject={onSelectProject}
               onOpenProject={pickProject}
               onRemoveProject={onRemoveProject}
