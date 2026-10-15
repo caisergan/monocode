@@ -8,7 +8,9 @@ import {
   type GithubWorkItem,
   type InboxItem,
 } from "../../inbox/model/githubTasks";
+import { newSession, type Block } from "./session";
 import {
+  createdPullRequest,
   inboxItemMatchesLinkedWorkItem,
   linkedWorkItemInboxKey,
   linkedWorkItemFromAutomationEvent,
@@ -16,6 +18,7 @@ import {
   parseGithubWorkItemUrl,
   relatedSessionsForInboxItem,
   resolveLinkedWorkItem,
+  withCreatedPullRequest,
 } from "./sessionWorkItem";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -229,5 +232,74 @@ describe("session work items", () => {
         sessions,
       ),
     ).toEqual([]);
+  });
+});
+
+function shell(id: string, command: string, output: string): Block {
+  return {
+    id,
+    role: "tool",
+    text: command,
+    tool: { kind: "execute", status: "completed", title: command, detail: output },
+  };
+}
+
+describe("PRs the agent opened", () => {
+  const created = shell(
+    "t1",
+    "cd /repo && gh pr create -R acme/web --base dev --title \"Fix\"",
+    "Warning: 1 uncommitted change\nhttps://github.com/acme/web/pull/32\n",
+  );
+
+  it("reads the PR URL from gh pr create output", () => {
+    expect(createdPullRequest([created])).toEqual({
+      kind: "pr",
+      repo: "acme/web",
+      number: 32,
+      url: "https://github.com/acme/web/pull/32",
+    });
+  });
+
+  it("uses the PR gh reports when the branch already has one", () => {
+    const exists = shell(
+      "t1",
+      "gh pr create --fill",
+      'a pull request for branch "feat" into branch "dev" already exists:\nhttps://github.com/acme/web/pull/7',
+    );
+    exists.tool!.status = "failed";
+    expect(createdPullRequest([exists])?.number).toBe(7);
+  });
+
+  it("ignores PR URLs from other commands", () => {
+    expect(
+      createdPullRequest([
+        shell("t1", "gh pr view 12", "https://github.com/acme/web/pull/12"),
+        shell("t2", "gh pr list", "https://github.com/acme/web/pull/13"),
+      ]),
+    ).toBeNull();
+  });
+
+  it("links the latest created PR and never replaces an existing link", () => {
+    const later = shell(
+      "t2",
+      "gh pr create --fill",
+      "https://github.com/acme/web/pull/40",
+    );
+    const session = {
+      ...newSession("claude", "/repo"),
+      blocks: [created, later],
+    };
+    expect(withCreatedPullRequest(session).linkedWorkItem?.number).toBe(40);
+
+    const linked = {
+      ...session,
+      linkedWorkItem: {
+        kind: "issue" as const,
+        repo: "acme/web",
+        number: 3,
+        url: "https://github.com/acme/web/issues/3",
+      },
+    };
+    expect(withCreatedPullRequest(linked)).toBe(linked);
   });
 });
