@@ -19,6 +19,7 @@ export function HandoffMiniCard({ card, onDismiss }: Props) {
     card.files != null && card.files > 0
       ? `${card.files} ${card.files === 1 ? "file" : "files"}`
       : null;
+  const continued = card.from === card.to;
 
   return (
     <div className="px-3 pt-2">
@@ -34,18 +35,24 @@ export function HandoffMiniCard({ card, onDismiss }: Props) {
               strokeWidth={1.75}
             />
             <span className="min-w-0 truncate text-[11px] text-content/50">
-              Handoff
+              {continued ? "Continued chat" : "Handoff"}
             </span>
           </span>
           <span className="mt-1 flex min-w-0 items-center gap-1.5 text-[13px] font-semibold leading-snug text-content">
             <HarnessIcon harness={card.from} className="size-3.5 shrink-0" />
             <span className="min-w-0 truncate">{HARNESS_TITLE[card.from]}</span>
-            <ChevronRight
-              className="size-3 shrink-0 text-content/35"
-              strokeWidth={1.75}
-            />
-            <HarnessIcon harness={card.to} className="size-3.5 shrink-0" />
-            <span className="min-w-0 truncate">{HARNESS_TITLE[card.to]}</span>
+            {continued ? null : (
+              <>
+                <ChevronRight
+                  className="size-3 shrink-0 text-content/35"
+                  strokeWidth={1.75}
+                />
+                <HarnessIcon harness={card.to} className="size-3.5 shrink-0" />
+                <span className="min-w-0 truncate">
+                  {HARNESS_TITLE[card.to]}
+                </span>
+              </>
+            )}
           </span>
           {card.request ? (
             <span className="mt-1 line-clamp-1 text-[11px] text-content/45">

@@ -48,6 +48,7 @@ export function handoffTurnCard(card: HandoffComposerCard): SecondOpinionMeta {
     kind: "handoff",
     ...(card.request ? { request: card.request } : {}),
     ...(card.files != null && card.files > 0 ? { files: card.files } : {}),
+    ...(card.brief.trim() ? { brief: card.brief } : {}),
   };
 }
 

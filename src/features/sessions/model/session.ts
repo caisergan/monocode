@@ -167,6 +167,8 @@ export type SecondOpinionMeta = {
   files?: number;
   /** Split-pane continue. Default is a second-opinion review. */
   kind?: "handoff";
+  /** Recap sent with a handoff, kept so a later continuation can carry it. */
+  brief?: string;
 };
 
 /** A mid-turn interjection the harness asked to surface, e.g. OMP advisor notes. */

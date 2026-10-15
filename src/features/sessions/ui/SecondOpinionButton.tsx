@@ -3,6 +3,7 @@ import {
   ChevronDown,
   ChevronRight,
   MessageMultiple,
+  MessageSquarePlus,
   Replace,
   type IconComponent,
 } from "../../../shared/ui/icons";
@@ -65,6 +66,8 @@ type Props = {
   excludeFromModel?: boolean;
   disabled?: boolean;
   triggerClassName?: string;
+  /** One-click row above the provider list, e.g. the same model in a new chat. */
+  quickAction?: { label: string; detail: string; onSelect: () => void };
 };
 
 const MENU_WIDTH = 240;
@@ -79,7 +82,8 @@ const SELF = "[data-provider-target]";
 export function HandoffButton({
   from,
   onPick,
-}: Pick<Props, "from" | "onPick">) {
+  onContinueInNewChat,
+}: Pick<Props, "from" | "onPick"> & { onContinueInNewChat?: () => void }) {
   return (
     <SecondOpinionButton
       from={from}
@@ -89,6 +93,15 @@ export function HandoffButton({
       disabledTitle="Install another provider to hand off"
       description="Hand this session to another agent to continue the work."
       menuLabel="Hand this session to another agent"
+      quickAction={
+        onContinueInNewChat
+          ? {
+              label: "Continue in new chat",
+              detail: "Same model, fresh context",
+              onSelect: onContinueInNewChat,
+            }
+          : undefined
+      }
     />
   );
 }
@@ -138,6 +151,7 @@ export function SecondOpinionButton({
   excludeFromModel = false,
   disabled: disabledByCaller = false,
   triggerClassName,
+  quickAction,
 }: Props) {
   const availabilityVersion = useSyncExternalStore(
     subscribeHarnessAvailability,
@@ -274,8 +288,8 @@ export function SecondOpinionButton({
             : list.length > 0;
         });
   const noTargets = targets.length === 0 || !hasSelectableModel;
-  const disabled = disabledByCaller || noTargets;
-  const label = noTargets ? disabledTitle : title;
+  const disabled = disabledByCaller || (noTargets && !quickAction);
+  const label = noTargets && !quickAction ? disabledTitle : title;
 
   const pick = (model: (typeof models)[number], effortValue?: string) => {
     const effort = modelEffortSetting(model);
@@ -426,6 +440,34 @@ export function SecondOpinionButton({
               </p>
             </div>
             <div className="mx-1 mb-1 h-px bg-content/10" />
+            {quickAction ? (
+              <>
+                <button
+                  type="button"
+                  role="menuitem"
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => {
+                    setOpen(false);
+                    quickAction.onSelect();
+                  }}
+                  className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-content hover:bg-content/5 focus-visible:bg-selection focus-visible:outline-none"
+                >
+                  <MessageSquarePlus
+                    className="size-3.5 shrink-0"
+                    strokeWidth={1.75}
+                  />
+                  <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <span className="truncate text-[13px] leading-4">
+                      {quickAction.label}
+                    </span>
+                    <span className="truncate text-[11px] leading-3 text-content/50">
+                      {quickAction.detail}
+                    </span>
+                  </span>
+                </button>
+                <div className="mx-1 my-1 h-px bg-content/10" />
+              </>
+            ) : null}
             {targets.length === 0 ? (
               <div className="px-2.5 py-2 text-[12px] leading-4 text-content/50">
                 {disabledTitle}
