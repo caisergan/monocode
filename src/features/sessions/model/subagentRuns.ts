@@ -1,5 +1,9 @@
 import type { AgentRunUsage, Block } from "./session";
-import { isSubagentBlock, toolCallState } from "./transcriptActivity";
+import {
+  isSubagentBlock,
+  subagentName,
+  toolCallState,
+} from "./transcriptActivity";
 
 /** Where a delegated run stands, as the dock and its sheet tell it. */
 export type SubagentRunState = "running" | "done" | "failed" | "stopped";
@@ -32,6 +36,20 @@ export function subagentRunState(
   if (state === "pending") return live ? "running" : "stopped";
   if (block.agentRun?.stopped) return "stopped";
   return state === "rejected" ? "failed" : "done";
+}
+
+/**
+ * Names of the runs still working in a live session, for the sidebar's count.
+ * A session that has stopped has none running.
+ */
+export function runningSubagentNames(
+  blocks: readonly Block[],
+  live: boolean,
+): string[] {
+  if (!live) return [];
+  return latestTurnSubagents(blocks)
+    .filter((block) => subagentRunState(block, true) === "running")
+    .map(subagentName);
 }
 
 /** How long the run has worked, or worked for, when the app knows. */

@@ -115,6 +115,7 @@ import {
   recordMonoSpawnedSession,
 } from "../features/monos/model/monoSpawnedSessions";
 import { groupMonoTurns } from "../features/sessions/model/transcriptActivity";
+import { runningSubagentNames } from "../features/sessions/model/subagentRuns";
 import {
   resolveMonoActivity,
   type MonoActivitySelection,
@@ -945,6 +946,19 @@ function setsEqual<T>(a: Set<T>, b: Set<T>): boolean {
   if (a.size !== b.size) return false;
   for (const value of a) {
     if (!b.has(value)) return false;
+  }
+  return true;
+}
+
+function namesByIdEqual(
+  a: ReadonlyMap<string, readonly string[]>,
+  b: ReadonlyMap<string, readonly string[]>,
+): boolean {
+  if (a.size !== b.size) return false;
+  for (const [id, names] of a) {
+    const other = b.get(id);
+    if (!other || other.length !== names.length) return false;
+    if (names.some((name, index) => name !== other[index])) return false;
   }
   return true;
 }
@@ -1968,6 +1982,21 @@ function Workspace({
     busySessionIdsRef.current = nextBusySessionIds;
   }
   const busySessionIds = busySessionIdsRef.current;
+
+  // Delegated runs still working, per session, for the sidebar's count.
+  const nextRunningSubagents = useMemo(() => {
+    const running = new Map<string, readonly string[]>();
+    for (const session of sessions) {
+      const names = runningSubagentNames(session.blocks, !!session.busy);
+      if (names.length > 0) running.set(session.id, names);
+    }
+    return running;
+  }, [sessions]);
+  const runningSubagentsRef = useRef(nextRunningSubagents);
+  if (!namesByIdEqual(runningSubagentsRef.current, nextRunningSubagents)) {
+    runningSubagentsRef.current = nextRunningSubagents;
+  }
+  const runningSubagents = runningSubagentsRef.current;
 
   /** Probe the active session's harness for its live model catalog whenever
    * the active harness changes. Catalogs load lazily (probing spawns a CLI
@@ -13203,6 +13232,7 @@ function Workspace({
               sessions={sidebarHistory}
               busySessionIds={busySessionIds}
               approvalSessionIds={approvalSessionIds}
+              runningSubagents={runningSubagents}
               activeSessionId={activeSessionId}
               status={historyFailed ? "error" : "idle"}
               pending={historyPending}

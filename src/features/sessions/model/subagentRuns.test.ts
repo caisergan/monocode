@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { Block } from "./session";
 import {
   latestTurnSubagents,
+  runningSubagentNames,
   subagentElapsedMs,
   subagentRunState,
   subagentTokenTotals,
@@ -49,6 +50,20 @@ describe("subagent runs", () => {
       "a",
       "b",
     ]);
+  });
+
+  it("names only the runs still working, and none once the session stops", () => {
+    const blocks = [
+      user("go"),
+      agent("a", "in_progress", { name: "Review the diff" }),
+      agent("b", "completed"),
+      agent("c", "in_progress", { name: "Run the tests" }),
+    ];
+    expect(runningSubagentNames(blocks, true)).toEqual([
+      "Review the diff",
+      "Run the tests",
+    ]);
+    expect(runningSubagentNames(blocks, false)).toEqual([]);
   });
 
   it("tells a stopped run from a failed one", () => {

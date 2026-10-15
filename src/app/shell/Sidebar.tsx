@@ -171,6 +171,7 @@ import {
 } from "../../features/files/ui/ExplorerMenu";
 import { FileTree } from "../../features/files/ui/FileTree";
 import { HarnessIcon } from "../../features/sessions/ui/HarnessIcon";
+import { SubagentCountBadge } from "../../features/sessions/ui/SubagentDock";
 import { LiveAgentsPreview } from "../../features/sessions/ui/LiveAgentsPreview";
 import { ProjectRail } from "./ProjectRail";
 import { InboxNotificationMenu } from "../../features/inbox/ui/InboxNotificationMenu";
@@ -265,6 +266,8 @@ type Props = {
   sessions: SessionSummary[];
   busySessionIds: Set<string>;
   approvalSessionIds: Set<string>;
+  /** Names of the delegated runs still working, by session. */
+  runningSubagents?: ReadonlyMap<string, readonly string[]>;
   activeSessionId?: string;
   /** Open tabs, including blank ones not yet in history. */
   openSessions?: readonly SessionSummary[];
@@ -391,6 +394,7 @@ function SidebarComponent({
   sessions,
   busySessionIds,
   approvalSessionIds,
+  runningSubagents,
   activeSessionId,
   openSessions = [],
   status,
@@ -1639,6 +1643,9 @@ function SidebarComponent({
         done={unseenFinishedIds.has(session.id)}
         linkedUpdate={linkedSessionUpdateIds.has(session.id)}
         needsApproval={listedApprovalSessionIds.has(session.id)}
+        subagents={
+          remoteProject ? undefined : runningSubagents?.get(session.id)
+        }
         dropTarget={isSessionDrop("session", session.id)}
         compact={compact}
         now={now}
@@ -3264,6 +3271,7 @@ const SessionCard = memo(function SessionCard({
   done,
   linkedUpdate,
   needsApproval,
+  subagents,
   dropTarget,
   compact = false,
   now,
@@ -3287,6 +3295,8 @@ const SessionCard = memo(function SessionCard({
   done: boolean;
   linkedUpdate: boolean;
   needsApproval: boolean;
+  /** Names of its delegated runs still working. */
+  subagents?: readonly string[];
   dropTarget?: boolean;
   compact?: boolean;
   now: number;
@@ -3701,6 +3711,9 @@ const SessionCard = memo(function SessionCard({
               >
                 <Archive className="size-3 shrink-0" strokeWidth={1.75} />
               </button>
+            ) : null}
+            {subagents?.length ? (
+              <SubagentCountBadge names={subagents} />
             ) : null}
             {workItemBadge}
             {session.automationId ? (
