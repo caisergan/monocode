@@ -9,8 +9,11 @@ import type {
   RemoteProvider,
   SessionSync,
 } from "../src/features/connections/model/protocol";
-import type { LinkedWorkItem } from "../src/features/sessions/model/session";
-import { sessionNeedsInput } from "../src/features/sessions/model/session";
+import {
+  sessionNeedsInput,
+  withLinkedWorkItems,
+  type LinkedWorkItem,
+} from "../src/features/sessions/model/session";
 
 const CACHED_SESSIONS = 32;
 
@@ -198,25 +201,37 @@ export class HostStore {
 
   updateSession(
     id: string,
-    patch: { title?: string; archived?: boolean; pinned?: boolean; linkedWorkItem?: LinkedWorkItem | null },
+    patch: {
+      title?: string;
+      archived?: boolean;
+      pinned?: boolean;
+      linkedWorkItem?: LinkedWorkItem | null;
+      /** Every link, newest first; replaces `linkedWorkItem` when both are sent. */
+      linkedWorkItems?: LinkedWorkItem[];
+    },
   ): HostSessionSummary {
     return this.transaction(() => {
       const current = this.session(id);
       if (patch.title !== undefined && (!patch.title.trim() || patch.title.length > 200))
         throw new Error("Invalid session title");
+      const links =
+        patch.linkedWorkItems ??
+        (patch.linkedWorkItem === undefined
+          ? undefined
+          : patch.linkedWorkItem
+            ? [patch.linkedWorkItem]
+            : []);
+      const session = {
+        ...current.session,
+        ...(patch.title === undefined ? {} : { title: patch.title.trim() }),
+      };
       const next = this.save(
         {
           ...current,
           revision: current.revision + 1,
           archived: patch.archived ?? current.archived,
           pinned: patch.pinned ?? current.pinned,
-          session: {
-            ...current.session,
-            ...(patch.title === undefined ? {} : { title: patch.title.trim() }),
-            ...(patch.linkedWorkItem === undefined
-              ? {}
-              : { linkedWorkItem: patch.linkedWorkItem ?? undefined }),
-          },
+          session: links ? withLinkedWorkItems(session, links) : session,
         },
         { type: "session.metadata", patch },
       );
@@ -334,6 +349,7 @@ export function summary(value: HostSession): HostSessionSummary {
     archived: value.archived,
     pinned: value.pinned,
     linkedWorkItem: value.session.linkedWorkItem,
+    linkedWorkItems: value.session.linkedWorkItems,
     needsInput: sessionNeedsInput(value.session),
     draft: value.session.blocks.some((block) => block.role === "user" && block.draft),
   };

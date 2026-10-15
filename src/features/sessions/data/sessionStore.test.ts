@@ -15,6 +15,7 @@ import {
   backfillClaudeShellCommands,
   backfillCodexShellCommands,
   isPersistableId,
+  linkedWorkItemsFromStore,
   persistFingerprint,
   sanitizeSessionForPersist,
   shouldPersistSession,
@@ -613,6 +614,30 @@ describe("sanitizeSessionForPersist", () => {
       number: 42,
       url: "https://github.com/openai/codex/pull/42",
     });
+  });
+
+  it("persists every link in the one stored value older builds read", () => {
+    const pr = (number: number) => ({
+      kind: "pr" as const,
+      repo: "openai/codex",
+      number,
+      url: `https://github.com/openai/codex/pull/${number}`,
+    });
+    const session = newSession("codex", "/tmp/project");
+    session.blocks = [{ id: "u1", role: "user", text: "ship it" }];
+    session.linkedWorkItem = pr(43);
+    session.linkedWorkItems = [pr(43), pr(42), pr(43)];
+
+    const stored = sanitizeSessionForPersist(session).linkedWorkItem;
+    expect(stored).toEqual({ ...pr(43), more: [pr(42)] });
+    expect(linkedWorkItemsFromStore(stored)).toEqual({
+      linkedWorkItem: pr(43),
+      linkedWorkItems: [pr(43), pr(42)],
+    });
+    expect(
+      linkedWorkItemsFromStore({ ...pr(43), more: [{ kind: "pr" }, "x"] }),
+    ).toEqual({ linkedWorkItem: pr(43) });
+    expect(linkedWorkItemsFromStore({ more: [pr(42)] })).toEqual({});
   });
 
   it("persists the automation that started a session", () => {

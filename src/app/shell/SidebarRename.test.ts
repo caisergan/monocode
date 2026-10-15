@@ -1519,7 +1519,21 @@ describe("sidebar linked work item updates", () => {
 });
 
 describe("sidebar session GitHub links", () => {
-  function openLinkDialog() {
+  const pr42 = {
+    kind: "pr" as const,
+    repo: "acme/widgets",
+    number: 42,
+    url: "https://github.com/acme/widgets/pull/42",
+  };
+  const pr43 = { ...pr42, number: 43, url: "https://github.com/acme/widgets/pull/43" };
+  const issue7 = {
+    kind: "issue" as const,
+    repo: "acme/widgets",
+    number: 7,
+    url: "https://github.com/acme/widgets/issues/7",
+  };
+
+  function openLinkDialog(label = "Link GitHub issue or PR…") {
     act(() =>
       card().dispatchEvent(
         new MouseEvent("contextmenu", { bubbles: true, cancelable: true }),
@@ -1527,7 +1541,7 @@ describe("sidebar session GitHub links", () => {
     );
     const link = Array.from(
       document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
-    ).find((item) => item.textContent === "Link GitHub issue or PR…")!;
+    ).find((item) => item.textContent === label)!;
     expect(link).toBeDefined();
     act(() => link.click());
     return document.querySelector<HTMLInputElement>(
@@ -1535,79 +1549,178 @@ describe("sidebar session GitHub links", () => {
     )!;
   }
 
+  function button(text: string): HTMLButtonElement {
+    return Array.from(document.querySelectorAll("button")).find(
+      (candidate) => candidate.textContent === text,
+    )!;
+  }
+
+  function badge(): HTMLButtonElement {
+    return card().querySelector<HTMLButtonElement>('[aria-haspopup="menu"]')!;
+  }
+
+  function linksMenu(): HTMLElement | null {
+    return document.querySelector<HTMLElement>(
+      '[role="menu"][aria-label="GitHub links"], [role="menu"][aria-label="Linked PRs"]',
+    );
+  }
+
   it("manually links a session from its context menu", () => {
-    props.onSetSessionLinkedWorkItem = vi.fn();
+    props.onSetSessionLinkedWorkItems = vi.fn();
     act(() => render());
     const input = openLinkDialog();
     typeTitle(
       input,
       "https://github.com/acme/widgets/issues/27?notification=1",
     );
-    const submit = Array.from(document.querySelectorAll("button")).find(
-      (button) => button.textContent === "Link",
-    )!;
-    act(() => submit.click());
+    act(() => button("Link").click());
 
-    expect(props.onSetSessionLinkedWorkItem).toHaveBeenCalledWith("session-1", {
-      kind: "issue",
-      repo: "acme/widgets",
-      number: 27,
-      url: "https://github.com/acme/widgets/issues/27",
-    });
+    expect(props.onSetSessionLinkedWorkItems).toHaveBeenCalledWith(
+      "session-1",
+      [
+        {
+          kind: "issue",
+          repo: "acme/widgets",
+          number: 27,
+          url: "https://github.com/acme/widgets/issues/27",
+        },
+      ],
+    );
     expect(document.querySelector('[role="dialog"]')).toBeNull();
   });
 
   it("keeps the dialog open when the URL is not a GitHub work item", () => {
-    props.onSetSessionLinkedWorkItem = vi.fn();
+    props.onSetSessionLinkedWorkItems = vi.fn();
     act(() => render());
     const input = openLinkDialog();
     typeTitle(input, "https://example.com/issues/27");
-    const submit = Array.from(document.querySelectorAll("button")).find(
-      (button) => button.textContent === "Link",
-    )!;
-    act(() => submit.click());
+    act(() => button("Link").click());
 
-    expect(props.onSetSessionLinkedWorkItem).not.toHaveBeenCalled();
+    expect(props.onSetSessionLinkedWorkItems).not.toHaveBeenCalled();
     expect(document.querySelector('[role="alert"]')?.textContent).toContain(
       "valid GitHub issue or pull request URL",
     );
   });
 
-  it("edits or removes an existing link", () => {
+  it("adds a link ahead of the existing ones", () => {
+    props.sessions[0] = { ...props.sessions[0], linkedWorkItem: pr42 };
+    props.onSetSessionLinkedWorkItems = vi.fn();
+    act(() => render());
+    const input = openLinkDialog("Edit GitHub links…");
+    expect(input.value).toBe("");
+    expect(
+      document.querySelector('[aria-label="Remove PR #42"]'),
+    ).not.toBeNull();
+
+    typeTitle(input, pr42.url);
+    act(() => button("Save").click());
+    expect(props.onSetSessionLinkedWorkItems).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      "already linked",
+    );
+
+    typeTitle(input, pr43.url);
+    act(() => button("Save").click());
+    expect(props.onSetSessionLinkedWorkItems).toHaveBeenCalledWith(
+      "session-1",
+      [pr43, pr42],
+    );
+  });
+
+  it("removes links in the dialog", () => {
     props.sessions[0] = {
       ...props.sessions[0],
-      linkedWorkItem: {
-        kind: "pr",
-        repo: "acme/widgets",
-        number: 42,
-        url: "https://github.com/acme/widgets/pull/42",
-      },
+      linkedWorkItem: pr43,
+      linkedWorkItems: [pr43, pr42],
     };
-    props.onSetSessionLinkedWorkItem = vi.fn();
+    props.onSetSessionLinkedWorkItems = vi.fn();
     act(() => render());
+    openLinkDialog("Edit GitHub links…");
     act(() =>
-      card().dispatchEvent(
-        new MouseEvent("contextmenu", { bubbles: true, cancelable: true }),
-      ),
+      document
+        .querySelector<HTMLButtonElement>('[aria-label="Remove PR #43"]')!
+        .click(),
     );
-    const edit = Array.from(
-      document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
-    ).find((item) => item.textContent === "Edit GitHub issue or PR link…")!;
-    act(() => edit.click());
-
-    expect(
-      document.querySelector<HTMLInputElement>(
-        'input[aria-label="GitHub issue or pull request URL"]',
-      )?.value,
-    ).toBe("https://github.com/acme/widgets/pull/42");
-    const remove = Array.from(document.querySelectorAll("button")).find(
-      (button) => button.textContent === "Remove link",
-    )!;
-    act(() => remove.click());
-    expect(props.onSetSessionLinkedWorkItem).toHaveBeenCalledWith(
+    act(() => button("Save").click());
+    expect(props.onSetSessionLinkedWorkItems).toHaveBeenCalledWith(
       "session-1",
-      undefined,
+      [pr42],
     );
+  });
+
+  it("keeps a single link as a plain badge", () => {
+    props.sessions[0] = { ...props.sessions[0], linkedWorkItem: pr42 };
+    props.onOpenInboxItem = vi.fn();
+    act(() => render());
+    const single = card().querySelector<HTMLButtonElement>(
+      '[aria-label="Open PR #42"]',
+    )!;
+    expect(single.textContent).toBe("#42");
+    expect(badge()).toBeNull();
+    act(() => single.click());
+    expect(props.onOpenInboxItem).toHaveBeenCalledWith(pr42, "session-1");
+  });
+
+  it("shows the newest link with a count and opens any link from its menu", () => {
+    props.sessions[0] = {
+      ...props.sessions[0],
+      linkedWorkItem: pr43,
+      linkedWorkItems: [pr43, pr42, issue7],
+    };
+    props.onOpenInboxItem = vi.fn();
+    props.onSelectSession = vi.fn();
+    act(() => render());
+
+    expect(badge().textContent).toBe("#43+2");
+    expect(badge().getAttribute("aria-label")).toBe("Show 3 GitHub links");
+    expect(badge().getAttribute("aria-expanded")).toBe("false");
+    act(() => badge().click());
+    const menu = linksMenu()!;
+    expect(badge().getAttribute("aria-expanded")).toBe("true");
+    const rows = Array.from(
+      menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
+    ).filter((item) => !item.getAttribute("aria-label")?.endsWith("on GitHub"));
+    expect(rows.map((row) => row.getAttribute("aria-label"))).toEqual([
+      "PR #43 in acme/widgets",
+      "PR #42 in acme/widgets",
+      "issue #7 in acme/widgets",
+    ]);
+
+    act(() => rows[1].click());
+    expect(props.onOpenInboxItem).toHaveBeenCalledWith(pr42, "session-1");
+    expect(props.onSelectSession).not.toHaveBeenCalled();
+    expect(linksMenu()).toBeNull();
+  });
+
+  it("drives the links menu from the keyboard", () => {
+    props.sessions[0] = {
+      ...props.sessions[0],
+      linkedWorkItem: pr43,
+      linkedWorkItems: [pr43, pr42],
+    };
+    props.onOpenInboxItem = vi.fn();
+    props.onSetSessionLinkedWorkItems = vi.fn();
+    act(() => render());
+
+    pressKey(badge(), "ArrowDown");
+    const menu = linksMenu()!;
+    expect(document.activeElement).toBe(menu);
+    pressKey(menu, "Escape");
+    expect(linksMenu()).toBeNull();
+    expect(document.activeElement).toBe(badge());
+
+    pressKey(badge(), "ArrowDown");
+    pressKey(linksMenu()!, "ArrowDown");
+    pressKey(linksMenu()!, "Enter");
+    expect(props.onOpenInboxItem).toHaveBeenCalledWith(pr42, "session-1");
+
+    pressKey(badge(), "ArrowDown");
+    pressKey(linksMenu()!, "End");
+    pressKey(linksMenu()!, "Enter");
+    expect(linksMenu()).toBeNull();
+    expect(
+      document.querySelector('input[aria-label="GitHub issue or pull request URL"]'),
+    ).not.toBeNull();
   });
 });
 

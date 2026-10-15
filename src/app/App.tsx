@@ -481,14 +481,18 @@ import {
   formatSessionTitle,
   sessionNeedsInput,
   isTerminalSession,
+  linkedWorkItemsKey,
+  linkedWorkItemsOf,
   newDefaultSession,
   newSession,
   retargetSessionToProject,
   removeSessionDraft,
   sessionDisplayTitle,
   sessionDraftBlock,
+  sameLinkedWorkItem,
   sessionWorkCwd,
   titleFromPrompt,
+  withLinkedWorkItems,
   type Attachment,
   type Block,
   type BtwThread,
@@ -536,7 +540,7 @@ import {
   replaceInFlightSessions,
   saveWorkspaceSnapshot,
   setSessionArchived,
-  setSessionLinkedWorkItem,
+  setSessionLinkedWorkItems,
   setSessionPinned,
   shouldPersistSession,
   upsertSession,
@@ -728,7 +732,7 @@ import {
   linkedWorkItemFromAutomationEvent,
   linkedWorkItemFromInboxItem,
   resolveLinkedWorkItem,
-  withCreatedPullRequest,
+  withCreatedPullRequests,
 } from "../features/sessions/model/sessionWorkItem";
 import {
   completeLinkedWorkItemUpdateCard,
@@ -4616,11 +4620,12 @@ function Workspace({
           : undefined,
       );
 
+      // With several links, the card describes the one that changed.
       void githubWorkItemThread(
         session.cwd,
-        session.linkedWorkItem.repo,
-        session.linkedWorkItem.kind,
-        session.linkedWorkItem.number,
+        update.item.repo,
+        update.item.kind,
+        update.item.number,
         { force: true },
       ).then(
         (thread) => {
@@ -5673,78 +5678,79 @@ function Workspace({
     [],
   );
 
-  const onSetHistorySessionLinkedWorkItem = useCallback(
-    (sessionId: string, linkedWorkItem: LinkedWorkItem | undefined) => {
-      const previousLinkedWorkItem =
-        sessionsRef.current.find((session) => session.id === sessionId)
-          ?.linkedWorkItem ??
-        history.find((session) => session.id === sessionId)?.linkedWorkItem;
+  const onSetHistorySessionLinkedWorkItems = useCallback(
+    (sessionId: string, items: LinkedWorkItem[]) => {
+      const live = sessionsRef.current.find(
+        (session) => session.id === sessionId,
+      );
+      const previous = linkedWorkItemsOf(
+        live?.linkedWorkItem
+          ? live
+          : (history.find((session) => session.id === sessionId) ?? {}),
+      );
+      const nextKey = linkedWorkItemsKey(withLinkedWorkItems({}, items));
       invalidateLoadedSession(sessionId);
       loadedSessionCache.current.delete(sessionId);
 
       const nextSessions = sessionsRef.current.map((session) =>
-        session.id === sessionId ? { ...session, linkedWorkItem } : session,
+        session.id === sessionId ? withLinkedWorkItems(session, items) : session,
       );
       sessionsRef.current = nextSessions;
       setSessions(nextSessions);
       setHistory((current) =>
         current.map((session) =>
-          session.id === sessionId ? { ...session, linkedWorkItem } : session,
+          session.id === sessionId
+            ? withLinkedWorkItems(session, items)
+            : session,
         ),
       );
       setStoredLinkedSessions((current) =>
-        linkedWorkItem
+        items.length > 0
           ? current.map((session) =>
               session.id === sessionId
-                ? { ...session, linkedWorkItem }
+                ? withLinkedWorkItems(session, items)
                 : session,
             )
           : current.filter((session) => session.id !== sessionId),
       );
+      // Keep an open PR beside the session while it is still linked.
       setLinkedWorkItemPanels((current) => {
-        if (!current.has(sessionId)) return current;
+        const panel = current.get(sessionId);
+        if (
+          !panel ||
+          items.some((item) => sameLinkedWorkItem(item, panel.item))
+        ) {
+          return current;
+        }
         const next = new Map(current);
         next.delete(sessionId);
         return next;
       });
 
-      void setSessionLinkedWorkItem(sessionId, linkedWorkItem).catch(
-        (error) => {
-          const rolledBackSessions = sessionsRef.current.map((session) =>
-            session.id === sessionId &&
-            session.linkedWorkItem === linkedWorkItem
-              ? { ...session, linkedWorkItem: previousLinkedWorkItem }
-              : session,
-          );
-          sessionsRef.current = rolledBackSessions;
-          setSessions(rolledBackSessions);
-          setHistory((current) =>
-            current.map((session) =>
-              session.id === sessionId &&
-              session.linkedWorkItem === linkedWorkItem
-                ? { ...session, linkedWorkItem: previousLinkedWorkItem }
-                : session,
-            ),
-          );
-          setStoredLinkedSessions((current) =>
-            previousLinkedWorkItem
-              ? current.map((session) =>
-                  session.id === sessionId
-                    ? {
-                        ...session,
-                        linkedWorkItem: previousLinkedWorkItem,
-                      }
-                    : session,
-                )
-              : current.filter((session) => session.id !== sessionId),
-          );
-          void refreshHistory(sidebarCwd);
-          void message(
-            `Could not update this conversation's GitHub link.\n\n${String(error)}`,
-            { title: "MonoCode", kind: "error" },
-          );
-        },
-      );
+      void setSessionLinkedWorkItems(sessionId, items).catch((error) => {
+        const rollBack = <T extends SessionSummary | Session>(session: T) =>
+          session.id === sessionId && linkedWorkItemsKey(session) === nextKey
+            ? withLinkedWorkItems(session, previous)
+            : session;
+        const rolledBackSessions = sessionsRef.current.map(rollBack);
+        sessionsRef.current = rolledBackSessions;
+        setSessions(rolledBackSessions);
+        setHistory((current) => current.map(rollBack));
+        setStoredLinkedSessions((current) =>
+          previous.length > 0
+            ? current.map((session) =>
+                session.id === sessionId
+                  ? withLinkedWorkItems(session, previous)
+                  : session,
+              )
+            : current.filter((session) => session.id !== sessionId),
+        );
+        void refreshHistory(sidebarCwd);
+        void message(
+          `Could not update this conversation's GitHub links.\n\n${String(error)}`,
+          { title: "MonoCode", kind: "error" },
+        );
+      });
     },
     [history, invalidateLoadedSession, refreshHistory, sidebarCwd],
   );
@@ -8329,7 +8335,7 @@ function Workspace({
           setSessions((prev) =>
             prev.map((s) => {
               if (s.id !== sessionId) return s;
-              const stopped = withCreatedPullRequest(stopStreaming(s));
+              const stopped = withCreatedPullRequests(stopStreaming(s));
               const providerFailed =
                 providerFailureSeen ||
                 isProviderFailureText(lastAssistantTextInTurn(stopped));
@@ -11802,6 +11808,7 @@ function Workspace({
               title: summary.title,
               cwd: summary.cwd,
               linkedWorkItem: summary.linkedWorkItem,
+              linkedWorkItems: summary.linkedWorkItems,
             }
           : summary,
       );
@@ -13182,7 +13189,7 @@ function Workspace({
               onArchiveSessions={onArchiveHistorySessions}
               onPinSession={onPinHistorySession}
               onPinSessions={onPinHistorySessions}
-              onSetSessionLinkedWorkItem={onSetHistorySessionLinkedWorkItem}
+              onSetSessionLinkedWorkItems={onSetHistorySessionLinkedWorkItems}
               reminders={sessionReminders.reminders}
               onSetReminders={sessionReminders.schedule}
               onCancelReminders={sessionReminders.cancel}

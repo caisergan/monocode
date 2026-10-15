@@ -6,7 +6,6 @@ import {
 } from "../../features/source-control/model/worktreeFocus";
 import { SidebarWorktreeSwitcher } from "../../features/source-control/ui/SidebarWorktreeSwitcher";
 import { OrchestrationSidebarAgents } from "../../features/orchestration/ui/OrchestrationSidebarAgents";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Archive,
   Chatting,
@@ -15,12 +14,10 @@ import {
   ChevronRight,
   CircleAlert,
   CircleDashed,
-  CircleDot,
   Clock,
   FileScript,
   Folder,
   GitBranch,
-  GitPullRequest,
   Inbox,
   ListFilter,
   PanelLeft,
@@ -70,7 +67,10 @@ import { IS_MAC, MOD } from "../../platform/tauri/platform";
 import { copyText } from "../../platform/tauri/clipboard";
 import { resolveModel } from "../../features/sessions/model/models";
 import type { OpenFileFn } from "../../features/search/model/search";
-import { sessionDisplayTitle } from "../../features/sessions/model/session";
+import {
+  linkedWorkItemsOf,
+  sessionDisplayTitle,
+} from "../../features/sessions/model/session";
 import { pullRequestInboxItem } from "../../features/source-control/model/pullRequests";
 import type { InboxItem } from "../../features/inbox/model/githubTasks";
 import { supportsTerminalSurface } from "../../integrations/harness/core/terminalLaunch";
@@ -183,6 +183,10 @@ import { SearchableProjectPicker } from "../../features/projects/ui/SearchablePr
 import { useProjectMenu } from "./useProjectMenu";
 import { SessionFiltersMenu } from "../../features/sessions/ui/SessionFiltersMenu";
 import { LinkSessionWorkItemDialog } from "../../features/sessions/ui/LinkSessionWorkItemDialog";
+import {
+  LinkedWorkItemsBadge,
+  LinkedWorkItemsMenu,
+} from "../../features/sessions/ui/LinkedWorkItemsMenu";
 import { sessionReminderPresets } from "../../features/sessions/ui/sessionReminderPresets";
 import {
   formatReminderTime,
@@ -287,9 +291,10 @@ type Props = {
   ) => void;
   onPinSession?: (sessionId: string, pinned: boolean) => void;
   onPinSessions?: (sessionIds: readonly string[], pinned: boolean) => void;
-  onSetSessionLinkedWorkItem?: (
+  /** Replaces a session's links, newest first. An empty list removes them. */
+  onSetSessionLinkedWorkItems?: (
     sessionId: string,
-    item: LinkedWorkItem | undefined,
+    items: LinkedWorkItem[],
   ) => void;
   reminders?: readonly SessionReminder[];
   onSetReminders?: (sessionIds: readonly string[], dueAt: number) => void;
@@ -400,7 +405,7 @@ function SidebarComponent({
   onArchiveSessions: onArchiveLocalSessions,
   onPinSession: onPinLocalSession,
   onPinSessions: onPinLocalSessions,
-  onSetSessionLinkedWorkItem: onSetLocalSessionLinkedWorkItem,
+  onSetSessionLinkedWorkItems: onSetLocalSessionLinkedWorkItems,
   reminders = [],
   onSetReminders,
   onCancelReminders,
@@ -480,7 +485,13 @@ function SidebarComponent({
   const hostProject = remoteProject ? remoteProjectFor(cwd) : undefined;
   const remoteChange = async (
     sessionId: string,
-    patch: { title?: string; archived?: boolean; pinned?: boolean; linkedWorkItem?: LinkedWorkItem | null },
+    patch: {
+      title?: string;
+      archived?: boolean;
+      pinned?: boolean;
+      linkedWorkItem?: LinkedWorkItem | null;
+      linkedWorkItems?: LinkedWorkItem[];
+    },
   ) => {
     if (!remote.machine || !hostProject) {
       window.alert("Connect this project's machine to change its sessions.");
@@ -554,11 +565,15 @@ function SidebarComponent({
   const onDeleteSessions = remoteProject
     ? (sessionIds: readonly string[]) => { void remoteDelete(sessionIds); }
     : onDeleteLocalSessions;
-  const onSetSessionLinkedWorkItem = remoteProject
-    ? (sessionId: string, item: LinkedWorkItem | undefined) => {
-        void remoteChange(sessionId, { linkedWorkItem: item ?? null });
+  const onSetSessionLinkedWorkItems = remoteProject
+    ? (sessionId: string, items: LinkedWorkItem[]) => {
+        // Hosts that predate several links still take the card's item.
+        void remoteChange(sessionId, {
+          linkedWorkItem: items[0] ?? null,
+          linkedWorkItems: items,
+        });
       }
-    : onSetLocalSessionLinkedWorkItem;
+    : onSetLocalSessionLinkedWorkItems;
   const activeRemoteId = activeSessionId
     ? remoteSessionFor(activeSessionId)
     : undefined;
@@ -583,6 +598,7 @@ function SidebarComponent({
         archived: session.archived,
         pinned: session.pinned,
         linkedWorkItem: session.linkedWorkItem,
+        linkedWorkItems: session.linkedWorkItems,
         draft: session.draft,
         repo: session.repo,
         branch: session.branch,
@@ -621,6 +637,10 @@ function SidebarComponent({
   const [linkingSession, setLinkingSession] = useState<SessionSummary | null>(
     null,
   );
+  const [workItemsMenu, setWorkItemsMenu] = useState<{
+    session: SessionSummary;
+    anchor: HTMLElement;
+  } | null>(null);
   const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -1216,13 +1236,13 @@ function SidebarComponent({
           },
         ]
       : []),
-    ...(!multipleMenuSessions && onSetSessionLinkedWorkItem
+    ...(!multipleMenuSessions && onSetSessionLinkedWorkItems
       ? [
           {
             kind: "item" as const,
             id: "link-work-item",
             label: menuSessions[0]?.linkedWorkItem
-              ? "Edit GitHub issue or PR link…"
+              ? "Edit GitHub links…"
               : "Link GitHub issue or PR…",
           },
         ]
@@ -1519,6 +1539,7 @@ function SidebarComponent({
     onArchiveSession,
     setRenamingSessionId,
     onDeleteSession,
+    setWorkItemsMenu,
   });
   cardHandlers.current = {
     onSessionCardSelect,
@@ -1530,6 +1551,7 @@ function SidebarComponent({
     onArchiveSession,
     setRenamingSessionId,
     onDeleteSession,
+    setWorkItemsMenu,
   };
   const cardActions = useMemo(
     () => ({
@@ -1539,6 +1561,10 @@ function SidebarComponent({
       ) => cardHandlers.current.onSessionCardSelect(sessionId, event),
       openWorkItem: (item: LinkedWorkItem, sessionId: string) =>
         cardHandlers.current.onOpenInboxItem?.(item, sessionId),
+      toggleWorkItems: (session: SessionSummary, anchor: HTMLElement) =>
+        cardHandlers.current.setWorkItemsMenu((current) =>
+          current?.session.id === session.id ? null : { session, anchor },
+        ),
       prefetch: (sessionId: string) =>
         cardHandlers.current.onPrefetchSession?.(sessionId),
       placeOnPane: (sessionId: string, targetId: string, edge: PaneEdge) =>
@@ -1595,6 +1621,8 @@ function SidebarComponent({
         now={now}
         onSelect={cardActions.select}
         onOpenWorkItem={onOpenInboxItem && !remoteProject ? cardActions.openWorkItem : undefined}
+        workItemsMenuOpen={workItemsMenu?.session.id === session.id}
+        onToggleWorkItems={cardActions.toggleWorkItems}
         onPrefetch={onPrefetchSession ? cardActions.prefetch : undefined}
         onPlaceOnPane={
           onPlaceSessionOnPane ? cardActions.placeOnPane : undefined
@@ -1717,6 +1745,12 @@ function SidebarComponent({
     </div>
   );
 
+  // Follow the listed copy so links added mid-turn show while the menu is open.
+  const workItemsMenuSession = workItemsMenu?.anchor.isConnected
+    ? (projectSessions.find(
+        (session) => session.id === workItemsMenu.session.id,
+      ) ?? workItemsMenu.session)
+    : null;
   const sidebarContent = (
     <aside
       ref={resize.setPaneRef}
@@ -2269,16 +2303,38 @@ function SidebarComponent({
       ) : null}
       {linkingSession ? (
         <LinkSessionWorkItemDialog
-          initial={linkingSession.linkedWorkItem}
+          initial={linkedWorkItemsOf(linkingSession)}
+          cwd={linkingSession.cwd}
           sessionTitle={sessionDisplayTitle(
             linkingSession.title,
             linkingSession.harness,
           )}
-          onSave={(item) => {
-            onSetSessionLinkedWorkItem?.(linkingSession.id, item);
+          onSave={(items) => {
+            onSetSessionLinkedWorkItems?.(linkingSession.id, items);
             setLinkingSession(null);
           }}
           onClose={() => setLinkingSession(null)}
+        />
+      ) : null}
+      {workItemsMenuSession && workItemsMenu ? (
+        <LinkedWorkItemsMenu
+          anchor={workItemsMenu.anchor}
+          items={linkedWorkItemsOf(workItemsMenuSession)}
+          cwd={workItemsMenuSession.cwd}
+          onOpen={
+            onOpenInboxItem && !remoteProject
+              ? (item) => onOpenInboxItem(item, workItemsMenuSession.id)
+              : undefined
+          }
+          onEdit={
+            onSetSessionLinkedWorkItems
+              ? () => setLinkingSession(workItemsMenuSession)
+              : undefined
+          }
+          onClose={(restoreFocus) => {
+            setWorkItemsMenu(null);
+            if (restoreFocus) workItemsMenu.anchor.focus();
+          }}
         />
       ) : null}
       <div
@@ -3190,6 +3246,8 @@ const SessionCard = memo(function SessionCard({
   now,
   onSelect,
   onOpenWorkItem,
+  workItemsMenuOpen = false,
+  onToggleWorkItems,
   onPrefetch,
   onPlaceOnPane,
   onListDrop,
@@ -3214,6 +3272,8 @@ const SessionCard = memo(function SessionCard({
     event: { shiftKey: boolean; ctrlKey: boolean; metaKey: boolean },
   ) => void;
   onOpenWorkItem?: (item: LinkedWorkItem, sessionId: string) => void;
+  workItemsMenuOpen?: boolean;
+  onToggleWorkItems?: (session: SessionSummary, anchor: HTMLElement) => void;
   onPrefetch?: (sessionId: string) => void;
   onPlaceOnPane?: (sessionId: string, targetId: string, edge: PaneEdge) => void;
   onListDrop?: (draggedId: string, target: SessionListDropTarget) => void;
@@ -3298,38 +3358,20 @@ const SessionCard = memo(function SessionCard({
     />
   ) : null;
   const workItemBadge = linkedWorkItem ? (
-    <button
-      type="button"
-      data-no-drag
-      data-tauri-drag-region="false"
-      title={`Open ${linkedWorkItem.kind === "pr" ? "PR" : "issue"} #${linkedWorkItem.number} beside this session (${MOD}-click for GitHub)`}
-      aria-label={`Open ${linkedWorkItem.kind === "pr" ? "PR" : "issue"} #${linkedWorkItem.number}`}
-      onPointerDown={(event) => event.stopPropagation()}
-      onClick={(event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        if (event.metaKey || event.ctrlKey) {
-          void openUrl(linkedWorkItem.url).catch(() => undefined);
-          return;
-        }
-        if (onOpenWorkItem) onOpenWorkItem(linkedWorkItem, session.id);
-        else void openUrl(linkedWorkItem.url).catch(() => undefined);
-      }}
-      onAuxClick={(event) => {
-        if (event.button !== 1) return;
-        event.preventDefault();
-        event.stopPropagation();
-        void openUrl(linkedWorkItem.url).catch(() => undefined);
-      }}
-      className="flex shrink-0 cursor-pointer items-center gap-0.5 rounded px-0.5 text-[11px] tabular-nums text-accent hover:underline"
-    >
-      {linkedWorkItem.kind === "pr" ? (
-        <GitPullRequest className="size-3" strokeWidth={1.75} />
-      ) : (
-        <CircleDot className="size-3" strokeWidth={1.75} />
-      )}
-      <span>#{linkedWorkItem.number}</span>
-    </button>
+    <LinkedWorkItemsBadge
+      items={linkedWorkItemsOf(session)}
+      menuOpen={workItemsMenuOpen}
+      onOpen={
+        onOpenWorkItem
+          ? (item) => onOpenWorkItem(item, session.id)
+          : undefined
+      }
+      onToggleMenu={
+        onToggleWorkItems
+          ? (anchor) => onToggleWorkItems(session, anchor)
+          : undefined
+      }
+    />
   ) : null;
 
   const onKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {

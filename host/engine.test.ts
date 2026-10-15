@@ -336,6 +336,23 @@ describe("headless session ownership", () => {
       revision: updated.revision,
     });
     expect(store.sync(id, initial.revision)).toMatchObject({ kind: "delta" });
+    const pr = (number: number) => ({
+      kind: "pr" as const,
+      repo: "example/repo",
+      number,
+      url: `https://github.com/example/repo/pull/${number}`,
+    });
+    store.updateSession(id, { linkedWorkItems: [pr(43), pr(41)] });
+    expect(store.summaries(project.id)[0]).toMatchObject({
+      linkedWorkItem: pr(43),
+      linkedWorkItems: [pr(43), pr(41)],
+    });
+    // A client that only knows one link replaces the list.
+    store.updateSession(id, { linkedWorkItem: pr(41) });
+    expect(store.summaries(project.id)[0]).toMatchObject({
+      linkedWorkItem: pr(41),
+    });
+    expect(store.summaries(project.id)[0].linkedWorkItems).toBeUndefined();
     store.updateSession(id, { linkedWorkItem: null });
     expect(store.summaries(project.id)[0].linkedWorkItem).toBeUndefined();
 

@@ -71,6 +71,8 @@ export type HostSessionSummary = Omit<
   providerSessionId?: string | null;
   createdAt?: number;
   linkedWorkItem?: LinkedWorkItem;
+  /** Every link, newest first, when there is more than one. */
+  linkedWorkItems?: LinkedWorkItem[];
   needsInput?: boolean;
   branch?: string;
   worktreeCwd?: string;

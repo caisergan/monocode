@@ -6,7 +6,15 @@ import {
   type InboxItem,
   type GithubTaskKind,
 } from "../../inbox/model/githubTasks";
-import type { Block, LinkedWorkItem, Session } from "./session";
+import {
+  linkedWorkItemsOf,
+  sameLinkedWorkItem,
+  withLinkedWorkItems,
+  type Block,
+  type LinkedWorkItem,
+  type LinkedWorkItems,
+  type Session,
+} from "./session";
 import type { GeneratedWorkItemHint } from "./sessionTitle";
 
 const GITHUB_URL_RE =
@@ -60,8 +68,11 @@ const PR_CREATE_RE = /\bgh\s+pr\s+create\b/;
 const PR_URL_RE =
   /https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+\b/gi;
 
-/** The PR the agent opened most recently with `gh pr create`, read from its output. */
-export function createdPullRequest(blocks: Block[]): LinkedWorkItem | null {
+/** PRs the agent opened with `gh pr create`, newest first, read from its output. */
+export function createdPullRequests(
+  blocks: readonly Block[],
+): LinkedWorkItem[] {
+  const created: LinkedWorkItem[] = [];
   for (let i = blocks.length - 1; i >= 0; i--) {
     const block = blocks[i];
     // A failed create still counts: gh exits non-zero when the branch already
@@ -74,16 +85,39 @@ export function createdPullRequest(blocks: Block[]): LinkedWorkItem | null {
     // gh prints the new PR's URL last; earlier URLs can be warnings or links.
     const url = output.match(PR_URL_RE)?.at(-1);
     const item = url ? parseGithubWorkItemUrl(url) : null;
-    if (item) return item;
+    if (item && !created.some((seen) => sameLinkedWorkItem(seen, item))) {
+      created.push(item);
+    }
   }
-  return null;
+  return created;
 }
 
-/** Link a session to the PR it opened, unless it is already linked. */
-export function withCreatedPullRequest(session: Session): Session {
-  if (session.linkedWorkItem) return session;
-  const linkedWorkItem = createdPullRequest(session.blocks);
-  return linkedWorkItem ? { ...session, linkedWorkItem } : session;
+/** Blocks after the prompt that started the latest turn. */
+function latestTurn(session: Session): Block[] {
+  for (let i = session.blocks.length - 1; i >= 0; i--) {
+    const block = session.blocks[i];
+    if (block.role !== "user") continue;
+    // Queued prompts sit after the running turn until they are sent.
+    if (session.queuedMessages?.some((queued) => queued.blockId === block.id)) {
+      continue;
+    }
+    return session.blocks.slice(i + 1);
+  }
+  return session.blocks;
+}
+
+/**
+ * Add the PRs the agent opened to the session's links, newest first. A linked
+ * session only reads its latest turn, so a link removed by hand stays removed.
+ */
+export function withCreatedPullRequests(session: Session): Session {
+  const linked = linkedWorkItemsOf(session);
+  const created = createdPullRequests(
+    linked.length > 0 ? latestTurn(session) : session.blocks,
+  ).filter((item) => !linked.some((seen) => sameLinkedWorkItem(seen, item)));
+  return created.length > 0
+    ? withLinkedWorkItems(session, [...created, ...linked])
+    : session;
 }
 
 /** Resolve explicit first-message context to one stable GitHub identity. */
@@ -182,14 +216,15 @@ export function linkedWorkItemInboxKey(linked: LinkedWorkItem): string {
   return `github:${inboxIdentityKey(linked)}`;
 }
 
-/** Find local sessions whose persisted GitHub identity matches an Inbox row. */
-export function relatedSessionsForInboxItem<
-  T extends { linkedWorkItem?: LinkedWorkItem },
->(item: InboxItem, sessions: readonly T[]): T[] {
+/** Find local sessions with a persisted link to an Inbox row. */
+export function relatedSessionsForInboxItem<T extends LinkedWorkItems>(
+  item: InboxItem,
+  sessions: readonly T[],
+): T[] {
   if (item.provider !== "github") return [];
-  return sessions.filter(
-    (session) =>
-      session.linkedWorkItem != null &&
-      inboxItemMatchesLinkedWorkItem(item, session.linkedWorkItem),
+  return sessions.filter((session) =>
+    linkedWorkItemsOf(session).some((linked) =>
+      inboxItemMatchesLinkedWorkItem(item, linked),
+    ),
   );
 }

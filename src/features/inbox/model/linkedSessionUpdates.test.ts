@@ -4,6 +4,7 @@ import type { GithubWorkItem } from "./githubTasks";
 import type { SessionSummary } from "../../sessions/data/sessionStore";
 import {
   linkedSessionUpdateIds,
+  linkedSessionUpdates,
   linkedWorkItemTargets,
   linkedWorkItemUpdateKey,
 } from "./linkedSessionUpdates";
@@ -87,6 +88,30 @@ describe("linked session updates", () => {
         session("second", 150, { linkedWorkItem: lower }),
       ]),
     ).toHaveLength(1);
+  });
+
+  it("watches every link and reports the latest change", () => {
+    const older = { ...linked, number: 41, url: "https://github.com/Acme/App/pull/41" };
+    const issue = {
+      kind: "issue" as const,
+      repo: "Acme/App",
+      number: 7,
+      url: "https://github.com/Acme/App/issues/7",
+    };
+    const snapshots = new Map([
+      [linkedWorkItemUpdateKey(older), { ...remote(300), ...older }],
+      [linkedWorkItemUpdateKey(issue), { ...remote(250), ...issue }],
+    ]);
+    const several = session("several", 100, {
+      linkedWorkItems: [linked, older, issue],
+    });
+
+    const update = linkedSessionUpdates([several], snapshots).get("several");
+    expect(update?.item.number).toBe(41);
+    expect(update?.updatedAt).toBe(300);
+    expect(linkedWorkItemTargets([several]).map((target) => target.key)).toEqual(
+      [linked, older, issue].map(linkedWorkItemUpdateKey),
+    );
   });
 
   it("uses the acknowledged snapshot as the next activity baseline", () => {

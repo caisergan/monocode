@@ -8,9 +8,16 @@ import {
   type GithubWorkItem,
   type InboxItem,
 } from "../../inbox/model/githubTasks";
-import { newSession, type Block } from "./session";
 import {
-  createdPullRequest,
+  linkedWorkItemsOf,
+  newSession,
+  withLinkedWorkItems,
+  type Block,
+  type LinkedWorkItem,
+  type QueuedMessage,
+} from "./session";
+import {
+  createdPullRequests,
   inboxItemMatchesLinkedWorkItem,
   linkedWorkItemInboxKey,
   linkedWorkItemFromAutomationEvent,
@@ -18,7 +25,7 @@ import {
   parseGithubWorkItemUrl,
   relatedSessionsForInboxItem,
   resolveLinkedWorkItem,
-  withCreatedPullRequest,
+  withCreatedPullRequests,
 } from "./sessionWorkItem";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
@@ -250,14 +257,28 @@ describe("PRs the agent opened", () => {
     "cd /repo && gh pr create -R acme/web --base dev --title \"Fix\"",
     "Warning: 1 uncommitted change\nhttps://github.com/acme/web/pull/32\n",
   );
+  const later = shell(
+    "t2",
+    "gh pr create --fill",
+    "https://github.com/acme/web/pull/40",
+  );
+  const issue3 = {
+    kind: "issue" as const,
+    repo: "acme/web",
+    number: 3,
+    url: "https://github.com/acme/web/issues/3",
+  };
+  const user = (id: string): Block => ({ id, role: "user", text: "go on" });
 
   it("reads the PR URL from gh pr create output", () => {
-    expect(createdPullRequest([created])).toEqual({
-      kind: "pr",
-      repo: "acme/web",
-      number: 32,
-      url: "https://github.com/acme/web/pull/32",
-    });
+    expect(createdPullRequests([created])).toEqual([
+      {
+        kind: "pr",
+        repo: "acme/web",
+        number: 32,
+        url: "https://github.com/acme/web/pull/32",
+      },
+    ]);
   });
 
   it("uses the PR gh reports when the branch already has one", () => {
@@ -267,39 +288,114 @@ describe("PRs the agent opened", () => {
       'a pull request for branch "feat" into branch "dev" already exists:\nhttps://github.com/acme/web/pull/7',
     );
     exists.tool!.status = "failed";
-    expect(createdPullRequest([exists])?.number).toBe(7);
+    expect(createdPullRequests([exists]).map((item) => item.number)).toEqual([
+      7,
+    ]);
   });
 
   it("ignores PR URLs from other commands", () => {
     expect(
-      createdPullRequest([
+      createdPullRequests([
         shell("t1", "gh pr view 12", "https://github.com/acme/web/pull/12"),
         shell("t2", "gh pr list", "https://github.com/acme/web/pull/13"),
       ]),
-    ).toBeNull();
+    ).toEqual([]);
   });
 
-  it("links the latest created PR and never replaces an existing link", () => {
-    const later = shell(
-      "t2",
-      "gh pr create --fill",
-      "https://github.com/acme/web/pull/40",
-    );
+  it("links every PR an unlinked session opened, newest first", () => {
     const session = {
       ...newSession("claude", "/repo"),
-      blocks: [created, later],
+      blocks: [user("u1"), created, user("u2"), later],
     };
-    expect(withCreatedPullRequest(session).linkedWorkItem?.number).toBe(40);
+    const linked = withCreatedPullRequests(session);
+    expect(linked.linkedWorkItem?.number).toBe(40);
+    expect(linkedWorkItemsOf(linked).map((item) => item.number)).toEqual([
+      40, 32,
+    ]);
+    // Reporting a PR again makes it the newest.
+    expect(
+      createdPullRequests([created, later, created]).map((item) => item.number),
+    ).toEqual([32, 40]);
+  });
 
-    const linked = {
-      ...session,
-      linkedWorkItem: {
-        kind: "issue" as const,
-        repo: "acme/web",
-        number: 3,
-        url: "https://github.com/acme/web/issues/3",
-      },
+  it("adds a new PR ahead of existing links", () => {
+    const session = {
+      ...newSession("claude", "/repo"),
+      linkedWorkItem: issue3,
+      blocks: [user("u1"), created],
     };
-    expect(withCreatedPullRequest(linked)).toBe(linked);
+    const linked = withCreatedPullRequests(session);
+    expect(linked.linkedWorkItem?.number).toBe(32);
+    expect(linkedWorkItemsOf(linked)).toEqual([
+      expect.objectContaining({ number: 32 }),
+      issue3,
+    ]);
+    expect(withCreatedPullRequests(linked)).toBe(linked);
+  });
+
+  it("reads only the latest turn once linked, so a removed link stays removed", () => {
+    const session = {
+      ...newSession("claude", "/repo"),
+      linkedWorkItem: issue3,
+      blocks: [user("u1"), created, user("u2")],
+    };
+    expect(withCreatedPullRequests(session)).toBe(session);
+
+    // A queued prompt is not the start of the running turn.
+    const queued = {
+      ...session,
+      blocks: [user("u2"), later, user("q1")],
+      queuedMessages: [{ blockId: "q1" } as QueuedMessage],
+    };
+    expect(withCreatedPullRequests(queued).linkedWorkItem?.number).toBe(40);
+  });
+});
+
+describe("linked work item lists", () => {
+  const pr = (number: number, repo = "acme/web"): LinkedWorkItem => ({
+    kind: "pr",
+    repo,
+    number,
+    url: `https://github.com/${repo}/pull/${number}`,
+  });
+
+  it("puts the card's item first and drops duplicates", () => {
+    expect(
+      linkedWorkItemsOf({
+        linkedWorkItem: pr(2),
+        linkedWorkItems: [pr(1), pr(2, "ACME/web"), pr(1)],
+      }).map((item) => item.number),
+    ).toEqual([2, 1]);
+    expect(linkedWorkItemsOf({ linkedWorkItems: [pr(1)] })).toEqual([]);
+  });
+
+  it("keeps the list only while there is more than one link", () => {
+    expect(withLinkedWorkItems({}, [pr(2), pr(1)])).toEqual({
+      linkedWorkItem: pr(2),
+      linkedWorkItems: [pr(2), pr(1)],
+    });
+    const single = withLinkedWorkItems(
+      { linkedWorkItem: pr(2), linkedWorkItems: [pr(2), pr(1)] },
+      [pr(1)],
+    );
+    expect(single.linkedWorkItem).toEqual(pr(1));
+    expect(single.linkedWorkItems).toBeUndefined();
+    expect(withLinkedWorkItems(single, []).linkedWorkItem).toBeUndefined();
+  });
+
+  it("relates a session to an Inbox row through any of its links", () => {
+    const item = {
+      provider: "github",
+      kind: "pr",
+      repo: "acme/web",
+      number: 1,
+    } as InboxItem;
+    const sessions = [
+      { id: "a", linkedWorkItem: pr(2), linkedWorkItems: [pr(2), pr(1)] },
+      { id: "b", linkedWorkItem: pr(2) },
+    ];
+    expect(
+      relatedSessionsForInboxItem(item, sessions).map((session) => session.id),
+    ).toEqual(["a"]);
   });
 });
