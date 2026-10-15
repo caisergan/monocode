@@ -11,10 +11,10 @@ import type { LinkedWorkItem } from "../../sessions/model/session";
 import type { SessionSummary } from "../../sessions/data/sessionStore";
 import {
   InboxDetail,
-  inboxStatusMark,
   inboxShowsFullFileDiff,
   LinkedWorkItemPanel,
 } from "./InboxView";
+import { inboxStatusMark } from "./inboxStatusMark";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
 

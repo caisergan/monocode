@@ -174,6 +174,23 @@ describe("remote host API", () => {
     expect(changed.status).toBe(200);
     expect((await s.call("sessions.list", { projectId: s.project.id })).value.result[0])
       .toMatchObject({ id: sessionId, title: "Codex · Card title", pinned: true, model: "codex:test" });
+    const pr = (number: number) => ({
+      kind: "pr",
+      repo: "example/repo",
+      number,
+      url: `https://github.com/example/repo/pull/${number}`,
+    });
+    expect((await s.call("sessions.update", {
+      projectId: s.project.id, sessionId, linkedWorkItem: pr(43), linkedWorkItems: [pr(43), pr(41)],
+    })).status).toBe(200);
+    expect((await s.call("sessions.list", { projectId: s.project.id })).value.result[0])
+      .toMatchObject({ linkedWorkItem: pr(43), linkedWorkItems: [pr(43), pr(41)] });
+    expect((await s.call("sessions.update", {
+      projectId: s.project.id, sessionId, linkedWorkItems: [{ ...pr(43), url: "https://example.com" }],
+    })).status).not.toBe(200);
+    expect((await s.call("sessions.update", {
+      projectId: s.project.id, sessionId, linkedWorkItems: pr(43),
+    })).status).not.toBe(200);
     expect((await s.call("sessions.update", {
       projectId: "wrong-project", sessionId, archived: true,
     })).status).not.toBe(200);

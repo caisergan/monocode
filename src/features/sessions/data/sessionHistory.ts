@@ -5,9 +5,12 @@ import { projectName } from "../../../shared/lib/paths";
 import { sameProjectPath } from "../../projects/model/recents";
 import { isTerminalSession } from "../model/session";
 import {
+  linkedWorkItemsKey,
+  linkedWorkItemsOf,
   sessionDisplayTitle,
   sessionDraftBlock,
   sessionNeedsInput,
+  withLinkedWorkItems,
   type Session,
 } from "../model/session";
 import { shouldPersistSession, type SessionSummary } from "./sessionStore";
@@ -133,7 +136,7 @@ export function summaryFromSession(
     worktreeCwd: session.worktreeCwd,
     worktreeRemoved: session.worktreeRemoved,
     ...(session.linkedWorkItem
-      ? { linkedWorkItem: session.linkedWorkItem }
+      ? withLinkedWorkItems({}, linkedWorkItemsOf(session))
       : {}),
     ...(session.automationId ? { automationId: session.automationId } : {}),
     ...(isTerminalSession(session) ? { surface: "terminal" as const } : {}),
@@ -207,15 +210,15 @@ export function historyWithLiveSessions(
       const draft = !!sessionDraftBlock(session);
       const automationId = session.automationId || stored.automationId;
       const surface = isTerminalSession(session) ? "terminal" : undefined;
-      // Live title and work item land before the next persist, e.g. mid-turn.
-      const linkedWorkItem = session.linkedWorkItem ?? stored.linkedWorkItem;
+      // Live title and work items land before the next persist, e.g. mid-turn.
+      const links = session.linkedWorkItem ? session : stored;
       if (
         !!stored.draft !== draft ||
         stored.automationId !== automationId ||
         stored.surface !== surface ||
         stored.title !== session.title ||
         !!stored.sidebarHidden !== !!session.sidebarHidden ||
-        stored.linkedWorkItem?.url !== linkedWorkItem?.url
+        linkedWorkItemsKey(stored) !== linkedWorkItemsKey(links)
       ) {
         rows[storedIndex] = {
           ...stored,
@@ -224,7 +227,9 @@ export function historyWithLiveSessions(
           draft: draft || undefined,
           surface,
           ...(automationId ? { automationId } : {}),
-          ...(linkedWorkItem ? { linkedWorkItem } : {}),
+          ...(links.linkedWorkItem
+            ? withLinkedWorkItems({}, linkedWorkItemsOf(links))
+            : {}),
         };
       }
       continue;

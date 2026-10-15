@@ -89,6 +89,22 @@ const resolveBinary: Record<RemoteProvider, () => Promise<{ path: string }>> = {
 // A 1 MiB text file can expand to 6 MiB when JSON escapes control characters.
 // Existing files.write sends both the original and replacement contents.
 const MAX_BODY = 16 * 1024 * 1024;
+const MAX_LINKED_WORK_ITEMS = 50;
+
+/** A GitHub link from a client, accepted only in the canonical form the app writes. */
+function linkedWorkItemParam(item: unknown): LinkedWorkItem {
+  const parsed = item && typeof item === "object" && !Array.isArray(item)
+    ? parseGithubWorkItemUrl(String((item as LinkedWorkItem).url ?? ""))
+    : null;
+  if (
+    !parsed ||
+    parsed.kind !== (item as LinkedWorkItem).kind ||
+    parsed.repo !== (item as LinkedWorkItem).repo ||
+    parsed.number !== (item as LinkedWorkItem).number ||
+    parsed.url !== (item as LinkedWorkItem).url
+  ) throw new Error("Invalid linked work item");
+  return parsed;
+}
 const discoverModels: Record<RemoteProvider, (cwd: string) => Promise<AgentModel[]>> = {
   codex: discoverCodexModels,
   claude: discoverClaudeModels,
@@ -336,7 +352,7 @@ export function createHostServer(
             const current = engine.store.session(sessionId);
             if (current.projectId !== params.projectId)
               throw new Error("Session does not belong to this project");
-            const patch: { title?: string; archived?: boolean; pinned?: boolean; linkedWorkItem?: LinkedWorkItem | null } = {};
+            const patch: Parameters<HostEngine["updateSession"]>[1] = {};
             if (params.title !== undefined) {
               if (typeof params.title !== "string") throw new Error("Invalid session title");
               patch.title = params.title;
@@ -350,19 +366,16 @@ export function createHostServer(
               patch.pinned = params.pinned;
             }
             if (params.linkedWorkItem !== undefined) {
-              const item = params.linkedWorkItem;
-              const parsed = item && typeof item === "object" && !Array.isArray(item)
-                ? parseGithubWorkItemUrl(String((item as LinkedWorkItem).url ?? ""))
-                : null;
-              if (item !== null && (
-                typeof item !== "object" || Array.isArray(item) ||
-                !parsed ||
-                parsed.kind !== (item as LinkedWorkItem).kind ||
-                parsed.repo !== (item as LinkedWorkItem).repo ||
-                parsed.number !== (item as LinkedWorkItem).number ||
-                parsed.url !== (item as LinkedWorkItem).url
-              )) throw new Error("Invalid linked work item");
-              patch.linkedWorkItem = item as LinkedWorkItem | null;
+              patch.linkedWorkItem = params.linkedWorkItem === null
+                ? null
+                : linkedWorkItemParam(params.linkedWorkItem);
+            }
+            // Every link, newest first. Clients that predate it send only `linkedWorkItem`.
+            if (params.linkedWorkItems !== undefined) {
+              const items = params.linkedWorkItems;
+              if (!Array.isArray(items) || items.length > MAX_LINKED_WORK_ITEMS)
+                throw new Error("Invalid linked work items");
+              patch.linkedWorkItems = items.map(linkedWorkItemParam);
             }
             if (Object.keys(patch).length === 0) throw new Error("No session changes supplied");
             result = engine.updateSession(sessionId, patch);

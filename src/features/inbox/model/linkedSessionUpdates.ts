@@ -1,4 +1,7 @@
-import type { LinkedWorkItem } from "../../sessions/model/session";
+import {
+  linkedWorkItemsOf,
+  type LinkedWorkItem,
+} from "../../sessions/model/session";
 import type { GithubWorkItem } from "./githubTasks";
 import type { SessionSummary } from "../../sessions/data/sessionStore";
 
@@ -26,14 +29,19 @@ export function linkedWorkItemTargets(
 ): LinkedWorkItemTarget[] {
   const targets = new Map<string, LinkedWorkItem>();
   for (const session of sessions) {
-    if (!session.linkedWorkItem || session.archived) continue;
-    const key = linkedWorkItemUpdateKey(session.linkedWorkItem);
-    if (!targets.has(key)) targets.set(key, session.linkedWorkItem);
+    if (session.archived) continue;
+    for (const item of linkedWorkItemsOf(session)) {
+      const key = linkedWorkItemUpdateKey(item);
+      if (!targets.has(key)) targets.set(key, item);
+    }
   }
   return [...targets].map(([key, item]) => ({ key, item }));
 }
 
-/** Sessions whose GitHub item changed after the last local turn/read snapshot. */
+/**
+ * Sessions with a GitHub item that changed after the last local turn/read
+ * snapshot. A session with several links reports its latest change.
+ */
 export function linkedSessionUpdates(
   sessions: readonly SessionSummary[],
   workItems: ReadonlyMap<string, GithubWorkItem>,
@@ -41,13 +49,18 @@ export function linkedSessionUpdates(
 ): Map<string, LinkedSessionUpdate> {
   const updates = new Map<string, LinkedSessionUpdate>();
   for (const session of sessions) {
-    const linked = session.linkedWorkItem;
-    if (!linked || session.archived) continue;
-    const item = workItems.get(linkedWorkItemUpdateKey(linked));
-    if (!item) continue;
-    const remoteUpdatedAt = Date.parse(item.updatedAt);
+    if (session.archived) continue;
     const since = Math.max(session.updatedAt, seenAt(session.id));
-    if (Number.isFinite(remoteUpdatedAt) && remoteUpdatedAt > since) {
+    for (const linked of linkedWorkItemsOf(session)) {
+      const item = workItems.get(linkedWorkItemUpdateKey(linked));
+      if (!item) continue;
+      const remoteUpdatedAt = Date.parse(item.updatedAt);
+      if (!Number.isFinite(remoteUpdatedAt) || remoteUpdatedAt <= since) {
+        continue;
+      }
+      if ((updates.get(session.id)?.updatedAt ?? 0) >= remoteUpdatedAt) {
+        continue;
+      }
       updates.set(session.id, {
         sessionId: session.id,
         item,

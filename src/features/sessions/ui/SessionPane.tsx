@@ -34,6 +34,8 @@ import {
 } from "../../projects/model/recents";
 import {
   isTerminalSession,
+  linkedWorkItemsOf,
+  sameLinkedWorkItem,
   sessionDisplayTitle,
   sessionDraftBlock,
   sessionWorkCwd,
@@ -858,9 +860,15 @@ const LocalSessionPane = memo(function LocalSessionPane({
                   onLinkedWorkItemUpdateCardDismiss?.(session.id)
                 }
                 onOpenDiscussion={() => {
-                  if (session.linkedWorkItem) {
-                    onOpenLinkedWorkItem?.(session.linkedWorkItem, session.id);
-                  }
+                  // Open the link the card describes, not just the card's item.
+                  const card = session.linkedWorkItemUpdateCard;
+                  const item =
+                    (card &&
+                      linkedWorkItemsOf(session).find((linked) =>
+                        sameLinkedWorkItem(linked, card),
+                      )) ||
+                    session.linkedWorkItem;
+                  if (item) onOpenLinkedWorkItem?.(item, session.id);
                 }}
                 onAddToChat={(text) => addSelectionToChat(text, "plain")}
                 onArchiveSession={

@@ -189,6 +189,35 @@ describe("historyWithLiveSessions", () => {
     });
   });
 
+  it("shows links the live session added before the next persist", () => {
+    const cwd = "/tmp/project-a";
+    const pr = (number: number) => ({
+      kind: "pr" as const,
+      repo: "acme/app",
+      number,
+      url: `https://github.com/acme/app/pull/${number}`,
+    });
+    const session = {
+      ...newSession("cursor", cwd),
+      id: "live",
+      title: "cursor · Ship it",
+      linkedWorkItem: pr(43),
+      linkedWorkItems: [pr(43), pr(42)],
+      blocks: [{ id: "u", role: "user" as const, text: "Ship it" }],
+      busy: true,
+    };
+    const stored = {
+      ...summary("live", cwd),
+      title: "cursor · Ship it",
+      linkedWorkItem: pr(42),
+    };
+    const rows = historyWithLiveSessions([stored], [session], cwd);
+    expect(rows[0]).toMatchObject({
+      linkedWorkItem: pr(43),
+      linkedWorkItems: [pr(43), pr(42)],
+    });
+  });
+
   it("does not inject an internal worker without a loaded run", () => {
     const worker = {
       ...newSession("codex", run.cwd),

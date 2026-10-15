@@ -403,6 +403,68 @@ export type LinkedWorkItem = {
   url: string;
 };
 
+/**
+ * A session's GitHub links. `linkedWorkItem` is the one on its card;
+ * `linkedWorkItems` lists every link, newest first, once there is more than one.
+ */
+export type LinkedWorkItems = {
+  linkedWorkItem?: LinkedWorkItem;
+  linkedWorkItems?: LinkedWorkItem[];
+};
+
+export function sameLinkedWorkItem(
+  a: LinkedWorkItem,
+  b: LinkedWorkItem,
+): boolean {
+  return (
+    a.kind === b.kind &&
+    a.number === b.number &&
+    a.repo.trim().toLowerCase() === b.repo.trim().toLowerCase()
+  );
+}
+
+function uniqueLinkedWorkItems(
+  items: readonly LinkedWorkItem[],
+): LinkedWorkItem[] {
+  const unique: LinkedWorkItem[] = [];
+  for (const item of items) {
+    if (!unique.some((seen) => sameLinkedWorkItem(seen, item))) unique.push(item);
+  }
+  return unique;
+}
+
+/**
+ * Every link, newest first. The card's item always leads, so a writer that
+ * only sets `linkedWorkItem` still shows; without it there are no links.
+ */
+export function linkedWorkItemsOf(target: LinkedWorkItems): LinkedWorkItem[] {
+  if (!target.linkedWorkItem) return [];
+  return uniqueLinkedWorkItems([
+    target.linkedWorkItem,
+    ...(target.linkedWorkItems ?? []),
+  ]);
+}
+
+/** Replace every link. The first item is the one shown on the card. */
+export function withLinkedWorkItems<T extends LinkedWorkItems>(
+  target: T,
+  items: readonly LinkedWorkItem[],
+): T {
+  const unique = uniqueLinkedWorkItems(items);
+  return {
+    ...target,
+    linkedWorkItem: unique[0],
+    linkedWorkItems: unique.length > 1 ? unique : undefined,
+  };
+}
+
+/** Changes whenever a link is added, removed or reordered. */
+export function linkedWorkItemsKey(target: LinkedWorkItems): string {
+  return linkedWorkItemsOf(target)
+    .map((item) => item.url)
+    .join(" ");
+}
+
 export const RUNTIME_MODES: RuntimeMode[] = [
   "supervised",
   "auto-accept-edits",
@@ -537,6 +599,8 @@ export type Session = {
   inboxCard?: InboxComposerCard;
   /** GitHub issue or pull request shown on the persisted session card. */
   linkedWorkItem?: LinkedWorkItem;
+  /** Every linked issue or PR, newest first, when there is more than one. */
+  linkedWorkItems?: LinkedWorkItem[];
   /** Automation that created or last launched this session. */
   automationId?: string;
   /** Where the session runs. Absent means "chat". */

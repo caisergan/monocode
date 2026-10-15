@@ -34,6 +34,7 @@ import type {
   HandoffStatus,
   InterjectionMeta,
   LinkedWorkItem,
+  LinkedWorkItems,
   RuntimeMode,
   SecondOpinionMeta,
   Session,
@@ -47,7 +48,13 @@ import type {
   TurnMetrics,
 } from "../model/session";
 
-import { HARNESSES, RUNTIME_MODES, isTerminalSession } from "../model/session";
+import {
+  HARNESSES,
+  RUNTIME_MODES,
+  isTerminalSession,
+  linkedWorkItemsOf,
+  withLinkedWorkItems,
+} from "../model/session";
 
 import { restoreOrchestrationProposal } from "../../orchestration/model/orchestrationPlan";
 
@@ -76,6 +83,7 @@ export type SessionSummary = {
   pinned?: boolean;
   draft?: boolean;
   linkedWorkItem?: LinkedWorkItem;
+  linkedWorkItems?: LinkedWorkItem[];
   automationId?: string;
   /** Only present for terminal sessions; absent means chat. */
   surface?: SessionSurface;
@@ -102,7 +110,7 @@ type SessionRecord = {
   branch?: string | null;
   worktreeCwd?: string | null;
   worktreeRemoved?: boolean;
-  linkedWorkItem?: LinkedWorkItem | null;
+  linkedWorkItem?: StoredLinkedWorkItem | null;
   automationId?: string | null;
   surface?: string | null;
   terminalSync?: unknown;
@@ -129,7 +137,7 @@ type SessionUpsertPayload = {
   branch?: string;
   worktreeCwd?: string;
   worktreeRemoved?: boolean;
-  linkedWorkItem?: LinkedWorkItem;
+  linkedWorkItem?: StoredLinkedWorkItem;
   automationId?: string;
   surface?: SessionSurface;
   terminalSync?: TerminalSync;
@@ -160,7 +168,7 @@ function persistableMeta(
   session: Session,
   includeQueue = true,
 ): Omit<SessionUpsertPayload, "blocks"> {
-  const linkedWorkItem = sanitizeLinkedWorkItem(session.linkedWorkItem);
+  const linkedWorkItem = storedLinkedWorkItem(session);
   const queuedMessages = includeQueue
     ? sanitizeQueuedMessages(session.queuedMessages)
     : [];
@@ -368,6 +376,37 @@ export function sanitizeLinkedWorkItem(
     number,
     url: `https://github.com/${repo}/${kind === "pr" ? "pull" : "issues"}/${number}`,
   };
+}
+
+/**
+ * Every link lives in the one stored value: the card's item, with the rest
+ * under `more`. Older builds and the mobile app read just the card's item.
+ */
+type StoredLinkedWorkItem = LinkedWorkItem & { more?: LinkedWorkItem[] };
+
+export function storedLinkedWorkItem(
+  target: LinkedWorkItems,
+): StoredLinkedWorkItem | undefined {
+  const [first, ...more] = linkedWorkItemsOf(target).flatMap(
+    (item) => sanitizeLinkedWorkItem(item) ?? [],
+  );
+  if (!first) return undefined;
+  return more.length > 0 ? { ...first, more } : first;
+}
+
+export function linkedWorkItemsFromStore(value: unknown): LinkedWorkItems {
+  const first = sanitizeLinkedWorkItem(value);
+  if (!first) return {};
+  const more = (value as { more?: unknown }).more;
+  const items = linkedWorkItemsOf({
+    linkedWorkItem: first,
+    linkedWorkItems: Array.isArray(more)
+      ? more.flatMap((item) => sanitizeLinkedWorkItem(item) ?? [])
+      : [],
+  });
+  return items.length > 1
+    ? { linkedWorkItem: first, linkedWorkItems: items }
+    : { linkedWorkItem: first };
 }
 
 export function sanitizeSessionForPersist(
@@ -865,11 +904,12 @@ export async function setSessionPinned(
   await invoke<void>("session_set_pinned", { sessionId, pinned });
 }
 
-export async function setSessionLinkedWorkItem(
+/** Save every link, newest first; an empty list removes them all. */
+export async function setSessionLinkedWorkItems(
   sessionId: string,
-  value: LinkedWorkItem | undefined,
+  items: readonly LinkedWorkItem[],
 ): Promise<void> {
-  const linkedWorkItem = sanitizeLinkedWorkItem(value);
+  const linkedWorkItem = storedLinkedWorkItem(withLinkedWorkItems({}, items));
   await enqueueSessionWrite(sessionId, () =>
     invoke<void>("session_set_linked_work_item", {
       sessionId,
@@ -1451,7 +1491,7 @@ function sanitizeTaskList(value: unknown): TaskListMeta | null {
 }
 
 function normalizeSummary(summary: SessionSummary): SessionSummary {
-  const linkedWorkItem = sanitizeLinkedWorkItem(summary.linkedWorkItem);
+  const links = linkedWorkItemsFromStore(summary.linkedWorkItem);
   return {
     ...summary,
     harness: asHarness(summary.harness),
@@ -1467,7 +1507,8 @@ function normalizeSummary(summary: SessionSummary): SessionSummary {
     pinned: summary.pinned || undefined,
     draft: summary.draft || undefined,
     sidebarHidden: summary.sidebarHidden === true || undefined,
-    linkedWorkItem,
+    linkedWorkItem: links.linkedWorkItem,
+    linkedWorkItems: links.linkedWorkItems,
     ...(typeof summary.automationId === "string" &&
     isPersistableId(summary.automationId)
       ? { automationId: summary.automationId }
@@ -1482,7 +1523,7 @@ function recordToSession(record: SessionRecord): Session {
         .map((block) => sanitizeBlock(block, { hydrate: true }))
         .filter((block): block is Block => block != null)
     : [];
-  const linkedWorkItem = sanitizeLinkedWorkItem(record.linkedWorkItem);
+  const links = linkedWorkItemsFromStore(record.linkedWorkItem);
   const queuedMessages = sanitizeQueuedMessages(record.queuedMessages);
   return {
     id: record.id,
@@ -1518,7 +1559,7 @@ function recordToSession(record: SessionRecord): Session {
     ...(record.branch ? { branch: record.branch } : {}),
     ...(record.worktreeCwd ? { worktreeCwd: record.worktreeCwd } : {}),
     ...(record.worktreeRemoved ? { worktreeRemoved: true } : {}),
-    ...(linkedWorkItem ? { linkedWorkItem } : {}),
+    ...links,
     ...(record.automationId && isPersistableId(record.automationId)
       ? { automationId: record.automationId }
       : {}),
