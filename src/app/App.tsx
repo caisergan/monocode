@@ -10165,16 +10165,21 @@ function Workspace({
     [openSessionBeside],
   );
 
-  const onContinueInNewChat = useCallback(
-    (sourceId: string, turn: Block[]) => {
-      const source = sessionsRef.current.find(
+  /** Opens a fresh chat the way "+" does, with the session's recap waiting in
+   * its composer to go out with the first message. */
+  const onContinueInNewSession = useCallback(
+    async (sourceId: string) => {
+      const open = sessionsRef.current.find(
         (session) => session.id === sourceId,
       );
-      if (!source || source.worktreeRemoved) return;
+      // A closed session is read for its recap only, not opened.
+      const source = open ?? (await loadStoredSession(sourceId));
+      if (!source || source.worktreeRemoved || source.inboxAsk) return;
+      if (!open) rememberLoadedSession(loadedSessionCache.current, source);
       // A fresh chat runs on whatever account is selected now, like any new one.
       const { harness } = source;
       const { brief, changedFiles } = buildContinuationBrief(
-        sessionThroughTurn(source, turn),
+        source,
         sessionWorkCwd(source),
       );
       const display = sessionDisplayTitle(source.title, source.harness);
@@ -10193,11 +10198,23 @@ function Workspace({
           brief,
           userRequest: "",
           files: changedFiles,
+          source: display,
         }),
       };
-      openSessionBeside(sourceId, session, source.cwd, true);
+      setSearchViewOpen(false);
+      setInboxViewOpen(false);
+      setNotesViewOpen(false);
+      setAutomationsViewOpen(false);
+      const tab = newTab(session.id);
+      const next = [...sessionsRef.current, session];
+      sessionsRef.current = next;
+      setSessions(next);
+      appendTab(tab, source.cwd);
+      setActiveTabId(tab.id);
+      setProjectTerminalFocused(false);
+      setComposerFocused(true);
     },
-    [openSessionBeside],
+    [appendTab, loadStoredSession],
   );
 
   const autoContinueKey = sessions
@@ -12970,7 +12987,6 @@ function Workspace({
     onBuildPlan,
     onSecondOpinion,
     onHandoff,
-    onContinueInNewChat,
     onBtwSubmit,
     onBtwRetry,
     onBtwDelete,
@@ -13185,6 +13201,7 @@ function Workspace({
               onPlaceSessionOnPane={onPlaceSessionOnPane}
               onRenameSession={onRenameHistorySession}
               onToggleSessionSurface={onToggleHistorySessionSurface}
+              onContinueInNewSession={onContinueInNewSession}
               onArchiveSession={onArchiveHistorySession}
               onArchiveSessions={onArchiveHistorySessions}
               onPinSession={onPinHistorySession}

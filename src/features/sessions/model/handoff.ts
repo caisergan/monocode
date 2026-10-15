@@ -22,6 +22,8 @@ export type HandoffComposerCard = {
   brief: string;
   request?: string;
   files?: number;
+  /** Title of the chat the recap was read from. */
+  source?: string;
 };
 
 export function buildHandoffComposerCard(input: {
@@ -30,6 +32,7 @@ export function buildHandoffComposerCard(input: {
   brief: string;
   userRequest: string;
   files: string[];
+  source?: string;
 }): HandoffComposerCard {
   const request = input.userRequest.replace(/\s+/g, " ").trim();
   return {
@@ -38,6 +41,7 @@ export function buildHandoffComposerCard(input: {
     brief: input.brief,
     ...(request ? { request: request.slice(0, 240) } : {}),
     ...(input.files.length > 0 ? { files: input.files.length } : {}),
+    ...(input.source ? { source: input.source } : {}),
   };
 }
 
