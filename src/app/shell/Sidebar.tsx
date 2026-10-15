@@ -284,6 +284,8 @@ type Props = {
   onRenameSession?: (sessionId: string, title: string) => void;
   /** Moves the session between MonoCode's chat and the agent's own CLI. */
   onToggleSessionSurface?: (sessionId: string) => void;
+  /** Opens a fresh chat seeded with this session's recap. */
+  onContinueInNewSession?: (sessionId: string) => void;
   onArchiveSession?: (sessionId: string, archived: boolean) => void;
   onArchiveSessions?: (
     sessionIds: readonly string[],
@@ -401,6 +403,7 @@ function SidebarComponent({
   onPlaceSessionOnPane: onPlaceLocalSessionOnPane,
   onRenameSession: onRenameLocalSession,
   onToggleSessionSurface: onToggleLocalSessionSurface,
+  onContinueInNewSession: onContinueLocalSessionInNewSession,
   onArchiveSession: onArchiveLocalSession,
   onArchiveSessions: onArchiveLocalSessions,
   onPinSession: onPinLocalSession,
@@ -540,6 +543,10 @@ function SidebarComponent({
   const onToggleSessionSurface = remoteProject
     ? undefined
     : onToggleLocalSessionSurface;
+  // The recap is read from the transcript, which only this computer holds.
+  const onContinueInNewSession = remoteProject
+    ? undefined
+    : onContinueLocalSessionInNewSession;
   const onRenameSession = remoteProject
     ? (sessionId: string, title: string) => { void remoteChange(sessionId, { title }); }
     : onRenameLocalSession;
@@ -1200,6 +1207,18 @@ function SidebarComponent({
         ]
       : []),
     ...(!multipleMenuSessions &&
+    onContinueInNewSession &&
+    menuSessions[0] &&
+    !menuSessions[0].worktreeRemoved
+      ? [
+          {
+            kind: "item" as const,
+            id: "continue-new-session",
+            label: "Continue in new session",
+          },
+        ]
+      : []),
+    ...(!multipleMenuSessions &&
     onToggleSessionSurface &&
     menuSessions[0] &&
     supportsTerminalSurface(menuSessions[0].harness)
@@ -1373,6 +1392,10 @@ function SidebarComponent({
     }
     if (id === "rename") {
       setRenamingSessionId(sessionId);
+      return;
+    }
+    if (id === "continue-new-session") {
+      onContinueInNewSession?.(sessionId);
       return;
     }
     if (id === "toggle-surface") {

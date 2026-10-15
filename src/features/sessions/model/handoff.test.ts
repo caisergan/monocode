@@ -314,6 +314,24 @@ describe("handoff composer card", () => {
     });
   });
 
+  it("names the chat a continuation was read from", () => {
+    expect(
+      buildHandoffComposerCard({
+        from: "claude",
+        to: "claude",
+        brief: "Recap",
+        userRequest: "",
+        files: [],
+        source: "Fix the footer",
+      }),
+    ).toEqual({
+      from: "claude",
+      to: "claude",
+      brief: "Recap",
+      source: "Fix the footer",
+    });
+  });
+
   it("drops empty request and file fields on the transcript card", () => {
     expect(
       handoffTurnCard(

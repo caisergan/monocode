@@ -676,6 +676,53 @@ describe("sidebar session IDs", () => {
   });
 });
 
+describe("sidebar continue in new session", () => {
+  function menuItems(sessionId: string) {
+    act(() => {
+      container
+        .querySelector(`[data-session-card="${sessionId}"]`)!
+        .dispatchEvent(
+          new MouseEvent("contextmenu", { bubbles: true, cancelable: true }),
+        );
+    });
+    return Array.from(
+      document.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
+    );
+  }
+
+  it("continues the right-clicked session", () => {
+    const onContinueInNewSession = vi.fn();
+    props.onContinueInNewSession = onContinueInNewSession;
+    props.sessions = [
+      props.sessions[0],
+      {
+        ...props.sessions[0],
+        id: "session-2",
+        updatedAt: props.sessions[0].updatedAt - 1,
+      },
+    ];
+    act(() => render());
+    const item = menuItems("session-2").find(
+      (entry) => entry.textContent === "Continue in new session",
+    )!;
+    act(() => item.click());
+    expect(onContinueInNewSession).toHaveBeenCalledExactlyOnceWith(
+      "session-2",
+    );
+  });
+
+  it("is not offered once the session's worktree is gone", () => {
+    props.onContinueInNewSession = vi.fn();
+    props.sessions = [{ ...props.sessions[0], worktreeRemoved: true }];
+    act(() => render());
+    expect(
+      menuItems("session-1").some(
+        (entry) => entry.textContent === "Continue in new session",
+      ),
+    ).toBe(false);
+  });
+});
+
 describe("sidebar session rename", () => {
   it.each(["idle", "working", "needs approval"])(
     "renames from the menu and restores navigation (status=%s)",

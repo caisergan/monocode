@@ -230,8 +230,6 @@ type Props = {
   planBuildTargets?: boolean;
   onSecondOpinion?: (target: ModelTarget, turn: Block[]) => void;
   onHandoff?: (target: ModelTarget, turn: Block[]) => void;
-  /** Offered on the latest turn only: a fresh chat seeded with a recap. */
-  onContinueInNewChat?: (turn: Block[]) => void;
   onEditLastTurn?: () => void;
   editingLastTurn?: boolean;
   onJumpToBottomChange?: (show: boolean) => void;
@@ -295,7 +293,6 @@ function AgentTranscriptComponent({
   planBuildTargets = true,
   onSecondOpinion,
   onHandoff,
-  onContinueInNewChat,
   onEditLastTurn,
   editingLastTurn = false,
   onJumpToBottomChange,
@@ -1439,11 +1436,6 @@ function AgentTranscriptComponent({
                   onHandoff={
                     onHandoff ? (target) => onHandoff(target, turn) : undefined
                   }
-                  onContinueInNewChat={
-                    isLastTurn && onContinueInNewChat
-                      ? () => onContinueInNewChat(turn)
-                      : undefined
-                  }
                 />
               ) : null}
             </div>
@@ -1624,7 +1616,6 @@ function TurnDuration({
   fromModel,
   onSecondOpinion,
   onHandoff,
-  onContinueInNewChat,
 }: {
   elapsedMs: number | null;
   label?: string;
@@ -1646,7 +1637,6 @@ function TurnDuration({
   fromModel?: string;
   onSecondOpinion?: (target: ModelTarget) => void;
   onHandoff?: (target: ModelTarget) => void;
-  onContinueInNewChat?: () => void;
 }) {
   const label =
     completionLabel ?? formatWorkingDuration(elapsedMs, modelName, true);
@@ -1699,11 +1689,7 @@ function TurnDuration({
           </button>
         ) : null}
         {fromHarness && onHandoff ? (
-          <HandoffButton
-            from={fromHarness}
-            onPick={onHandoff}
-            onContinueInNewChat={onContinueInNewChat}
-          />
+          <HandoffButton from={fromHarness} onPick={onHandoff} />
         ) : null}
         {fromHarness && onSecondOpinion ? (
           <SecondOpinionButton
