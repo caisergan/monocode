@@ -97,6 +97,7 @@ import {
 import { getComposerDraft, setComposerDraft } from "../model/draftCache";
 import { resolveModel } from "../model/models";
 import { sessionTokenTotals } from "../model/sessionTokens";
+import { promptCacheState } from "../model/promptCache";
 import { isAstraModel } from "../model/astraWelcome";
 import { isOpus55Model } from "../model/opusWelcome";
 import { AstraWelcome } from "./AstraWelcome";
@@ -653,6 +654,14 @@ const LocalSessionPane = memo(function LocalSessionPane({
         : undefined,
     [session.blocks, session.harness],
   );
+  // Only Claude reports how long it keeps the cache; others would be a guess.
+  const promptCache = useMemo(
+    () =>
+      session.harness === "claude"
+        ? promptCacheState(session.blocks)
+        : undefined,
+    [session.blocks, session.harness],
+  );
   const showDeckProjectPicker = isEmpty && !looksLikeProject(session.cwd);
   // The agent's input always sits at the bottom, like a chat.
   const dockComposer =
@@ -689,6 +698,7 @@ const LocalSessionPane = memo(function LocalSessionPane({
       hideTopBar={!!session.inboxAsk}
       context={session.context}
       tokenTotals={tokenTotals}
+      promptCache={promptCache}
       quoteRequest={quoteRequest}
       initialDraft={
         draftRef.current ??

@@ -1226,6 +1226,7 @@ export function turnMetricsFromResult(
     "cache_creation_input_tokens" in usage;
   const cacheableInput = inputTokens + cacheReadTokens + cacheWriteTokens;
   if (!inputTokens && !outputTokens && !cacheableInput) return undefined;
+  const cacheTtlSeconds = cacheTtlFromUsage(usage);
   return {
     ...(inputTokens ? { inputTokens } : {}),
     ...(outputTokens ? { outputTokens } : {}),
@@ -1234,7 +1235,22 @@ export function turnMetricsFromResult(
     ...(cacheReported && cacheableInput
       ? { cacheHitPercent: (cacheReadTokens / cacheableInput) * 100 }
       : {}),
+    ...(cacheTtlSeconds ? { cacheTtlSeconds } : {}),
   };
+}
+
+/**
+ * Lifetime of the prompt cache the turn wrote, from the 5m/1h write split.
+ *
+ * Claude Code writes the conversation to the 1h cache on subscription plans
+ * and its side calls to the 5m one, so the longer tier wins when both appear.
+ * A turn that wrote nothing says nothing about the tier.
+ */
+function cacheTtlFromUsage(usage: Record<string, unknown>): number | undefined {
+  const creation = asRecord(usage.cache_creation);
+  if (numberField(creation, "ephemeral_1h_input_tokens") > 0) return 3600;
+  if (numberField(creation, "ephemeral_5m_input_tokens") > 0) return 300;
+  return undefined;
 }
 
 /**

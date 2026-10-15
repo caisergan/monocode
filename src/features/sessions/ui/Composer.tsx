@@ -40,6 +40,12 @@ import { useFileDrop } from "../hooks/useFileDrop";
 import type { ContextUsage } from "../model/contextUsage";
 import type { SessionTokenTotals } from "../model/sessionTokens";
 import {
+  promptCacheSendConfirmSkipped,
+  promptCacheWorthWarning,
+  skipPromptCacheSendConfirm,
+  type PromptCacheState,
+} from "../model/promptCache";
+import {
   loadProjectFiles,
   peekProjectFiles,
   recentOpenedFiles,
@@ -101,6 +107,11 @@ import {
 import { AccessPicker } from "./AccessPicker";
 import { ComposerRunner } from "./ComposerRunner";
 import { ContextMeter, SessionTokenCount } from "./ContextMeter";
+import {
+  PromptCacheSendConfirm,
+  PromptCacheWarning,
+  usePromptCacheExpired,
+} from "./PromptCacheWarning";
 import { AttachmentChip } from "./AttachmentChip";
 import { BranchPicker } from "../../source-control/ui/BranchPicker";
 import { WorktreePicker } from "../../source-control/ui/WorktreePicker";
@@ -128,6 +139,7 @@ import { useProjectBranchesState } from "../../source-control/hooks/useProjectBr
 import {
   COMPOSER_RUNNER_CHANGE_EVENT,
   loadComposerRunner,
+  loadConfirmExpiredCacheSend,
   loadModelControls,
   loadNotesEnabled,
   subscribeModelControls,
@@ -229,6 +241,8 @@ type Props = {
   context?: ContextUsage;
   /** Running input/output totals, shown beside the context ring. */
   tokenTotals?: SessionTokenTotals;
+  /** Claude prompt cache window; a warning shows once it runs out. */
+  promptCache?: PromptCacheState;
   compactSupported?: boolean;
   quoteRequest?: QuoteRequest;
   initialDraft?: string;
@@ -355,6 +369,7 @@ export function Composer({
   remoteFeatures,
   context,
   tokenTotals,
+  promptCache,
   compactSupported = false,
   quoteRequest,
   initialDraft,
@@ -427,6 +442,20 @@ export function Composer({
   /** Pasted and dropped files still reading when Send is pressed. */
   const pasteFlightRef = useRef<Promise<void> | null>(null);
   const submitLockRef = useRef(false);
+  const sendAreaRef = useRef<HTMLDivElement>(null);
+  const cacheExpired = usePromptCacheExpired(promptCache);
+  // A running turn rebuilds the cache, so follow-ups into it never warn.
+  const cacheWarning =
+    promptCache &&
+    cacheExpired &&
+    !busy &&
+    promptCacheWorthWarning(context?.used)
+      ? promptCache
+      : undefined;
+  const cacheWarningRef = useRef(cacheWarning);
+  cacheWarningRef.current = cacheWarning;
+  const cacheSendConfirmedRef = useRef(false);
+  const [cacheConfirmOpen, setCacheConfirmOpen] = useState(false);
   const positionedInitialDraft = useRef(false);
   const slashRef = useRef<SlashToken | null>(null);
   const mentionRef = useRef<MentionToken | null>(null);
@@ -1276,6 +1305,7 @@ export function Composer({
     submitLockRef.current = true;
     void completeSubmit(value).finally(() => {
       submitLockRef.current = false;
+      cacheSendConfirmedRef.current = false;
     });
   };
   const completeSubmit = async (submittedValue: string) => {
@@ -1401,6 +1431,15 @@ export function Composer({
         : text;
     const files = attachmentsRef.current;
     if (!text && files.length === 0 && !noteCard && !handoffCard) return;
+    if (
+      cacheWarningRef.current &&
+      !cacheSendConfirmedRef.current &&
+      !promptCacheSendConfirmSkipped(sessionId) &&
+      loadConfirmExpiredCacheSend()
+    ) {
+      setCacheConfirmOpen(true);
+      return;
+    }
     // Clear the parent draft before onSubmit. The app can synchronously remount
     // the composer when the first message leaves an empty session (EmptySession →
     // docked layout). If draftRef still holds the sent text, the new instance
@@ -2399,7 +2438,33 @@ export function Composer({
                 <span>Cancel edit</span>
               </button>
             ) : null}
-            <div className="flex shrink-0 items-center gap-1">
+            <div ref={sendAreaRef} className="flex shrink-0 items-center gap-1">
+              {cacheWarning ? (
+                <PromptCacheWarning
+                  cache={cacheWarning}
+                  contextUsed={context?.used}
+                />
+              ) : null}
+              {cacheConfirmOpen && cacheWarning ? (
+                <PromptCacheSendConfirm
+                  anchor={sendAreaRef}
+                  cache={cacheWarning}
+                  contextUsed={context?.used}
+                  onCancel={() => {
+                    setCacheConfirmOpen(false);
+                    ref.current?.focus();
+                  }}
+                  onSend={(skipForChat) => {
+                    if (skipForChat && sessionId) {
+                      skipPromptCacheSendConfirm(sessionId);
+                    }
+                    setCacheConfirmOpen(false);
+                    cacheSendConfirmedRef.current = true;
+                    submit(ref.current?.value ?? "");
+                    ref.current?.focus();
+                  }}
+                />
+              ) : null}
               <ComposerAction
                 busy={busy}
                 disabled={disabled}

@@ -309,6 +309,8 @@ export type TurnMetrics = {
   cacheWriteTokens?: number;
   /** Provider-normalized share of input served from cache, as a percentage. */
   cacheHitPercent?: number;
+  /** How long the provider keeps the prompt cache this turn wrote, in seconds. */
+  cacheTtlSeconds?: number;
 };
 
 export type Block = {

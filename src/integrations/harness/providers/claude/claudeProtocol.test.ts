@@ -979,6 +979,37 @@ describe("turnMetricsFromResult", () => {
       cacheHitPercent: (16_652 / (2 + 12_941 + 16_652)) * 100,
     });
   });
+
+  it("reads the cache lifetime from the 5m/1h write split", () => {
+    const withCreation = (cache_creation: Record<string, number>) =>
+      turnMetricsFromResult({
+        usage: {
+          input_tokens: 2,
+          cache_creation_input_tokens: 500,
+          cache_read_input_tokens: 1_000,
+          output_tokens: 4,
+          cache_creation,
+        },
+      })?.cacheTtlSeconds;
+    expect(
+      withCreation({
+        ephemeral_1h_input_tokens: 400,
+        ephemeral_5m_input_tokens: 100,
+      }),
+    ).toBe(3600);
+    expect(
+      withCreation({
+        ephemeral_1h_input_tokens: 0,
+        ephemeral_5m_input_tokens: 500,
+      }),
+    ).toBe(300);
+    expect(
+      withCreation({
+        ephemeral_1h_input_tokens: 0,
+        ephemeral_5m_input_tokens: 0,
+      }),
+    ).toBeUndefined();
+  });
 });
 
 describe("subagent messages", () => {
