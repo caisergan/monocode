@@ -5,6 +5,7 @@ import {
   useReducer,
   useRef,
   useState,
+  type ComponentProps,
   type CSSProperties,
   type PointerEvent as ReactPointerEvent,
 } from "react";
@@ -193,6 +194,7 @@ type Shared = {
   onTerminalExit?: (sessionId: string) => void;
   onTerminalMetaChange?: (fileId: string, patch: TerminalMetaPatch) => void;
   onBrowserNavigate?: (fileId: string, url: string) => void;
+  renderPullRequest?: ComponentProps<typeof FilePane>["renderPullRequest"];
   onOpenBrowser?: (url: string, cwd?: string) => void;
   transcriptPool?: TranscriptPool;
 };
@@ -286,6 +288,7 @@ function PaneTreeComponent({
   onTerminalExit,
   onTerminalMetaChange,
   onBrowserNavigate,
+  renderPullRequest,
   onOpenBrowser,
   transcriptPool,
 }: Props) {
@@ -505,6 +508,7 @@ function PaneTreeComponent({
                   onTerminalMetaChange={onTerminalMetaChange}
                   onBrowserNavigate={onBrowserNavigate}
                   onOpenBrowser={onOpenBrowser}
+                  renderPullRequest={renderPullRequest}
                 />
               ) : session ? (
                 <SessionPane

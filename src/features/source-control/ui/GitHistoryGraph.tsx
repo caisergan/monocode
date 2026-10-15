@@ -291,16 +291,28 @@ export function saveGraphPanelHeight(height: number) {
   graphPanelHeight = height;
 }
 
+let pullRequestPanelHeight = GRAPH_PANEL_DEFAULT;
+
+export function loadPullRequestPanelHeight(): number {
+  return pullRequestPanelHeight;
+}
+
+export function savePullRequestPanelHeight(height: number) {
+  pullRequestPanelHeight = height;
+}
+
 export function GraphResizeSash({
   height,
   onHeightPaint,
   onHeightCommit,
   maxHeight,
+  label = "Resize graph",
 }: {
   height: number;
   onHeightPaint: (height: number) => void;
   onHeightCommit: (height: number) => void;
   maxHeight: () => number;
+  label?: string;
 }) {
   const drag = useRef<{ start: number; size: number } | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -368,7 +380,7 @@ export function GraphResizeSash({
     <div
       role="separator"
       aria-orientation="horizontal"
-      aria-label="Resize graph"
+      aria-label={label}
       aria-valuenow={height}
       className={`z-10 h-1.5 shrink-0 cursor-row-resize touch-none ${
         dragging ? "bg-content/15" : "hover:bg-content/10"

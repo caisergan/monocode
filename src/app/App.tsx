@@ -221,6 +221,7 @@ import {
   nextTerminalTitle,
   openChangesTab,
   openCommitTab,
+  openPullRequestTab,
   newAgentTab,
   newBrowserTab,
   updateBrowserTab,
@@ -241,6 +242,7 @@ import {
   withSurfacePanes,
   type EditorPane,
   type FilePaneTab,
+  type PullRequestTabSource,
   type FocusDir,
   type PaneEdge,
   type SplitDir,
@@ -843,6 +845,10 @@ const LinkedWorkItemPanel = lazySurface(async () => {
   const module = await import("../features/inbox/ui/InboxView");
   return { default: module.LinkedWorkItemPanel };
 });
+const LinkedWorkItemDocument = lazySurface(async () => {
+  const module = await import("../features/inbox/ui/InboxView");
+  return { default: module.LinkedWorkItemDocument };
+});
 const NotesView = lazySurface(
   async () => {
     const module = await import("../features/notes/ui/NotesView");
@@ -862,6 +868,14 @@ type LinkedWorkItemPanelState = {
   item: LinkedWorkItem;
   sessionId: string;
   cwd: string;
+};
+
+/** A pull request opened from the Changes list, beside whatever is showing. */
+type ProjectPullRequestPanelState = {
+  item: LinkedWorkItem;
+  cwd: string;
+  /** Project it was opened for; switching projects closes it. */
+  projectCwd: string;
 };
 
 type SubmitOptions = ComposerTurnOptions & {
@@ -1246,6 +1260,8 @@ function Workspace({
     ReadonlyMap<string, LinkedWorkItemPanelState>
   >(() => new Map());
   const linkedWorkItemPanelRequest = useRef(0);
+  const [projectPullRequestPanel, setProjectPullRequestPanel] =
+    useState<ProjectPullRequestPanelState | null>(null);
   const closeLinkedWorkItemPanel = useCallback((sessionId: string) => {
     linkedWorkItemPanelRequest.current += 1;
     setLinkedWorkItemPanels((current) => {
@@ -1865,6 +1881,12 @@ function Workspace({
     activeFile?.projectCwd ?? activeFile?.cwd ?? active?.cwd ?? projectCwd;
   const sidebarCwdRef = useRef(sidebarCwd);
   sidebarCwdRef.current = sidebarCwd;
+  // A pull request opened from one project's Changes list leaves with it.
+  useEffect(() => {
+    setProjectPullRequestPanel((panel) =>
+      panel && !sameProjectPath(panel.projectCwd, sidebarCwd) ? null : panel,
+    );
+  }, [sidebarCwd]);
   const [sidebarTabSelection, setSidebarTabSelection] = useState<{
     project: string;
     tab: SidebarTabId;
@@ -11903,10 +11925,53 @@ function Workspace({
     });
   }, []);
 
+  const onOpenProjectPullRequest = useCallback(
+    (item: LinkedWorkItem, cwd: string) => {
+      setFilePickerOpen(false);
+      setSettingsOpen(false);
+      setSearchViewOpen(false);
+      setNotesViewOpen(false);
+      setAutomationsViewOpen(false);
+      setInboxViewOpen(false);
+      setProjectPullRequestPanel({
+        item,
+        cwd,
+        projectCwd: sidebarCwdRef.current,
+      });
+    },
+    [],
+  );
+
+  const onExpandPullRequest = useCallback(
+    (item: LinkedWorkItem, cwd: string, title?: string) => {
+      if (item.kind !== "pr") return;
+      setTabs((prev) =>
+        prev.map((tab) =>
+          tab.id === activeTabId
+            ? openPullRequestTab(
+                tab,
+                cwd,
+                {
+                  repo: item.repo,
+                  number: item.number,
+                  url: item.url,
+                  ...(title?.trim() ? { title: title.trim() } : {}),
+                },
+                sidebarCwdRef.current,
+              )
+            : tab,
+        ),
+      );
+      setComposerFocused(false);
+    },
+    [activeTabId],
+  );
+
   const onOpenLinkedWorkItem = useCallback(
     (item: LinkedWorkItem, sessionId: string) => {
       const request = linkedWorkItemPanelRequest.current + 1;
       linkedWorkItemPanelRequest.current = request;
+      setProjectPullRequestPanel(null);
       setFilePickerOpen(false);
       setSettingsOpen(false);
       setSearchViewOpen(false);
@@ -12003,6 +12068,39 @@ function Workspace({
       onSubmit,
       onSelectHistorySession,
       sessionDefaults?.runtimeMode,
+    ],
+  );
+
+  const renderPullRequest = useCallback(
+    (
+      file: FilePaneTab & { pullRequest: PullRequestTabSource },
+      visible: boolean,
+    ) => {
+      const { repo, number, url } = file.pullRequest;
+      return (
+        <LinkedWorkItemDocument
+          target={{ kind: "pr", repo, number, url }}
+          cwd={file.cwd}
+          recents={recents}
+          visible={visible}
+          relatedSessions={inboxRelatedSessions.filter(
+            (session) =>
+              session.linkedWorkItem?.kind === "pr" &&
+              session.linkedWorkItem.number === number &&
+              session.linkedWorkItem.repo.toLowerCase() === repo.toLowerCase(),
+          )}
+          repairSessions={repairSessions}
+          onRepairChecks={onRepairChecks}
+          onOpenSession={onOpenInboxSession}
+        />
+      );
+    },
+    [
+      inboxRelatedSessions,
+      onOpenInboxSession,
+      onRepairChecks,
+      recents,
+      repairSessions,
     ],
   );
 
@@ -13109,6 +13207,9 @@ function Workspace({
               onOpenDiff={onOpenWorkingTreeDiff}
               onOpenAllChanges={onOpenAllChanges}
               onOpenCommit={onOpenCommit}
+              onOpenPullRequest={onOpenProjectPullRequest}
+              onStartPullRequest={onStartInboxItem}
+              activePullRequest={projectPullRequestPanel?.item ?? null}
               selectedDiffPath={
                 activeTab ? selectedChangePath(activeTab, gitCwd) : undefined
               }
@@ -13360,6 +13461,7 @@ function Workspace({
                                     onTerminalMetaChange={onTerminalMetaChange}
                                     onBrowserNavigate={onBrowserNavigate}
                                     onOpenBrowser={onOpenBrowser}
+                                    renderPullRequest={renderPullRequest}
                                   />
                                 </div>
                               </div>
@@ -13430,14 +13532,58 @@ function Workspace({
                             !notesViewOpen &&
                             !automationsViewOpen &&
                             !monoViewId &&
+                            !projectPullRequestPanel &&
                             activeLinkedWorkItemPanel?.sessionId ===
                               panel.sessionId
                           }
                           onClose={() =>
                             closeLinkedWorkItemPanel(panel.sessionId)
                           }
+                          onExpand={
+                            panel.item.kind === "pr"
+                              ? (title) => {
+                                  onExpandPullRequest(
+                                    panel.item,
+                                    panel.cwd,
+                                    title,
+                                  );
+                                  closeLinkedWorkItemPanel(panel.sessionId);
+                                }
+                              : undefined
+                          }
                         />
                       ))}
+                      {projectPullRequestPanel ? (
+                        <LinkedWorkItemPanel
+                          key="project-pull-request"
+                          repairSessions={repairSessions}
+                          onRepairChecks={onRepairChecks}
+                          onOpenSession={(sessionId) => {
+                            setProjectPullRequestPanel(null);
+                            onOpenInboxSession(sessionId);
+                          }}
+                          target={projectPullRequestPanel.item}
+                          cwd={projectPullRequestPanel.cwd}
+                          recents={recents}
+                          visible={
+                            !searchViewOpen &&
+                            !settingsOpen &&
+                            !inboxViewOpen &&
+                            !notesViewOpen &&
+                            !automationsViewOpen &&
+                            !monoViewId
+                          }
+                          onClose={() => setProjectPullRequestPanel(null)}
+                          onExpand={(title) => {
+                            onExpandPullRequest(
+                              projectPullRequestPanel.item,
+                              projectPullRequestPanel.cwd,
+                              title,
+                            );
+                            setProjectPullRequestPanel(null);
+                          }}
+                        />
+                      ) : null}
                     </main>
                   </div>
                   {monoCovers ? monoDetailsPanel : null}
@@ -13831,7 +13977,10 @@ function toTitleTab(
       file.plan?.title?.trim() ||
         (file.releaseNotes
           ? releaseNotesTitle(file.releaseNotes.version)
-          : file.terminal
+          : file.pullRequest
+            ? file.pullRequest.title?.trim() ||
+              `Pull request #${file.pullRequest.number}`
+            : file.terminal
             ? terminalTabLabel(file)
             : basename(file.path)),
     );
