@@ -1,4 +1,5 @@
 import type {
+  AgentRunUsage,
   AgentStepKind,
   Attachment,
   InterjectionMeta,
@@ -93,6 +94,21 @@ export type HarnessEvent =
       /** The subagent's own name, when the provider only reveals it here. */
       agentName?: string;
       agentType?: string;
+    }
+  /**
+   * Run-level facts about a subagent, patched onto its parent Agent tool call.
+   * Usage is the provider's running total, so it replaces the previous one.
+   */
+  | {
+      type: "agent.run";
+      callId: string;
+      prompt?: string;
+      agentType?: string;
+      taskId?: string;
+      transcriptPath?: string;
+      startedAt?: number;
+      stopped?: boolean;
+      usage?: AgentRunUsage;
     }
   | {
       type: "approval.requested";

@@ -25,9 +25,13 @@ import { SessionReview } from "./SessionReview";
 import { PromptOutline } from "./PromptOutline";
 import {
   canCompactHarnessContext,
+  canStopHarnessSubagents,
   type ApprovalDecision,
   type UserQuestionReply,
 } from "../../../integrations/harness";
+import { latestTurnSubagents } from "../model/subagentRuns";
+import { SubagentDock } from "./SubagentDock";
+import { SubagentSheet } from "./SubagentSheet";
 import {
   looksLikeProject,
   type RecentProject,
@@ -180,6 +184,8 @@ export type SessionPaneProps = {
   ) => boolean | void;
   onRemoveDraft: (sessionId: string, draftBlockId: string) => boolean | void;
   onStop: (sessionId: string) => void;
+  /** Stop one subagent by the Agent call that spawned it. */
+  onStopSubagent?: (sessionId: string, callId: string) => void;
   onCompactContext: (sessionId: string) => boolean;
   onPlaceSessionInFolder: (
     sessionId: string,
@@ -345,6 +351,7 @@ const LocalSessionPane = memo(function LocalSessionPane({
   onRemoveDraft,
   onSubmit,
   onStop,
+  onStopSubagent,
   onCompactContext,
   onPlaceSessionInFolder,
   onDeleteQueuedMessage,
@@ -666,6 +673,17 @@ const LocalSessionPane = memo(function LocalSessionPane({
     remoteSessionLoading ||
     (!draftBlock && (!isEmpty || inSplit || !!session.inboxAsk || !!agent));
   const composerDockMotion = useComposerDockMotion(dockComposer);
+  // The turn's delegated runs dock on the composer; one opens in a sheet.
+  // A Mono's chat shows its work in its own panel instead.
+  const turnSubagents = useMemo(
+    () => (agent ? [] : latestTurnSubagents(session.blocks)),
+    [agent, session.blocks],
+  );
+  const [openSubagentId, setOpenSubagentId] = useState<string | null>(null);
+  const openSubagent =
+    turnSubagents.find((run) => run.id === openSubagentId) ?? null;
+  const closeSubagent = useCallback(() => setOpenSubagentId(null), []);
+  useEffect(() => setOpenSubagentId(null), [session.id]);
   const draftRef = useRef<string | undefined>(getComposerDraft(session.id));
   const composer = (
     <Composer
@@ -807,7 +825,16 @@ const LocalSessionPane = memo(function LocalSessionPane({
         recallLastTurnRef.current = recall;
       }}
       onEditingLastTurnChange={setEditingLastTurn}
-    />
+    >
+      <SubagentDock
+        runs={turnSubagents}
+        live={!!session.busy}
+        selectedId={openSubagent?.id}
+        onOpen={(id) =>
+          setOpenSubagentId((current) => (current === id ? null : id))
+        }
+      />
+    </Composer>
   );
 
   return (
@@ -1112,6 +1139,22 @@ const LocalSessionPane = memo(function LocalSessionPane({
                     revealBlock={revealBlock}
                   />
                 )}
+                <SubagentSheet
+                  run={openSubagent}
+                  live={!!session.busy}
+                  cwd={workCwd}
+                  visible={visible}
+                  conversationAvailable={!remote}
+                  canStop={
+                    !remote &&
+                    !!onStopSubagent &&
+                    canStopHarnessSubagents(session.harness)
+                  }
+                  onClose={closeSubagent}
+                  onStop={(callId) => onStopSubagent?.(session.id, callId)}
+                  onOpenFile={onOpenFile}
+                  onOpenDiff={onOpenDiff}
+                />
                 <TranscriptJumpToBottom
                   visibility={jumpVisibility}
                   onJump={() => {

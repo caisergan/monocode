@@ -5805,6 +5805,103 @@ fn read_text_file_sync(path: &str) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "File is not valid UTF-8.".into())
 }
 
+/// The most a single range read returns, so a long transcript arrives in
+/// pieces instead of one IPC payload.
+const MAX_TEXT_RANGE_BYTES: u64 = 4 * 1024 * 1024;
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TextRange {
+    /// Whole lines starting at the requested offset.
+    pub text: String,
+    /// Where the next read picks up: just past the last line returned.
+    pub next_offset: u64,
+    pub size: u64,
+    /// The file the path resolved to, past any symlink.
+    pub path: String,
+}
+
+/// Read the complete lines of a growing text file from `offset` on. A
+/// provider transcript is appended to while the agent works, so callers keep
+/// the offset and only ever read what is new. A line still being written is
+/// left for the next read; one longer than the read limit is skipped.
+#[tauri::command]
+pub async fn read_text_file_range(
+    path: String,
+    offset: u64,
+    max_bytes: Option<u64>,
+) -> Result<TextRange, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        read_text_file_range_sync(&path, offset, max_bytes.unwrap_or(MAX_TEXT_RANGE_BYTES))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn read_text_file_range_sync(path: &str, offset: u64, max_bytes: u64) -> Result<TextRange, String> {
+    use std::io::{Seek, SeekFrom};
+
+    let requested = expand_home(path);
+    let resolved =
+        std::fs::canonicalize(&requested).map_err(|e| format!("{}: {e}", requested.display()))?;
+    let mut file =
+        std::fs::File::open(&resolved).map_err(|e| format!("{}: {e}", resolved.display()))?;
+    let meta = file.metadata().map_err(|e| e.to_string())?;
+    if !meta.is_file() {
+        return Err("Not a file".into());
+    }
+    let size = meta.len();
+    let path = resolved.to_string_lossy().into_owned();
+    let start = offset.min(size);
+    let limit = max_bytes.clamp(1, MAX_TEXT_RANGE_BYTES);
+    file.seek(SeekFrom::Start(start))
+        .map_err(|e| e.to_string())?;
+    let mut bytes = Vec::new();
+    (&mut file)
+        .take(limit.min(size - start))
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    let complete = match bytes.iter().rposition(|byte| *byte == b'\n') {
+        Some(end) => end + 1,
+        // A full read with no line break is one line too long to hand over;
+        // step past it so the reads behind it are not stuck.
+        None if bytes.len() as u64 == limit => {
+            return Ok(TextRange {
+                text: String::new(),
+                next_offset: skip_line(&mut file, start + limit, size)?,
+                size,
+                path,
+            });
+        }
+        None => 0,
+    };
+    bytes.truncate(complete);
+    Ok(TextRange {
+        text: String::from_utf8_lossy(&bytes).into_owned(),
+        next_offset: start + complete as u64,
+        size,
+        path,
+    })
+}
+
+/// The offset just past the next line break at or after `from`, or `from`
+/// itself while that line is still being written.
+fn skip_line(file: &mut std::fs::File, from: u64, size: u64) -> Result<u64, String> {
+    let mut position = from;
+    let mut chunk = [0u8; 64 * 1024];
+    while position < size {
+        let read = file.read(&mut chunk).map_err(|e| e.to_string())?;
+        if read == 0 {
+            break;
+        }
+        if let Some(end) = chunk[..read].iter().position(|byte| *byte == b'\n') {
+            return Ok(position + end as u64 + 1);
+        }
+        position += read as u64;
+    }
+    Ok(from)
+}
+
 /// Atomically replace a text file from a temporary file in the same directory.
 #[tauri::command]
 pub async fn write_text_file(path: String, content: String) -> Result<(), String> {
@@ -6582,6 +6679,49 @@ mod tests {
             resolve_project_location_sync(&path_to_js(&missing), None).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn text_ranges_return_whole_lines_through_a_symlink() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir =
+            std::env::temp_dir().join(format!("monocode-range-{}-{stamp}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("agent.jsonl");
+        std::fs::write(&file, "{\"a\":1}\n{\"b\":2}\n{\"c\":").unwrap();
+        let link = dir.join("agent.output");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        #[cfg(not(unix))]
+        std::fs::copy(&file, &link).unwrap();
+        let link = link.to_string_lossy().into_owned();
+
+        let first = read_text_file_range_sync(&link, 0, MAX_TEXT_RANGE_BYTES).unwrap();
+        assert_eq!(first.text, "{\"a\":1}\n{\"b\":2}\n");
+        assert_eq!(first.next_offset, 16);
+        assert_eq!(first.size, 21);
+        #[cfg(unix)]
+        assert_eq!(
+            first.path,
+            std::fs::canonicalize(&file).unwrap().to_string_lossy()
+        );
+
+        // The unfinished line waits until it is written out.
+        let pending = read_text_file_range_sync(&link, 16, MAX_TEXT_RANGE_BYTES).unwrap();
+        assert_eq!(pending.text, "");
+        assert_eq!(pending.next_offset, 16);
+
+        // A line longer than one read is stepped over, not waited on forever.
+        std::fs::write(&file, "0123456789\n{\"d\":4}\n").unwrap();
+        let skipped = read_text_file_range_sync(&link, 0, 4).unwrap();
+        assert_eq!(skipped.text, "");
+        assert_eq!(skipped.next_offset, 11);
+        let next = read_text_file_range_sync(&link, skipped.next_offset, 64).unwrap();
+        assert_eq!(next.text, "{\"d\":4}\n");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

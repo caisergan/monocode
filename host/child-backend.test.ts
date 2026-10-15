@@ -53,6 +53,24 @@ it("resolves every provider and runs only allowed catalog commands", async () =>
         path: join(directory, "large-transcript.txt"),
       }),
     ).toBe(transcript);
+    const agent = join(directory, "agent.jsonl");
+    writeFileSync(agent, '{"a":1}\n{"b":2}\n{"c":');
+    const range = await backend.invoke<{
+      text: string;
+      nextOffset: number;
+      size: number;
+    }>("harness_read_text_range", { path: agent, offset: 0 });
+    expect(range).toMatchObject({
+      text: '{"a":1}\n{"b":2}\n',
+      nextOffset: 16,
+      size: 21,
+    });
+    writeFileSync(agent, '0123456789\n{"d":4}\n');
+    const skipped = await backend.invoke<{ text: string; nextOffset: number }>(
+      "harness_read_text_range",
+      { path: agent, offset: 0, maxBytes: 4 },
+    );
+    expect(skipped).toMatchObject({ text: "", nextOffset: 11 });
   } finally {
     await backend.close();
     rmSync(directory, { recursive: true, force: true });

@@ -303,6 +303,7 @@ import {
   appendSteerUser,
   bindHarnessSession,
   cancelHarnessTurn,
+  stopHarnessSubagent,
   canCompactHarnessContext,
   canRewindHarnessLastTurn,
   canSteerHarness,
@@ -10407,6 +10408,17 @@ function Workspace({
     [flushHarnessEvents],
   );
 
+  const onStopSubagent = useCallback((sessionId: string, callId: string) => {
+    const session = sessionsRef.current.find((s) => s.id === sessionId);
+    if (!session || remoteProjectFor(session.cwd)) return;
+    // The run belongs to whichever of the session's children spawned it.
+    void (async () => {
+      for (const harness of sessionChildHarnesses(session)) {
+        if (await stopHarnessSubagent(harness, sessionId, callId)) return;
+      }
+    })().catch(console.error);
+  }, []);
+
   useEffect(() => {
     const onEscape = (event: KeyboardEvent) => {
       const focusedBusySessionId = () => {
@@ -12960,6 +12972,7 @@ function Workspace({
     onRemoveDraft,
     onSubmit,
     onStop,
+    onStopSubagent,
     onCompactContext,
     onPlaceSessionInFolder,
     onDeleteQueuedMessage,

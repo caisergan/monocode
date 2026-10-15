@@ -6,7 +6,7 @@ import {
 import { EventEmitter } from "node:events";
 import { promisify } from "node:util";
 import { join } from "node:path";
-import { readFile, stat } from "node:fs/promises";
+import { open, readFile, realpath, stat } from "node:fs/promises";
 import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import type { ChildBackend } from "../src/integrations/harness/core/child";
@@ -166,6 +166,12 @@ export class HostChildBackend implements ChildBackend {
           throw new Error("Binary file is not readable as text");
         return new TextDecoder("utf-8", { fatal: true }).decode(bytes) as T;
       }
+      case "harness_read_text_range":
+        return (await readTextRange(
+          String(args.path ?? ""),
+          Number(args.offset ?? 0),
+          typeof args.maxBytes === "number" ? args.maxBytes : undefined,
+        )) as T;
       case "harness_spawn":
         return (await this.start(id, args)) as T;
       case "harness_write": {
@@ -403,5 +409,71 @@ export class HostChildBackend implements ChildBackend {
     this.closing = true;
     for (const id of this.streams.keys()) this.stopStream(id);
     await Promise.all([...this.children.keys()].map((id) => this.kill(id)));
+  }
+}
+
+const MAX_TEXT_RANGE_BYTES = 4 * 1024 * 1024;
+
+/**
+ * Whole lines of a growing provider transcript from `offset` on, the same
+ * contract as the desktop's `read_text_file_range`: an unfinished last line
+ * waits for the next read, and one longer than a read is stepped over.
+ */
+export async function readTextRange(
+  path: string,
+  offset: number,
+  maxBytes = MAX_TEXT_RANGE_BYTES,
+): Promise<{ text: string; nextOffset: number; size: number; path: string }> {
+  const resolved = await realpath(path);
+  const handle = await open(resolved, "r");
+  try {
+    const info = await handle.stat();
+    if (!info.isFile()) throw new Error("Not a file");
+    const size = info.size;
+    const start = Math.min(Math.max(0, Math.floor(offset) || 0), size);
+    const limit = Math.min(
+      Math.max(1, Math.floor(maxBytes)),
+      MAX_TEXT_RANGE_BYTES,
+    );
+    const buffer = Buffer.alloc(Math.min(limit, size - start));
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
+    const bytes = buffer.subarray(0, bytesRead);
+    const end = bytes.lastIndexOf(0x0a);
+    if (end < 0) {
+      if (bytesRead < limit) {
+        return { text: "", nextOffset: start, size, path: resolved };
+      }
+      // One line too long to hand over: step past it.
+      let position = start + limit;
+      const chunk = Buffer.alloc(64 * 1024);
+      while (position < size) {
+        const { bytesRead: read } = await handle.read(
+          chunk,
+          0,
+          chunk.length,
+          position,
+        );
+        if (read === 0) break;
+        const at = chunk.subarray(0, read).indexOf(0x0a);
+        if (at >= 0) {
+          return {
+            text: "",
+            nextOffset: position + at + 1,
+            size,
+            path: resolved,
+          };
+        }
+        position += read;
+      }
+      return { text: "", nextOffset: start + limit, size, path: resolved };
+    }
+    return {
+      text: bytes.subarray(0, end + 1).toString("utf8"),
+      nextOffset: start + end + 1,
+      size,
+      path: resolved,
+    };
+  } finally {
+    await handle.close();
   }
 }

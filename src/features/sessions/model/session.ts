@@ -233,6 +233,37 @@ export type AgentRunMeta = {
   /** Model reported for the child, which may differ from its parent. */
   model?: string;
   steps: AgentStep[];
+  /** The whole brief the parent wrote for the run. */
+  prompt?: string;
+  /** Provider task id, used to stop the run and find its transcript. */
+  taskId?: string;
+  /** The run's own transcript on the machine running the provider. */
+  transcriptPath?: string;
+  /** Epoch ms the run started and finished, as the app saw them. */
+  startedAt?: number;
+  endedAt?: number;
+  /** The user stopped this run; it did not fail on its own. */
+  stopped?: boolean;
+  usage?: AgentRunUsage;
+};
+
+/**
+ * Tokens one delegated run spent in its own context window. Input splits the
+ * same way as the session totals: `uncached` counts every prompt token not
+ * read from the cache, cache writes included.
+ */
+export type AgentRunUsage = {
+  uncached: number;
+  cacheRead: number;
+  cacheWrite: number;
+  output: number;
+  /** Tokens in the run's window after its latest request. */
+  contextUsed?: number;
+  /** The run's model window, when the provider reports one. */
+  contextWindow?: number;
+  toolUses?: number;
+  /** Provider-measured run time, preferred over the app's own clock. */
+  durationMs?: number;
 };
 
 export type AttachmentKind = "image" | "audio" | "file";

@@ -103,7 +103,8 @@ export function ContextMeter({
   );
 }
 
-function MeterRing({ ratio, label }: { ratio: number; label?: string }) {
+/** The ring on its own, for places that show a level without the meter. */
+export function MeterRing({ ratio, label }: { ratio: number; label?: string }) {
   return (
     <svg
       width={SIZE}

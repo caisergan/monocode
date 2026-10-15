@@ -3462,7 +3462,7 @@ function SubagentStack({
 /**
  * One delegated run's row, stateful about being opened. A run that died opens
  * itself, so the provider's reason is not buried behind a face that looks like
- * every other finished one. A click takes the row over from there and it stays
+ * every other finished one; one the user stopped has nothing to explain. A click takes the row over from there and it stays
  * where the reader puts it. The same row serves inside a settled turn's trail,
  * where the run sits as one step of the work it was spawned from.
  */
@@ -3480,7 +3480,9 @@ function SubagentRow({
   onOpenDiff?: (path: string) => void;
 }) {
   const [override, setOverride] = useState<boolean | null>(null);
-  const open = override ?? toolCallState(block) === "rejected";
+  const open =
+    override ??
+    (toolCallState(block) === "rejected" && !block.agentRun?.stopped);
   return (
     <SubagentPanel
       block={block}
@@ -3523,13 +3525,12 @@ function SubagentPanel({
   const state = toolCallState(block);
   const active = live && state === "pending";
   const steps = block.agentRun?.steps ?? [];
-  // The run's trail as transcript blocks, so the panel groups it the way the
-  // main transcript groups the agent's own work: what it said, then the calls
-  // that line introduced, folding behind it once it moves on.
-  const stepBlocks = useMemo(() => steps.map(agentStepBlock), [steps]);
   const status = subagentStatusLine(block, steps);
   const report = subagentReport(block);
-  const failed = state === "rejected";
+  // A run the user stopped is quiet about it; only one that broke is red.
+  const stopped = !!block.agentRun?.stopped;
+  const failed = state === "rejected" && !stopped;
+  const face = stopped ? "accepted" : state;
 
   // The name takes the room it needs and gives the rest back: a provider that
   // names a run with its whole brief must not push the row off the pane.
@@ -3545,7 +3546,7 @@ function SubagentPanel({
       ) : (
         <span
           className={`min-w-0 flex-1 truncate font-sans text-sm transition-colors duration-200 ${
-            state === "rejected"
+            failed
               ? "text-red-400"
               : "text-content/75 group-hover:text-content"
           }`}
@@ -3575,7 +3576,7 @@ function SubagentPanel({
         title={brief}
         className="-mx-1.5 flex min-w-0 items-center gap-2 px-1.5 py-1"
       >
-        <SubagentMascot name={name} state={state} active={active} />
+        <SubagentMascot name={name} state={face} active={active} />
         {label}
         <span className="size-3.5 shrink-0" />
       </div>
@@ -3596,7 +3597,7 @@ function SubagentPanel({
           open ? "bg-content/8" : ""
         }`}
       >
-        <SubagentMascot name={name} state={state} active={active} />
+        <SubagentMascot name={name} state={face} active={active} />
         {label}
         <ChevronRight
           className={`size-3.5 shrink-0 text-content/35 transition-transform duration-200 group-hover:text-content/60 ${
@@ -3614,33 +3615,70 @@ function SubagentPanel({
            * another, and the inner one can never reach its own last row.
            */
           <div className="flex min-w-0 flex-col pb-1">
-            <ActivityPhases
-              blocks={stepBlocks}
+            <SubagentTrail
+              block={block}
               cwd={cwd}
-              done={!active}
-              padded={false}
+              live={live}
               onOpenFile={onOpenFile}
               onOpenDiff={onOpenDiff}
             />
-            {report ? (
-              <div className="zen-phase-step py-1">
-                {failed ? (
-                  <pre className="min-w-0 whitespace-pre-wrap break-words font-mono text-[12px] leading-5 text-red-400/80">
-                    {report}
-                  </pre>
-                ) : (
-                  <AgentMarkdown
-                    text={report}
-                    cwd={cwd}
-                    onOpenFile={onOpenFile}
-                  />
-                )}
-              </div>
-            ) : null}
           </div>
         ) : null}
       </div>
     </div>
+  );
+}
+
+/**
+ * What a delegated run did, then what it handed back: the trail a transcript
+ * row opens onto, and the activity view of the run's own sheet.
+ */
+export function SubagentTrail({
+  block,
+  cwd,
+  live = false,
+  onOpenFile,
+  onOpenDiff,
+}: {
+  block: Block;
+  cwd?: string;
+  live?: boolean;
+  onOpenFile?: (path: string) => void;
+  onOpenDiff?: (path: string) => void;
+}) {
+  const steps = block.agentRun?.steps;
+  // The run's trail as transcript blocks, so it groups the way the main
+  // transcript groups the agent's own work: what it said, then the calls that
+  // line introduced, folding behind it once it moves on.
+  const stepBlocks = useMemo(
+    () => (steps ?? []).map(agentStepBlock),
+    [steps],
+  );
+  const state = toolCallState(block);
+  const report = subagentReport(block);
+  const failed = state === "rejected" && !block.agentRun?.stopped;
+  return (
+    <>
+      <ActivityPhases
+        blocks={stepBlocks}
+        cwd={cwd}
+        done={!(live && state === "pending")}
+        padded={false}
+        onOpenFile={onOpenFile}
+        onOpenDiff={onOpenDiff}
+      />
+      {report ? (
+        <div className="zen-phase-step py-1">
+          {failed ? (
+            <pre className="min-w-0 whitespace-pre-wrap break-words font-mono text-[12px] leading-5 text-red-400/80">
+              {report}
+            </pre>
+          ) : (
+            <AgentMarkdown text={report} cwd={cwd} onOpenFile={onOpenFile} />
+          )}
+        </div>
+      ) : null}
+    </>
   );
 }
 
@@ -3707,6 +3745,7 @@ function agentStepBlock(step: AgentStep): Block {
  * the agent is working, and the count says how far it has got.
  */
 function subagentStatusLine(block: Block, steps: AgentStep[]): string {
+  if (block.agentRun?.stopped) return "stopped";
   if (toolCallState(block) === "rejected") return "failed";
   const tools = steps.filter((step) => step.kind === "tool").length;
   if (tools === 0) return "";
