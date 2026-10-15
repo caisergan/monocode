@@ -60,6 +60,11 @@ export type HarnessAdapter = {
   rewindLastTurn?(input: RewindLastTurnInput): Promise<RewindLastTurnResult>;
   steerTurn(input: SteerTurnInput): Promise<void>;
   cancelTurn(sessionId: string): Promise<void>;
+  /**
+   * Stop one subagent, by the Agent call that spawned it, and let the turn
+   * carry on. Resolves false when the provider has no such run to stop.
+   */
+  stopSubagent?(sessionId: string, callId: string): Promise<boolean>;
   respondApproval(
     sessionId: string,
     requestId: number,
@@ -319,6 +324,21 @@ export async function cancelHarnessTurn(
   cancelIdlePark(sessionId);
   await adapter.cancelTurn(sessionId);
   scheduleIdlePark(harness, sessionId);
+}
+
+export function canStopHarnessSubagents(harness: HarnessId): boolean {
+  const adapter = getHarness(harness);
+  return adapter?.live === true && adapter.stopSubagent != null;
+}
+
+export async function stopHarnessSubagent(
+  harness: HarnessId,
+  sessionId: string,
+  callId: string,
+): Promise<boolean> {
+  const adapter = getHarness(harness);
+  if (!adapter?.live || !adapter.stopSubagent) return false;
+  return adapter.stopSubagent(sessionId, callId);
 }
 
 export function respondHarnessApproval(

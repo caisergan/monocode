@@ -1,5 +1,6 @@
 import type {
   AgentRunMeta,
+  AgentRunUsage,
   AgentStep,
   Attachment,
   Block,
@@ -93,6 +94,8 @@ export function applyHarnessEvent(
       });
     case "agent.step":
       return recordAgentStep(session, event);
+    case "agent.run":
+      return recordAgentRun(session, event);
     case "approval.requested":
       return attachApproval(session, event);
     case "approval.resolved": {
@@ -1001,6 +1004,15 @@ function upsertTool(
   const kind = patch.kind ?? prev.tool?.kind;
   const status = patch.status ?? prev.tool?.status;
   const agentName = prev.agentRun?.steps.length ? prev.agentRun.name : label;
+  // A run the app watched start gets its end stamped the moment it settles,
+  // so its elapsed time stops where the work did.
+  const endedAt =
+    prev.agentRun?.startedAt !== undefined &&
+    prev.agentRun.endedAt === undefined &&
+    isSettledToolStatus(status) &&
+    !isSettledToolStatus(prev.tool?.status)
+      ? Date.now()
+      : undefined;
   if (
     prev.text === label &&
     prev.streaming === patch.streaming &&
@@ -1010,6 +1022,7 @@ function upsertTool(
     prev.tool?.detail === detail &&
     (!patch.agentModel || prev.agentRun?.model === patch.agentModel) &&
     (!prev.agentRun || prev.agentRun.name === agentName) &&
+    endedAt === undefined &&
     samePreview(prev.tool?.preview, preview)
   ) {
     return session;
@@ -1026,6 +1039,7 @@ function upsertTool(
             ...prev.agentRun,
             name: agentName,
             ...(patch.agentModel ? { model: patch.agentModel } : {}),
+            ...(endedAt !== undefined ? { endedAt } : {}),
           },
         }
       : {}),
@@ -1148,7 +1162,13 @@ function recordAgentStep(
   }
 
   const next: AgentRunMeta = {
+    ...run,
     ...(run?.model ? { model: run.model } : {}),
+    // The first sign of a run still going is when it started, for providers
+    // that never say so themselves.
+    ...(run?.startedAt === undefined && !isSettledToolStatus(prev.tool?.status)
+      ? { startedAt: Date.now() }
+      : {}),
     name:
       event.agentName ||
       run?.name ||
@@ -1166,11 +1186,97 @@ function recordAgentStep(
   return { ...session, blocks };
 }
 
+/** The longest brief kept on a run; the provider's transcript has the rest. */
+const MAX_AGENT_PROMPT_CHARS = 20_000;
+
+/**
+ * Patches what the provider knows about the run as a whole — its brief, task,
+ * timing and tokens — onto the parent Agent tool block.
+ */
+function recordAgentRun(
+  session: Session,
+  event: Extract<HarnessEvent, { type: "agent.run" }>,
+): Session {
+  const index = session.blocks.findIndex(
+    (block) => block.tool?.callId === event.callId,
+  );
+  if (index < 0) return session;
+  const prev = session.blocks[index];
+  const run = prev.agentRun;
+  const prompt = event.prompt?.trim();
+  const next: AgentRunMeta = {
+    ...run,
+    name: run?.name || prev.tool?.title || prev.text || "Subagent",
+    steps: run?.steps ?? [],
+    ...(prompt
+      ? {
+          prompt:
+            prompt.length > MAX_AGENT_PROMPT_CHARS
+              ? `${prompt.slice(0, MAX_AGENT_PROMPT_CHARS)}…`
+              : prompt,
+        }
+      : {}),
+    ...(event.agentType && !run?.agentType
+      ? { agentType: event.agentType }
+      : {}),
+    ...(event.taskId ? { taskId: event.taskId } : {}),
+    ...(event.transcriptPath ? { transcriptPath: event.transcriptPath } : {}),
+    // The earliest word of a start wins; a later report is the same run.
+    ...(event.startedAt !== undefined && run?.startedAt === undefined
+      ? { startedAt: event.startedAt }
+      : {}),
+    ...(event.stopped ? { stopped: true } : {}),
+    ...(event.usage ? { usage: { ...run?.usage, ...event.usage } } : {}),
+  };
+  if (run && sameAgentRun(run, next)) return session;
+  const blocks = session.blocks.slice();
+  blocks[index] = { ...prev, agentRun: next };
+  return { ...session, blocks };
+}
+
 function sameAgentRun(a: AgentRunMeta, b: AgentRunMeta): boolean {
   if (a.name !== b.name || a.agentType !== b.agentType || a.model !== b.model)
     return false;
+  if (
+    a.prompt !== b.prompt ||
+    a.taskId !== b.taskId ||
+    a.transcriptPath !== b.transcriptPath ||
+    a.startedAt !== b.startedAt ||
+    a.endedAt !== b.endedAt ||
+    a.stopped !== b.stopped ||
+    !sameAgentUsage(a.usage, b.usage)
+  )
+    return false;
   if (a.steps.length !== b.steps.length) return false;
   return a.steps.every((step, index) => sameAgentStep(step, b.steps[index]));
+}
+
+function sameAgentUsage(a?: AgentRunUsage, b?: AgentRunUsage): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.uncached === b.uncached &&
+    a.cacheRead === b.cacheRead &&
+    a.cacheWrite === b.cacheWrite &&
+    a.output === b.output &&
+    a.contextUsed === b.contextUsed &&
+    a.contextWindow === b.contextWindow &&
+    a.toolUses === b.toolUses &&
+    a.durationMs === b.durationMs
+  );
+}
+
+/** Whether a tool status means the call is over, however it ended. */
+function isSettledToolStatus(status?: string): boolean {
+  const key = status?.toLowerCase() ?? "";
+  return (
+    key === "completed" ||
+    key === "success" ||
+    key === "failed" ||
+    key === "error" ||
+    key === "cancelled" ||
+    key === "canceled"
+  );
 }
 
 function sameAgentStep(a: AgentStep, b: AgentStep): boolean {

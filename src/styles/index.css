@@ -3555,6 +3555,116 @@ html.theme-light .btw-burst {
   }
 }
 
+/* The subagent card rises out of the composer's top edge and sinks back
+   into it, the grid row carrying the height so nothing above it jumps. */
+.subagent-dock {
+  display: grid;
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transition:
+    grid-template-rows 260ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 200ms ease;
+  animation: subagent-dock-in 260ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+.subagent-dock > * {
+  min-height: 0;
+  overflow: hidden;
+}
+
+.subagent-dock[data-open="false"] {
+  grid-template-rows: 0fr;
+  opacity: 0;
+}
+
+@keyframes subagent-dock-in {
+  from {
+    grid-template-rows: 0fr;
+    opacity: 0;
+  }
+}
+
+/* A run joining the card settles in beside the others. */
+.subagent-chip {
+  animation: subagent-chip-in 220ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+@keyframes subagent-chip-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px) scale(0.96);
+  }
+}
+
+/* A finished run's tick or note fades in where its time was. */
+.subagent-mark {
+  animation: subagent-mark-in 240ms ease-out backwards;
+}
+
+@keyframes subagent-mark-in {
+  from {
+    opacity: 0;
+    transform: scale(0.8);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .subagent-dock,
+  .subagent-chip,
+  .subagent-mark {
+    animation: none;
+    transition: none;
+  }
+}
+
+/* The open run stands on the subagent card, as tall as a side question. */
+.subagent-sheet {
+  top: clamp(2.5rem, 16%, 11rem);
+}
+
+.subagent-sheet-glass {
+  border: 1px solid color-mix(in srgb, var(--color-content) 10%, transparent);
+  border-bottom: 0;
+  border-radius: 10px 10px 0 0;
+  box-shadow:
+    0 20px 25px -5px rgb(0 0 0 / 0.1),
+    0 8px 10px -6px rgb(0 0 0 / 0.1);
+}
+
+/* The card the sheet stands on squares off its top to read as its base. */
+[data-subagent-dock][data-attached="true"] section {
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
+/* A run or view switched in arrives with a short lift. */
+.subagent-sheet-body {
+  animation: subagent-body-in 220ms 60ms cubic-bezier(0.22, 1, 0.36, 1)
+    backwards;
+}
+
+@keyframes subagent-body-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+[data-subagent-sheet][data-state="closed"] {
+  pointer-events: none;
+}
+
+[data-subagent-sheet][data-state="closed"] .subagent-sheet-body {
+  animation: btw-fade-out 120ms ease-in both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .subagent-sheet-body,
+  [data-subagent-sheet][data-state="closed"] .subagent-sheet-body {
+    animation: none;
+  }
+}
+
 .btw-error {
   display: flex;
   align-items: flex-start;

@@ -24,6 +24,7 @@ import {
 } from "../model/ompInterjections";
 import type {
   AgentRunMeta,
+  AgentRunUsage,
   AgentStep,
   Block,
   BtwMessage,
@@ -1446,7 +1447,53 @@ function sanitizeAgentRun(value: unknown): AgentRunMeta | null {
       ? { agentType: record.agentType.trim() }
       : {}),
     steps: steps.slice(-PERSISTED_AGENT_STEPS),
+    ...(typeof record.prompt === "string" && record.prompt.trim()
+      ? { prompt: record.prompt }
+      : {}),
+    ...(typeof record.taskId === "string" && record.taskId
+      ? { taskId: record.taskId }
+      : {}),
+    ...(typeof record.transcriptPath === "string" && record.transcriptPath
+      ? { transcriptPath: record.transcriptPath }
+      : {}),
+    ...(finiteCount(record.startedAt) !== undefined
+      ? { startedAt: finiteCount(record.startedAt) }
+      : {}),
+    ...(finiteCount(record.endedAt) !== undefined
+      ? { endedAt: finiteCount(record.endedAt) }
+      : {}),
+    ...(record.stopped === true ? { stopped: true } : {}),
+    ...(sanitizeAgentRunUsage(record.usage)
+      ? { usage: sanitizeAgentRunUsage(record.usage) }
+      : {}),
   };
+}
+
+function finiteCount(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function sanitizeAgentRunUsage(value: unknown): AgentRunUsage | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+  const record = value as Record<string, unknown>;
+  const usage: AgentRunUsage = {
+    uncached: finiteCount(record.uncached) ?? 0,
+    cacheRead: finiteCount(record.cacheRead) ?? 0,
+    cacheWrite: finiteCount(record.cacheWrite) ?? 0,
+    output: finiteCount(record.output) ?? 0,
+  };
+  for (const key of [
+    "contextUsed",
+    "contextWindow",
+    "toolUses",
+    "durationMs",
+  ] as const) {
+    const number = finiteCount(record[key]);
+    if (number !== undefined) usage[key] = number;
+  }
+  return usage;
 }
 
 function sanitizeTaskList(value: unknown): TaskListMeta | null {

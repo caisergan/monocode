@@ -19,6 +19,8 @@ let onExit: ((code?: number | null) => void) | undefined;
 const writeChild = vi.fn(async (_id: string, line: string) => {
   sent.push(line);
 });
+/** Subagent transcripts by the path Claude names; reads resolve the link. */
+const transcripts = new Map<string, string>();
 
 vi.mock("../../core/child", () => ({
   resolveClaudeBinary: async () => ({ path: "/fake/claude" }),
@@ -36,6 +38,18 @@ vi.mock("../../core/child", () => ({
     onExit = exit;
   },
   writeChild,
+  readHarnessTextRange: async (path: string, offset: number) => {
+    const text = transcripts.get(path.replace(/\.jsonl$/, ".output"));
+    if (text === undefined) throw new Error(`${path}: not found`);
+    const rest = text.slice(offset);
+    const end = rest.lastIndexOf("\n") + 1;
+    return {
+      text: rest.slice(0, end),
+      nextOffset: offset + end,
+      size: text.length,
+      path: path.replace(/\.output$/, ".jsonl"),
+    };
+  },
 }));
 
 const {
@@ -48,6 +62,7 @@ const {
   sendClaudeTurn,
   steerClaudeTurn,
   stopClaudeSession,
+  stopClaudeSubagent,
   __claudeTestReset,
 } = await import("./claude");
 const { claudeCommandProvider, __claudeCommandsTestReset } =
@@ -271,6 +286,7 @@ beforeEach(() => {
   onLine = undefined;
   onExit = undefined;
   writeChild.mockClear();
+  transcripts.clear();
   __claudeTestReset();
   __claudeCommandsTestReset();
 });
@@ -2622,5 +2638,282 @@ describe("claude slash commands", () => {
       type: "session.providerBound",
       providerSessionId: "sess_2",
     });
+  });
+});
+
+describe("claude subagent runs", () => {
+  /** An Agent call Claude sends to the background, as 2.1 streams it. */
+  function emitBackgroundAgent() {
+    emit({
+      type: "assistant",
+      session_id: "sess_1",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "toolu_agent",
+            name: "Agent",
+            input: {
+              description: "Echo alpha",
+              prompt: "Run `echo alpha`, then reply with its output.",
+              subagent_type: "general-purpose",
+            },
+          },
+        ],
+      },
+    });
+    emit({
+      type: "system",
+      subtype: "task_started",
+      task_id: "a1",
+      tool_use_id: "toolu_agent",
+      description: "Echo alpha",
+      subagent_type: "general-purpose",
+      is_backgrounded: true,
+      task_type: "local_agent",
+      prompt: "Run `echo alpha`, then reply with its output.",
+    });
+  }
+
+  function emitLaunched() {
+    emit({
+      type: "user",
+      session_id: "sess_1",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_agent",
+            content: "Async agent launched successfully.",
+          },
+        ],
+      },
+      tool_use_result: {
+        isAsync: true,
+        status: "async_launched",
+        agentId: "a1",
+        outputFile: "/tmp/tasks/a1.output",
+      },
+    });
+  }
+
+  /** Two records of one request repeat its usage; the later one is final. */
+  function transcript(lines: Record<string, unknown>[]) {
+    return lines.map((line) => JSON.stringify(line)).join("\n") + "\n";
+  }
+
+  const firstRequest = [
+    {
+      type: "user",
+      uuid: "u1",
+      message: { role: "user", content: "Run `echo alpha`." },
+    },
+    {
+      type: "assistant",
+      uuid: "r1",
+      message: {
+        id: "msg_1",
+        model: "claude-haiku-5-5",
+        content: [{ type: "thinking", thinking: "Run it." }],
+        usage: {
+          input_tokens: 2,
+          output_tokens: 5,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 22_453,
+        },
+      },
+    },
+    {
+      type: "assistant",
+      uuid: "r2",
+      message: {
+        id: "msg_1",
+        model: "claude-haiku-5-5",
+        content: [
+          {
+            type: "tool_use",
+            id: "toolu_bash",
+            name: "Bash",
+            input: { command: "echo alpha" },
+          },
+        ],
+        usage: {
+          input_tokens: 2,
+          output_tokens: 188,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 22_453,
+        },
+      },
+    },
+  ];
+
+  it("counts a background run's tokens from its own transcript", async () => {
+    const { events, turn } = await startTurn("s1");
+    transcripts.set("/tmp/tasks/a1.output", transcript(firstRequest));
+    emitBackgroundAgent();
+    // The parent's mirror of the request carries an early output count.
+    emit({
+      type: "assistant",
+      session_id: "sess_1",
+      parent_tool_use_id: "toolu_agent",
+      message: {
+        id: "msg_1",
+        model: "claude-haiku-5-5",
+        content: [{ type: "thinking", thinking: "Run it." }],
+        usage: {
+          input_tokens: 2,
+          output_tokens: 5,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 22_453,
+        },
+      },
+    });
+    emitLaunched();
+
+    const run = () =>
+      events
+        .reduce(applyHarnessEvent, newSession("claude", "/repo"))
+        .blocks.find((block) => block.tool?.callId === "toolu_agent")?.agentRun;
+    await waitFor(() => run()?.usage?.output === 188, "transcript usage");
+    expect(run()).toMatchObject({
+      prompt: "Run `echo alpha`, then reply with its output.",
+      agentType: "general-purpose",
+      taskId: "a1",
+      transcriptPath: "/tmp/tasks/a1.jsonl",
+      usage: {
+        uncached: 22_455,
+        cacheRead: 0,
+        cacheWrite: 22_453,
+        output: 188,
+        contextUsed: 22_643,
+      },
+    });
+    expect(run()?.startedAt).toBeTypeOf("number");
+
+    // The run's last request lands just before Claude says it is done.
+    transcripts.set(
+      "/tmp/tasks/a1.output",
+      transcript([
+        ...firstRequest,
+        {
+          type: "assistant",
+          uuid: "r3",
+          message: {
+            id: "msg_2",
+            model: "claude-haiku-5-5",
+            content: [{ type: "text", text: "alpha" }],
+            usage: {
+              input_tokens: 2,
+              output_tokens: 22,
+              cache_read_input_tokens: 22_453,
+              cache_creation_input_tokens: 2_649,
+            },
+          },
+        },
+      ]),
+    );
+    emit({
+      type: "system",
+      subtype: "task_notification",
+      task_id: "a1",
+      tool_use_id: "toolu_agent",
+      status: "completed",
+      output_file: "/tmp/tasks/a1.output",
+      summary: "alpha",
+      usage: { total_tokens: 25_129, tool_uses: 1, duration_ms: 3_725 },
+    });
+    emit({
+      type: "result",
+      subtype: "success",
+      session_id: "sess_1",
+      modelUsage: { "claude-haiku-5-5": { contextWindow: 1_000_000 } },
+    });
+    await turn;
+    await waitFor(() => run()?.usage?.output === 210, "final usage");
+    expect(run()?.usage).toEqual({
+      uncached: 22_455 + 2_651,
+      cacheRead: 22_453,
+      cacheWrite: 22_453 + 2_649,
+      output: 210,
+      contextUsed: 25_126,
+      contextWindow: 1_000_000,
+      toolUses: 1,
+      durationMs: 3_725,
+    });
+    expect(run()?.endedAt).toBeTypeOf("number");
+  });
+
+  it("falls back to the stream's usage when the transcript is unreadable", async () => {
+    const { events, turn } = await startTurn("s1");
+    emitBackgroundAgent();
+    emit({
+      type: "assistant",
+      session_id: "sess_1",
+      parent_tool_use_id: "toolu_agent",
+      message: {
+        id: "msg_1",
+        model: "claude-haiku-5-5",
+        content: [{ type: "text", text: "Looking." }],
+        usage: {
+          input_tokens: 3,
+          output_tokens: 7,
+          cache_read_input_tokens: 100,
+          cache_creation_input_tokens: 50,
+        },
+      },
+    });
+    emitLaunched();
+    const run = () =>
+      events
+        .reduce(applyHarnessEvent, newSession("claude", "/repo"))
+        .blocks.find((block) => block.tool?.callId === "toolu_agent")?.agentRun;
+    await waitFor(() => run()?.taskId === "a1", "launch");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(run()?.usage).toEqual({
+      uncached: 53,
+      cacheRead: 100,
+      cacheWrite: 50,
+      output: 7,
+      contextUsed: 160,
+    });
+    expect(run()?.transcriptPath).toBeUndefined();
+    emit({
+      type: "system",
+      subtype: "task_notification",
+      task_id: "a1",
+      tool_use_id: "toolu_agent",
+      status: "completed",
+      summary: "done",
+    });
+    emit({ type: "result", subtype: "success", session_id: "sess_1" });
+    await turn;
+  });
+
+  it("stops one subagent and leaves the turn running", async () => {
+    const { events, turn } = await startTurn("s1");
+    emitBackgroundAgent();
+    expect(await stopClaudeSubagent("s1", "toolu_agent")).toBe(true);
+    expect(await stopClaudeSubagent("s1", "toolu_missing")).toBe(false);
+    const requests = parse().flatMap((m) => {
+      const request = m.request as Record<string, unknown> | undefined;
+      return request ? [request] : [];
+    });
+    expect(requests).toContainEqual({ subtype: "stop_task", task_id: "a1" });
+    expect(requests.some((request) => request.subtype === "interrupt")).toBe(
+      false,
+    );
+    emit({
+      type: "system",
+      subtype: "task_updated",
+      task_id: "a1",
+      patch: { status: "killed" },
+    });
+    emit({ type: "result", subtype: "success", session_id: "sess_1" });
+    await turn;
+    const block = events
+      .reduce(applyHarnessEvent, newSession("claude", "/repo"))
+      .blocks.find((entry) => entry.tool?.callId === "toolu_agent");
+    expect(block?.agentRun?.stopped).toBe(true);
+    expect(block?.tool?.status).toBe("failed");
   });
 });

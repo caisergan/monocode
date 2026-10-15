@@ -427,6 +427,7 @@ pub fn run() {
             fs::save_generated_image,
             fs::delete_generated_images,
             fs::read_text_file,
+            fs::read_text_file_range,
             fs::omp_session_interjections,
             fs::omp_active_assistant_texts,
             fs::claude_shell_commands,

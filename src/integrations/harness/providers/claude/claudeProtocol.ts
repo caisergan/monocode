@@ -694,7 +694,37 @@ export type ClaudeAgentTaskStarted = {
   taskType: string;
   backgrounded: boolean;
   ambient: boolean;
+  /** The brief the parent wrote for the run. */
+  prompt?: string;
+  subagentType?: string;
 };
+
+/** Claude's running count for a task: the window's size, calls and time. */
+export type ClaudeTaskUsage = {
+  totalTokens?: number;
+  toolUses?: number;
+  durationMs?: number;
+};
+
+function taskUsage(value: unknown): ClaudeTaskUsage | undefined {
+  const usage = asRecord(value);
+  if (!usage) return undefined;
+  const pick = (key: string) => {
+    const number = usage[key];
+    return typeof number === "number" && Number.isFinite(number) && number >= 0
+      ? number
+      : undefined;
+  };
+  const totalTokens = pick("total_tokens");
+  const toolUses = pick("tool_uses");
+  const durationMs = pick("duration_ms");
+  if (totalTokens === undefined && toolUses === undefined) return undefined;
+  return {
+    ...(totalTokens !== undefined ? { totalTokens } : {}),
+    ...(toolUses !== undefined ? { toolUses } : {}),
+    ...(durationMs !== undefined ? { durationMs } : {}),
+  };
+}
 
 export function parseTaskStarted(
   rec: Record<string, unknown>,
@@ -714,6 +744,12 @@ export function parseTaskStarted(
     taskType: stringField(rec, "task_type") ?? "",
     backgrounded: rec.is_backgrounded === true,
     ambient: rec.ambient === true,
+    ...(stringField(rec, "prompt")
+      ? { prompt: stringField(rec, "prompt") }
+      : {}),
+    ...(stringField(rec, "subagent_type")
+      ? { subagentType: stringField(rec, "subagent_type") }
+      : {}),
   };
 }
 
@@ -724,6 +760,7 @@ export type ClaudeAgentTaskProgress = {
   subagentType?: string;
   lastToolName?: string;
   summary?: string;
+  usage?: ClaudeTaskUsage;
 };
 
 export function parseTaskProgress(
@@ -744,6 +781,7 @@ export function parseTaskProgress(
     subagentType: stringField(rec, "subagent_type"),
     lastToolName: stringField(rec, "last_tool_name"),
     summary: stringField(rec, "summary"),
+    usage: taskUsage(rec.usage),
   };
 }
 
@@ -788,6 +826,9 @@ export type ClaudeAgentTaskNotification = {
   status: string;
   summary: string;
   ambient: boolean;
+  /** Where the task wrote its output; a subagent's is its transcript. */
+  outputFile?: string;
+  usage?: ClaudeTaskUsage;
 };
 
 export function parseTaskNotification(
@@ -807,7 +848,42 @@ export function parseTaskNotification(
     status: stringField(rec, "status") ?? "completed",
     summary: stringField(rec, "summary") ?? "",
     ambient: rec.ambient === true,
+    ...(stringField(rec, "output_file")
+      ? { outputFile: stringField(rec, "output_file") }
+      : {}),
+    usage: taskUsage(rec.usage),
   };
+}
+
+/**
+ * What the Agent tool's own result says about the run it launched: the
+ * agent's id and, for a run sent to the background, the file it writes to.
+ */
+export function agentLaunchFromToolResult(
+  rec: Record<string, unknown>,
+): { agentId?: string; outputFile?: string; prompt?: string } | undefined {
+  const result = asRecord(rec.tool_use_result) ?? asRecord(rec.toolUseResult);
+  if (!result) return undefined;
+  const agentId = stringField(result, "agentId");
+  const outputFile = stringField(result, "outputFile");
+  const prompt = stringField(result, "prompt");
+  if (!agentId && !outputFile) return undefined;
+  return {
+    ...(agentId ? { agentId } : {}),
+    ...(outputFile ? { outputFile } : {}),
+    ...(prompt ? { prompt } : {}),
+  };
+}
+
+/** The context window Claude reported for each model in a turn result. */
+export function modelWindowsFromResult(
+  rec: Record<string, unknown>,
+): Array<[model: string, window: number]> {
+  const modelUsage = asRecord(rec.modelUsage);
+  return Object.entries(modelUsage ?? {}).flatMap(([model, entry]) => {
+    const window = numberField(asRecord(entry), "contextWindow");
+    return window > 0 ? [[model, window] as [string, number]] : [];
+  });
 }
 
 export type ClaudeBackgroundTask = {

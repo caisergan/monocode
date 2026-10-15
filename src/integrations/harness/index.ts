@@ -177,6 +177,8 @@ export {
   canRewindHarnessLastTurn,
   rewindHarnessLastTurn,
   cancelHarnessTurn,
+  canStopHarnessSubagents,
+  stopHarnessSubagent,
   respondHarnessApproval,
   respondHarnessQuestion,
   keepHarnessQuestionOpen,
@@ -205,3 +207,7 @@ export type {
   UserQuestionReply,
 } from "../../features/sessions/model/userQuestion";
 export type { HarnessAdapter, TextPromptInput } from "./core/registry";
+export {
+  subagentConversation,
+  type SubagentConversation,
+} from "./subagentConversation";

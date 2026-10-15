@@ -9,6 +9,7 @@ import {
   sendClaudeTurn,
   steerClaudeTurn,
   stopClaudeSession,
+  stopClaudeSubagent,
 } from "./claude";
 import { refreshClaudeCatalog } from "./claudeCatalog";
 import { claudeCommandProvider } from "./claudeCommands";
@@ -33,6 +34,7 @@ export const claudeAdapter: HarnessAdapter = {
   compactContext: compactClaudeContext,
   steerTurn: steerClaudeTurn,
   cancelTurn: cancelClaudeTurn,
+  stopSubagent: stopClaudeSubagent,
   respondApproval: respondClaudeApproval,
   respondQuestion: respondClaudeQuestion,
   stopSession: stopClaudeSession,

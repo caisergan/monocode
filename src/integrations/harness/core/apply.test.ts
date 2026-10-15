@@ -1598,4 +1598,74 @@ describe("subagent steps", () => {
     expect(session.blocks[0].tool?.status).toBe("completed");
     expect(session.blocks[0].agentRun?.steps).toHaveLength(1);
   });
+
+  it("patches a run's brief, task and tokens without losing its trail", () => {
+    let session = applyHarnessEvent(spawn(), {
+      type: "agent.run",
+      callId: "agent-1",
+      prompt: "Review the diff for correctness.",
+      agentType: "code-reviewer",
+      taskId: "t1",
+      startedAt: 1_000,
+    });
+    session = applyHarnessEvent(session, {
+      type: "agent.step",
+      callId: "agent-1",
+      stepId: "s1",
+      kind: "tool",
+      text: "Read src/auth.ts",
+    });
+    session = applyHarnessEvent(session, {
+      type: "agent.run",
+      callId: "agent-1",
+      // A second start is the same run reporting again.
+      startedAt: 9_000,
+      usage: {
+        uncached: 1_200,
+        cacheRead: 40_000,
+        cacheWrite: 1_000,
+        output: 300,
+      },
+    });
+    const run = session.blocks[0].agentRun;
+    expect(run).toMatchObject({
+      name: "Correctness review",
+      prompt: "Review the diff for correctness.",
+      agentType: "code-reviewer",
+      taskId: "t1",
+      startedAt: 1_000,
+      usage: { uncached: 1_200, output: 300 },
+      steps: [{ id: "s1", text: "Read src/auth.ts" }],
+    });
+    expect(run?.endedAt).toBeUndefined();
+
+    // Repeating what is already known changes nothing.
+    expect(
+      applyHarnessEvent(session, {
+        type: "agent.run",
+        callId: "agent-1",
+        taskId: "t1",
+      }),
+    ).toBe(session);
+
+    session = applyHarnessEvent(session, {
+      type: "tool.updated",
+      callId: "agent-1",
+      kind: "agent",
+      status: "completed",
+    });
+    expect(session.blocks[0].agentRun?.endedAt).toBeTypeOf("number");
+    expect(session.blocks[0].agentRun?.usage?.output).toBe(300);
+  });
+
+  it("dates a run from its first step when the provider never says", () => {
+    const session = applyHarnessEvent(spawn(), {
+      type: "agent.step",
+      callId: "agent-1",
+      stepId: "s1",
+      kind: "tool",
+      text: "Read src/auth.ts",
+    });
+    expect(session.blocks[0].agentRun?.startedAt).toBeTypeOf("number");
+  });
 });

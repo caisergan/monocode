@@ -34,6 +34,27 @@ export function readHarnessTextFile(path: string): Promise<string> {
   });
 }
 
+export type HarnessTextRange = {
+  /** Whole lines from the requested offset; an unfinished line waits. */
+  text: string;
+  nextOffset: number;
+  size: number;
+  /** The file the path resolved to, past any symlink. */
+  path: string;
+};
+
+/** New lines of a growing provider transcript, on the machine running it. */
+export function readHarnessTextRange(
+  path: string,
+  offset: number,
+  maxBytes?: number,
+): Promise<HarnessTextRange> {
+  return invoke<HarnessTextRange>(
+    backend ? "harness_read_text_range" : "read_text_file_range",
+    { path, offset, ...(maxBytes ? { maxBytes } : {}) },
+  );
+}
+
 function invoke<T>(
   command: string,
   args?: Record<string, unknown>,

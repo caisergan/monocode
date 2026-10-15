@@ -41,6 +41,7 @@ import {
   claudeSettingsKey,
   extractAskUserQuestionTitle,
   extractExitPlanModePlan,
+  agentLaunchFromToolResult,
   inputJsonDeltaFromEvent,
   isAgentTaskType,
   isClaudeUltracodeEffort,
@@ -49,6 +50,7 @@ import {
   isTodoTool,
   applyClaudeTaskTool,
   isUsageLimitResult,
+  modelWindowsFromResult,
   normalizeClaudeCliEffort,
   parseBackgroundTasks,
   parseControlCancelId,
@@ -79,9 +81,20 @@ import {
   usageLimitFromRateLimitEvent,
   type ClaudeAgentTaskNotification,
   type ClaudeCliSettings,
+  type ClaudeTaskUsage,
   type ClaudeControlRequest,
 } from "./claudeProtocol";
 import { noteClaudeCommands } from "./claudeCommands";
+import {
+  claudeSubagentTranscript,
+  claudeSubagentUsage,
+  mergeRequestUsage,
+  readClaudeSubagentTranscript,
+  requestUsage,
+  usageFromRequests,
+  type ClaudeSubagentTranscript,
+  type RequestUsage,
+} from "./claudeSubagentTranscript";
 import { isAgentToolName } from "../../core/preview";
 import { joinStreamText, snapshotRemainder } from "../../core/streamText";
 import {
@@ -137,6 +150,18 @@ type BackgroundTask = {
   toolUseId?: string;
 };
 
+/** What one subagent has spent, gathered from everywhere Claude reports it. */
+type SubagentTally = {
+  /** The run's own transcript, once Claude has said where it is. */
+  transcript?: ClaudeSubagentTranscript;
+  /** Usage mirrored on the parent's stream, until the transcript is found. */
+  streamed: Map<string, RequestUsage>;
+  lastStreamed?: string;
+  model?: string;
+  task?: ClaudeTaskUsage;
+  running: boolean;
+};
+
 type Live = {
   cwd: string;
   claudeSessionId: string;
@@ -153,6 +178,12 @@ type Live = {
   toolsByIndex: Map<number, InFlightTool>;
   toolsById: Map<string, InFlightTool>;
   agentTasks: Map<string, LiveAgentTask>;
+  /** Tokens each subagent has spent, by the Agent call that spawned it. */
+  subagents: Map<string, SubagentTally>;
+  /** Reads the transcripts of subagents still at work. */
+  subagentPoll: ReturnType<typeof setInterval> | null;
+  /** The context window Claude last reported for each model. */
+  modelWindows: Map<string, number>;
   /**
    * Every task Claude still runs for this session, by id: subagents, shells it
    * backgrounded, monitors. Each one ends in a notification that wakes Claude
@@ -531,6 +562,9 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     toolsByIndex: new Map(),
     toolsById: new Map(),
     agentTasks: new Map(),
+    subagents: new Map(),
+    subagentPoll: null,
+    modelWindows: new Map(),
     backgroundTasks: new Map(),
     backgroundRows: new Map(),
     awaitingResume: null,
@@ -570,6 +604,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     (code) => {
       liveByThread.delete(input.sessionId);
       const current = liveRef.current;
+      if (current) stopSubagentPoll(current);
       if (!current?.muteUpdates) {
         (current?.onEvent ?? input.onEvent)({ type: "session.ended", code });
       }
@@ -635,6 +670,8 @@ async function runTurn(live: Live, input: SendTurnInput): Promise<void> {
   live.toolsByIndex.clear();
   live.toolsById.clear();
   live.agentTasks.clear();
+  live.subagents.clear();
+  stopSubagentPoll(live);
   live.backgroundTasks.clear();
   live.backgroundRows.clear();
   clearAwaitingResume(live);
@@ -875,6 +912,7 @@ function handleStreamEvent(live: Live, rec: Record<string, unknown>): void {
 
 function handleAssistant(live: Live, rec: Record<string, unknown>): void {
   if (isSubagentMessage(rec)) {
+    noteSubagentStreamUsage(live, rec);
     noteSubagentNarration(live, rec);
     for (const use of assistantToolUses(rec)) {
       noteSubagentTool(live, rec, use.id, use.name, use.input);
@@ -948,6 +986,19 @@ function handleAssistant(live: Live, rec: Record<string, unknown>): void {
       if (plan) live.onEvent({ type: "plan", text: plan });
     }
     emitTaskListIfNeeded(live, tool.name, tool.input);
+  }
+  for (const use of assistantToolUses(rec)) {
+    if (!isAgentToolName(use.name)) continue;
+    const prompt = stringField(use.input, "prompt");
+    const agentType = stringField(use.input, "subagent_type");
+    if (prompt || agentType) {
+      live.onEvent({
+        type: "agent.run",
+        callId: use.id,
+        ...(prompt ? { prompt } : {}),
+        ...(agentType ? { agentType } : {}),
+      });
+    }
   }
 
   // Each assistant record is one Claude message. Wait until the next message
@@ -1131,9 +1182,27 @@ function handleUser(live: Live, rec: Record<string, unknown>): void {
     noteSubagentResults(live, rec);
     return;
   }
-  for (const result of toolResultsFromUserMessage(rec)) {
+  const results = toolResultsFromUserMessage(rec);
+  // The structured result describes the message's one call; with several in
+  // a message there is no telling which it belongs to.
+  const launch =
+    results.length === 1 ? agentLaunchFromToolResult(rec) : undefined;
+  for (const result of results) {
     const tool = live.toolsById.get(result.toolUseId);
     if (!tool) continue;
+    if (launch && isAgentToolName(tool.name)) {
+      if (launch.agentId) {
+        live.onEvent({
+          type: "agent.run",
+          callId: tool.id,
+          taskId: launch.agentId,
+          ...(launch.prompt ? { prompt: launch.prompt } : {}),
+        });
+      }
+      if (launch.outputFile) {
+        watchSubagentTranscript(live, tool.id, launch.outputFile);
+      }
+    }
     if (isAgentToolName(tool.name) && isBackgroundedAgentTool(live, tool.id)) {
       continue;
     }
@@ -1186,6 +1255,7 @@ function settleInlineAgentTask(live: Live, toolUseId: string): void {
     if (task.toolUseId !== toolUseId || task.backgrounded) continue;
     live.agentTasks.delete(taskId);
     live.backgroundTasks.delete(taskId);
+    finishSubagentTally(live, toolUseId);
     settled = true;
   }
   if (!settled) return;
@@ -1221,6 +1291,7 @@ function handleResult(
   }
   const metrics = turnMetricsFromResult(rec);
   if (metrics) live.onEvent({ type: "turn.metrics", ...metrics });
+  noteModelWindows(live, rec);
 
   const result = turnStatusFromResult(rec);
   if (result.status === "failed" && result.error && !live.cancelled) {
@@ -1470,6 +1541,17 @@ function handleAgentLifecycle(
       started.description,
       "in_progress",
     );
+    if (started.toolUseId) {
+      subagentTally(live, started.toolUseId).running = true;
+      live.onEvent({
+        type: "agent.run",
+        callId: started.toolUseId,
+        taskId: started.taskId,
+        startedAt: Date.now(),
+        ...(started.prompt ? { prompt: started.prompt } : {}),
+        ...(started.subagentType ? { agentType: started.subagentType } : {}),
+      });
+    }
     return true;
   }
 
@@ -1490,6 +1572,11 @@ function handleAgentLifecycle(
       "in_progress",
       detail,
     );
+    const callId = progress.toolUseId ?? task?.toolUseId;
+    if (callId && progress.usage) {
+      subagentTally(live, callId).task = progress.usage;
+      emitSubagentUsage(live, callId);
+    }
     return true;
   }
 
@@ -1524,6 +1611,15 @@ function handleAgentLifecycle(
 
   const notice = parseTaskNotification(rec);
   if (notice) {
+    const noticeCall =
+      notice.toolUseId ?? live.agentTasks.get(notice.taskId)?.toolUseId;
+    if (!notice.ambient && noticeCall && live.subagents.has(noticeCall)) {
+      const tally = subagentTally(live, noticeCall);
+      if (notice.usage) tally.task = notice.usage;
+      if (notice.outputFile) {
+        watchSubagentTranscript(live, noticeCall, notice.outputFile);
+      }
+    }
     if (!notice.ambient) {
       noteTaskNotification(live, notice);
       finishBackgroundTask(live, notice.taskId);
@@ -1798,6 +1894,7 @@ function completeAgentTask(
 ): void {
   const task = live.agentTasks.get(taskId);
   live.agentTasks.delete(taskId);
+  if (task?.toolUseId) finishSubagentTally(live, task.toolUseId);
   if (task) {
     upsertAgentTool(
       live,
@@ -2067,8 +2164,177 @@ function launchOptions(
 
 /** Exported for tests. */
 export function __claudeTestReset(): void {
+  for (const live of liveByThread.values()) stopSubagentPoll(live);
   liveByThread.clear();
   resumeByThread.clear();
   tasksByThread.clear();
   cancelledThreads.clear();
+}
+
+/** How often the transcripts of running subagents are read for new usage. */
+const SUBAGENT_POLL_MS = 2_000;
+
+function subagentTally(live: Live, callId: string): SubagentTally {
+  let tally = live.subagents.get(callId);
+  if (!tally) {
+    tally = { streamed: new Map(), running: true };
+    live.subagents.set(callId, tally);
+  }
+  return tally;
+}
+
+/**
+ * Usage a subagent's message carried on the parent's stream. Its output
+ * counts are early snapshots, so it only stands in until the run's own
+ * transcript can be read.
+ */
+function noteSubagentStreamUsage(
+  live: Live,
+  rec: Record<string, unknown>,
+): void {
+  const callId = stringField(rec, "parent_tool_use_id");
+  if (!callId) return;
+  const message = asRecord(rec.message);
+  const id = stringField(message, "id");
+  const usage = requestUsage(asRecord(message?.usage));
+  if (!id || !usage) return;
+  const tally = subagentTally(live, callId);
+  mergeRequestUsage(tally.streamed, id, usage);
+  tally.lastStreamed = id;
+  const model = stringField(message, "model");
+  if (model) tally.model = model;
+  if (!tally.transcript) emitSubagentUsage(live, callId);
+}
+
+/** Start reading a subagent's transcript, then keep up with it while it runs. */
+function watchSubagentTranscript(
+  live: Live,
+  callId: string,
+  path: string,
+): void {
+  const tally = subagentTally(live, callId);
+  if (tally.transcript) {
+    if (!tally.running) void refreshSubagent(live, callId);
+    return;
+  }
+  tally.transcript = claudeSubagentTranscript(path);
+  void refreshSubagent(live, callId);
+  if (tally.running && !live.subagentPoll) {
+    live.subagentPoll = setInterval(() => {
+      let watching = false;
+      for (const [id, entry] of live.subagents) {
+        if (!entry.transcript || !entry.running) continue;
+        watching = true;
+        void refreshSubagent(live, id);
+      }
+      if (!watching) stopSubagentPoll(live);
+    }, SUBAGENT_POLL_MS);
+  }
+}
+
+function stopSubagentPoll(live: Live): void {
+  if (!live.subagentPoll) return;
+  clearInterval(live.subagentPoll);
+  live.subagentPoll = null;
+}
+
+async function refreshSubagent(live: Live, callId: string): Promise<void> {
+  const tally = live.subagents.get(callId);
+  const transcript = tally?.transcript;
+  if (!tally || !transcript) return;
+  const first = transcript.offset === 0;
+  try {
+    const changed = await readClaudeSubagentTranscript(transcript);
+    if (live.subagents.get(callId) !== tally) return;
+    if (first) {
+      live.onEvent({
+        type: "agent.run",
+        callId,
+        transcriptPath: transcript.path,
+      });
+    }
+    if (changed || first) emitSubagentUsage(live, callId);
+  } catch {
+    // An unreadable transcript (removed, or on a host without the reader)
+    // leaves the stream's own numbers in charge.
+    if (live.subagents.get(callId) !== tally) return;
+    tally.transcript = undefined;
+    emitSubagentUsage(live, callId);
+  }
+}
+
+/** The run is over: one last read picks up its final request. */
+function finishSubagentTally(live: Live, callId: string): void {
+  const tally = live.subagents.get(callId);
+  if (!tally) return;
+  tally.running = false;
+  if (tally.transcript) void refreshSubagent(live, callId);
+  else emitSubagentUsage(live, callId);
+}
+
+function emitSubagentUsage(live: Live, callId: string): void {
+  if (live.muteUpdates) return;
+  const tally = live.subagents.get(callId);
+  if (!tally) return;
+  const counted = tally.transcript
+    ? claudeSubagentUsage(tally.transcript)
+    : usageFromRequests(tally.streamed, tally.lastStreamed);
+  const task = tally.task;
+  if (!counted && !task) return;
+  const model = tally.transcript?.model ?? tally.model;
+  const window = model ? live.modelWindows.get(model) : undefined;
+  live.onEvent({
+    type: "agent.run",
+    callId,
+    usage: {
+      uncached: counted?.uncached ?? 0,
+      cacheRead: counted?.cacheRead ?? 0,
+      cacheWrite: counted?.cacheWrite ?? 0,
+      output: counted?.output ?? 0,
+      ...((counted?.contextUsed ?? task?.totalTokens) !== undefined
+        ? { contextUsed: counted?.contextUsed ?? task?.totalTokens }
+        : {}),
+      ...(window ? { contextWindow: window } : {}),
+      ...(task?.toolUses !== undefined ? { toolUses: task.toolUses } : {}),
+      ...(task?.durationMs !== undefined
+        ? { durationMs: task.durationMs }
+        : {}),
+    },
+  });
+}
+
+/** Windows arrive on the turn result; subagents on those models learn theirs. */
+function noteModelWindows(live: Live, rec: Record<string, unknown>): void {
+  const windows = modelWindowsFromResult(rec);
+  if (windows.length === 0) return;
+  for (const [model, window] of windows) live.modelWindows.set(model, window);
+  for (const [callId, tally] of live.subagents) {
+    const model = tally.transcript?.model ?? tally.model;
+    if (model && live.modelWindows.has(model)) emitSubagentUsage(live, callId);
+  }
+}
+
+/**
+ * Stop one subagent and leave the rest of the turn running. Resolves false
+ * when Claude has no task for that call to stop.
+ */
+export async function stopClaudeSubagent(
+  sessionId: string,
+  callId: string,
+): Promise<boolean> {
+  const live = liveByThread.get(sessionId);
+  if (!live) return false;
+  const task = [...live.agentTasks.values()].find(
+    (entry) => entry.toolUseId === callId,
+  );
+  if (!task) return false;
+  live.onEvent({ type: "agent.run", callId, stopped: true });
+  await writeJson(
+    sessionId,
+    buildControlRequest(nextControlId(live), {
+      subtype: "stop_task",
+      task_id: task.taskId,
+    }),
+  );
+  return true;
 }
