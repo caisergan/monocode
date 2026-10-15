@@ -725,6 +725,7 @@ import {
   linkedWorkItemFromAutomationEvent,
   linkedWorkItemFromInboxItem,
   resolveLinkedWorkItem,
+  withCreatedPullRequest,
 } from "../features/sessions/model/sessionWorkItem";
 import {
   completeLinkedWorkItemUpdateCard,
@@ -8305,7 +8306,7 @@ function Workspace({
           setSessions((prev) =>
             prev.map((s) => {
               if (s.id !== sessionId) return s;
-              const stopped = stopStreaming(s);
+              const stopped = withCreatedPullRequest(stopStreaming(s));
               const providerFailed =
                 providerFailureSeen ||
                 isProviderFailureText(lastAssistantTextInTurn(stopped));

@@ -1,3 +1,4 @@
+import { isExecuteTool } from "../../../integrations/harness/core/preview";
 import { gitPrStatus } from "../../../platform/tauri/fs";
 import {
   githubRepo,
@@ -5,7 +6,7 @@ import {
   type InboxItem,
   type GithubTaskKind,
 } from "../../inbox/model/githubTasks";
-import type { LinkedWorkItem } from "./session";
+import type { Block, LinkedWorkItem, Session } from "./session";
 import type { GeneratedWorkItemHint } from "./sessionTitle";
 
 const GITHUB_URL_RE =
@@ -53,6 +54,36 @@ function repoFromGithubUrl(url: string): string | null {
 
 function referencesCurrentPr(message: string): boolean {
   return /\b(?:this|the|current)\s+(?:pr|pull\s+request)\b/i.test(message);
+}
+
+const PR_CREATE_RE = /\bgh\s+pr\s+create\b/;
+const PR_URL_RE =
+  /https?:\/\/github\.com\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/pull\/\d+\b/gi;
+
+/** The PR the agent opened most recently with `gh pr create`, read from its output. */
+export function createdPullRequest(blocks: Block[]): LinkedWorkItem | null {
+  for (let i = blocks.length - 1; i >= 0; i--) {
+    const block = blocks[i];
+    // A failed create still counts: gh exits non-zero when the branch already
+    // has a PR, and prints that PR's URL.
+    if (block.role !== "tool") continue;
+    const command = block.text || block.tool?.title || "";
+    if (!isExecuteTool(block.tool?.kind, command)) continue;
+    if (!PR_CREATE_RE.test(command)) continue;
+    const output = block.tool?.detail || block.tool?.preview?.output || "";
+    // gh prints the new PR's URL last; earlier URLs can be warnings or links.
+    const url = output.match(PR_URL_RE)?.at(-1);
+    const item = url ? parseGithubWorkItemUrl(url) : null;
+    if (item) return item;
+  }
+  return null;
+}
+
+/** Link a session to the PR it opened, unless it is already linked. */
+export function withCreatedPullRequest(session: Session): Session {
+  if (session.linkedWorkItem) return session;
+  const linkedWorkItem = createdPullRequest(session.blocks);
+  return linkedWorkItem ? { ...session, linkedWorkItem } : session;
 }
 
 /** Resolve explicit first-message context to one stable GitHub identity. */
