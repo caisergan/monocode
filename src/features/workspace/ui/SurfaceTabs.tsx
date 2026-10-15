@@ -1,5 +1,6 @@
 import {
   GitCompare,
+  GitPullRequest,
   Globe,
   GripVertical,
   Terminal,
@@ -20,6 +21,7 @@ import {
   isCommitTab,
   isFilesystemTab,
   isPlanTab,
+  isPullRequestTab,
   isReleaseNotesTab,
   isReviewTab,
   isSessionChangesTab,
@@ -172,6 +174,17 @@ export function surfaceTabPresentation(
     };
   }
 
+  if (isPullRequestTab(file)) {
+    const { repo, number, title } = file.pullRequest;
+    const name = title?.trim() || `Pull request #${number}`;
+    return {
+      name,
+      label: title?.trim() ? `#${number} ${name}` : name,
+      iconName: "PULL_REQUEST",
+      tooltip: `${repo}#${number}${title?.trim() ? ` — ${title.trim()}` : ""}`,
+    };
+  }
+
   if (isCommitTab(file)) {
     const name = file.commit.subject.trim() || file.commit.shortSha;
     return {
@@ -318,6 +331,7 @@ export function SurfaceTabs({
           const errors = fileErrorCounts.get(file.id) ?? 0;
           const changes = isChangesTab(file);
           const commit = isCommitTab(file);
+          const pullRequest = isPullRequestTab(file);
           const review = isReviewTab(file) && !changes;
           const terminal = isTerminalTab(file);
           const browser = isBrowserTab(file);
@@ -392,6 +406,11 @@ export function SurfaceTabs({
                   <Terminal className="size-3.5 shrink-0" strokeWidth={1.75} />
                 ) : browser ? (
                   <Globe className="size-3.5 shrink-0" strokeWidth={1.75} />
+                ) : pullRequest ? (
+                  <GitPullRequest
+                    className="size-3.5 shrink-0"
+                    strokeWidth={1.75}
+                  />
                 ) : agent ? (
                   <HarnessIcon
                     harness={agent.harness}

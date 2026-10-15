@@ -71,6 +71,8 @@ import {
   linkedWorkItemsOf,
   sessionDisplayTitle,
 } from "../../features/sessions/model/session";
+import { pullRequestInboxItem } from "../../features/source-control/model/pullRequests";
+import type { InboxItem } from "../../features/inbox/model/githubTasks";
 import { supportsTerminalSurface } from "../../integrations/harness/core/terminalLaunch";
 import { ParticleText } from "../../shared/ui/ParticleText";
 import { nextUnseenFinishedSessions } from "../../features/sessions/model/sessionDone";
@@ -316,6 +318,10 @@ type Props = {
   onOpenDiff?: (path: string, kind?: GitFileDiffKind, pin?: boolean) => void;
   onOpenAllChanges?: (kind: GitFileDiffKind) => void;
   onOpenCommit?: (commit: GitHistoryCommit, pin?: boolean) => void;
+  /** Show a pull request from the Changes list in the side panel. */
+  onOpenPullRequest?: (item: LinkedWorkItem, cwd: string) => void;
+  onStartPullRequest?: (item: InboxItem) => void;
+  activePullRequest?: { repo: string; number: number } | null;
   selectedDiffPath?: string;
   selectedDiffKind?: GitFileDiffKind;
   selectedCommitSha?: string;
@@ -422,6 +428,9 @@ function SidebarComponent({
   onOpenDiff,
   onOpenAllChanges,
   onOpenCommit,
+  onOpenPullRequest,
+  onStartPullRequest,
+  activePullRequest,
   selectedDiffPath,
   selectedDiffKind,
   selectedCommitSha,
@@ -2200,6 +2209,24 @@ function SidebarComponent({
                 }
                 onOpenAllChanges={onOpenAllChanges ?? (() => {})}
                 onOpenCommit={onOpenCommit ?? (() => {})}
+                activePullRequest={activePullRequest}
+                linkedSessions={sessions}
+                onOpenPullRequest={
+                  onOpenPullRequest && !remoteProject
+                    ? (pr, repo) =>
+                        onOpenPullRequest(
+                          { kind: "pr", repo, number: pr.number, url: pr.url },
+                          gitRoot,
+                        )
+                    : undefined
+                }
+                onOpenSession={onSelectSession}
+                onStartPullRequestSession={
+                  onStartPullRequest
+                    ? (pr, repo) =>
+                        onStartPullRequest(pullRequestInboxItem(pr, repo, cwd))
+                    : undefined
+                }
               />
           </div>
         ) : null}

@@ -18,6 +18,7 @@ import {
   MessageSquare,
   ListFilter,
   LoaderCircle,
+  Maximize2,
   MessageMultiple,
   PanelLeft,
   Plus,
@@ -1196,36 +1197,8 @@ export function InboxView({
   );
 }
 
-export function LinkedWorkItemPanel({
-  repairSessions,
-  onRepairChecks,
-  onOpenSession,
-  target,
-  cwd,
-  recents,
-  visible = true,
-  onClose,
-}: {
-  repairSessions?: CiRepairProps["repairSessions"];
-  onRepairChecks?: CiRepairProps["onRepairChecks"];
-  onOpenSession?: (sessionId: string) => void | Promise<void>;
-  target: LinkedWorkItem;
-  cwd: string;
-  recents: RecentProject[];
-  visible?: boolean;
-  onClose: () => void;
-}) {
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-  const logos = useTabGroupLogos();
-  const projects = useMemo(
-    () => inboxProjectsForRail(recents, cwd),
-    [cwd, recents],
-  );
-  const projectOptions = useMemo(
-    () => inboxProjectOptions(projects, logos),
-    [logos, projects],
-  );
+/** One GitHub issue or pull request, cached first and then refreshed. */
+function useLinkedWorkItem(target: LinkedWorkItem, cwd: string) {
   const cachedItem = peekGithubWorkItem(
     target.repo,
     target.kind,
@@ -1236,24 +1209,6 @@ export function LinkedWorkItemPanel({
   );
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(cachedItem == null);
-  const resize = useDragResize({
-    min: LINKED_PANEL_MIN_WIDTH,
-    max: () =>
-      Math.max(
-        LINKED_PANEL_MIN_WIDTH,
-        Math.round(
-          (typeof window === "undefined"
-            ? LINKED_PANEL_DEFAULT_WIDTH / 0.65
-            : window.innerWidth) * 0.65,
-        ),
-      ),
-    defaultWidth: LINKED_PANEL_DEFAULT_WIDTH,
-    initial: rememberedLinkedPanelWidth,
-    direction: "left",
-    onCommit: (width) => {
-      rememberedLinkedPanelWidth = width;
-    },
-  });
 
   useEffect(() => {
     let cancelled = false;
@@ -1279,6 +1234,141 @@ export function LinkedWorkItemPanel({
       cancelled = true;
     };
   }, [cwd, target.kind, target.number, target.repo]);
+
+  return { item, setItem, error, loading };
+}
+
+function useProjectOptions(recents: RecentProject[], cwd: string) {
+  const logos = useTabGroupLogos();
+  const projects = useMemo(
+    () => inboxProjectsForRail(recents, cwd),
+    [cwd, recents],
+  );
+  return useMemo(
+    () => inboxProjectOptions(projects, logos),
+    [logos, projects],
+  );
+}
+
+function LinkedWorkItemError({ message, url }: { message: string; url: string }) {
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-3 px-8 text-center">
+      <CircleX className="size-5 text-rose-400/90" strokeWidth={1.75} />
+      <p role="alert" className="max-w-sm text-[12px] text-content/55">
+        {message}
+      </p>
+      <button
+        type="button"
+        onClick={() => void openUrl(url)}
+        className={ACTION_OUTLINE}
+      >
+        <ExternalLink className="size-3.5" strokeWidth={1.75} />
+        Open on GitHub
+      </button>
+    </div>
+  );
+}
+
+/**
+ * A linked issue or pull request filling a main-area tab: the Inbox's full
+ * detail layout, reached by moving the side panel out of the way.
+ */
+export function LinkedWorkItemDocument({
+  target,
+  cwd,
+  recents,
+  visible = true,
+  relatedSessions = [],
+  repairSessions,
+  onRepairChecks,
+  onOpenSession,
+}: {
+  target: LinkedWorkItem;
+  cwd: string;
+  recents: RecentProject[];
+  visible?: boolean;
+  relatedSessions?: readonly SessionSummary[];
+  repairSessions?: CiRepairProps["repairSessions"];
+  onRepairChecks?: CiRepairProps["onRepairChecks"];
+  onOpenSession?: (sessionId: string) => void | Promise<void>;
+}) {
+  const projectOptions = useProjectOptions(recents, cwd);
+  const { item, setItem, error, loading } = useLinkedWorkItem(target, cwd);
+  return (
+    <section
+      aria-label={`${target.kind === "pr" ? "Pull request" : "Issue"} #${target.number}`}
+      aria-busy={loading}
+      className="@container/linked h-full min-h-0 min-w-0 bg-background-base text-content"
+    >
+      {item ? (
+        <InboxDetail
+          key={inboxItemKey(item)}
+          item={item}
+          cwd={cwd}
+          projects={projectOptions}
+          revision={0}
+          relatedSessions={relatedSessions}
+          visible={visible}
+          repairSessions={repairSessions}
+          onRepairChecks={onRepairChecks}
+          onOpenSession={onOpenSession}
+          onItemChange={setItem}
+        />
+      ) : error ? (
+        <LinkedWorkItemError message={error} url={target.url} />
+      ) : (
+        <div className="flex h-full items-center justify-center text-content/40">
+          <LoaderCircle className="size-4 animate-spin" strokeWidth={1.75} />
+        </div>
+      )}
+    </section>
+  );
+}
+
+export function LinkedWorkItemPanel({
+  repairSessions,
+  onRepairChecks,
+  onOpenSession,
+  target,
+  cwd,
+  recents,
+  visible = true,
+  onClose,
+  onExpand,
+}: {
+  repairSessions?: CiRepairProps["repairSessions"];
+  onRepairChecks?: CiRepairProps["onRepairChecks"];
+  onOpenSession?: (sessionId: string) => void | Promise<void>;
+  target: LinkedWorkItem;
+  cwd: string;
+  recents: RecentProject[];
+  visible?: boolean;
+  onClose: () => void;
+  /** Move the item to a main-area tab; receives its title once loaded. */
+  onExpand?: (title?: string) => void;
+}) {
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const projectOptions = useProjectOptions(recents, cwd);
+  const { item, setItem, error, loading } = useLinkedWorkItem(target, cwd);
+  const resize = useDragResize({
+    min: LINKED_PANEL_MIN_WIDTH,
+    max: () =>
+      Math.max(
+        LINKED_PANEL_MIN_WIDTH,
+        Math.round(
+          (typeof window === "undefined"
+            ? LINKED_PANEL_DEFAULT_WIDTH / 0.65
+            : window.innerWidth) * 0.65,
+        ),
+      ),
+    defaultWidth: LINKED_PANEL_DEFAULT_WIDTH,
+    initial: rememberedLinkedPanelWidth,
+    direction: "left",
+    onCommit: (width) => {
+      rememberedLinkedPanelWidth = width;
+    },
+  });
 
   useEffect(() => {
     if (!visible) return;
@@ -1373,22 +1463,10 @@ export function LinkedWorkItemPanel({
               onRepairChecks={onRepairChecks}
               onOpenSession={onOpenSession}
               onItemChange={setItem}
+              onExpand={onExpand ? () => onExpand(item.title) : undefined}
             />
           ) : error ? (
-            <div className="flex h-full flex-col items-center justify-center gap-3 px-8 text-center">
-              <CircleX className="size-5 text-rose-400/90" strokeWidth={1.75} />
-              <p role="alert" className="max-w-sm text-[12px] text-content/55">
-                {error}
-              </p>
-              <button
-                type="button"
-                onClick={() => void openUrl(target.url)}
-                className={ACTION_OUTLINE}
-              >
-                <ExternalLink className="size-3.5" strokeWidth={1.75} />
-                Open on GitHub
-              </button>
-            </div>
+            <LinkedWorkItemError message={error} url={target.url} />
           ) : (
             <div className="flex h-full items-center justify-center text-content/40">
               <LoaderCircle
@@ -1962,6 +2040,7 @@ export function InboxDetail({
   onRepairChecks,
   onOpenSession,
   onItemChange,
+  onExpand,
 }: {
   item: InboxItem;
   cwd: string;
@@ -1976,6 +2055,8 @@ export function InboxDetail({
   onRepairChecks?: CiRepairProps["onRepairChecks"];
   onOpenSession?: (sessionId: string) => void | Promise<void>;
   onItemChange?: (item: InboxItem) => void;
+  /** Side panel only: move this item into a main-area tab. */
+  onExpand?: () => void;
 }) {
   const detailLock = useLockOverscroll<HTMLDivElement>();
   const panel = mode === "panel";
@@ -2605,6 +2686,17 @@ export function InboxDetail({
           <span className="@max-[420px]/linked:hidden">
             {externalActionLabel}
           </span>
+        </button>
+      ) : null}
+      {panel && onExpand ? (
+        <button
+          type="button"
+          title="Open in main area"
+          aria-label="Open in main area"
+          onClick={onExpand}
+          className="grid size-6.5 shrink-0 place-items-center rounded-md text-content/55 hover:bg-content/10 hover:text-content"
+        >
+          <Maximize2 className="size-3.5" strokeWidth={1.75} />
         </button>
       ) : null}
     </div>

@@ -60,6 +60,14 @@ export type SessionChangesSource = {
   sessionId: string;
 };
 
+/** A GitHub pull request moved out of the side panel into the main area. */
+export type PullRequestTabSource = {
+  repo: string;
+  number: number;
+  url: string;
+  title?: string;
+};
+
 export type FilePaneTab = {
   id: string;
   path: string;
@@ -77,6 +85,7 @@ export type FilePaneTab = {
   sessionChanges?: SessionChangesSource;
   /** Historical commit review (unified diff, read-only). */
   commit?: CommitTabSource;
+  pullRequest?: PullRequestTabSource;
   /** Read-only transcript of an orchestration worker. Live only — not persisted. */
   agent?: AgentTabSource;
   terminal?: boolean;
@@ -188,6 +197,20 @@ export function newSessionChangesTab(
     ...(projectCwd && projectCwd !== cwd ? { projectCwd } : {}),
     review: true,
     sessionChanges: { sessionId },
+  };
+}
+
+export function newPullRequestTab(
+  cwd: string,
+  pullRequest: PullRequestTabSource,
+  projectCwd?: string,
+): FilePaneTab {
+  return {
+    id: crypto.randomUUID(),
+    path: `pull-request:${pullRequest.repo}#${pullRequest.number}`,
+    cwd,
+    ...(projectCwd && projectCwd !== cwd ? { projectCwd } : {}),
+    pullRequest,
   };
 }
 
@@ -451,6 +474,12 @@ export function isReleaseNotesTab(
   return !!file.releaseNotes;
 }
 
+export function isPullRequestTab(
+  file: FilePaneTab,
+): file is FilePaneTab & { pullRequest: PullRequestTabSource } {
+  return !!file.pullRequest;
+}
+
 export function isCommitTab(
   file: FilePaneTab,
 ): file is FilePaneTab & { commit: CommitTabSource } {
@@ -478,6 +507,7 @@ export function isVirtualDocumentTab(file: FilePaneTab): boolean {
     isPlanTab(file) ||
     isReleaseNotesTab(file) ||
     isCommitTab(file) ||
+    isPullRequestTab(file) ||
     isAgentTab(file) ||
     isBrowserTab(file)
   );
@@ -562,6 +592,9 @@ export function editorTabKey(file: FilePaneTab): string {
   if (file.releaseNotes) return `release-notes:${file.releaseNotes.version}`;
   if (file.browser) return `browser:${file.browser.url}`;
   if (file.commit) return `commit:${file.cwd}:${file.commit.sha}`;
+  if (file.pullRequest) {
+    return `pull-request:${file.pullRequest.repo.toLowerCase()}#${file.pullRequest.number}`;
+  }
   if (file.sessionChanges)
     return `session-changes:${file.cwd}:${file.sessionChanges.sessionId}`;
   if (file.changes) return `changes:${file.cwd}`;
@@ -590,6 +623,7 @@ export function isPreviewableTab(file: FilePaneTab): boolean {
     !file.agent &&
     !file.plan &&
     !file.releaseNotes &&
+    !file.pullRequest &&
     !file.browser &&
     !file.changes
   );
@@ -834,6 +868,18 @@ function dropPerFileReviewTabs(
       isChangesTab(file) ||
       isSessionChangesTab(file),
   );
+}
+
+/** Focus a pull request moved to the main area, creating its tab if needed. */
+export function openPullRequestTab(
+  tab: WorkspaceTab,
+  cwd: string,
+  pullRequest: PullRequestTabSource,
+  projectCwd?: string,
+): WorkspaceTab {
+  return openEditorTab(tab, newPullRequestTab(cwd, pullRequest, projectCwd), {
+    pin: true,
+  });
 }
 
 /** Open a terminal in its own pane. Files never share this tab strip. */
