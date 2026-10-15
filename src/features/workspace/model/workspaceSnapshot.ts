@@ -10,6 +10,7 @@ import {
   newTab,
   type BrowserTabSource,
   type CommitTabSource,
+  type PullRequestTabSource,
   type EditorPane,
   type FilePaneTab,
   type LayoutNode,
@@ -571,6 +572,23 @@ function sanitizeFile(raw: unknown): FilePaneTab | null {
   const hasBrowser = "browser" in value;
   const browser = sanitizeBrowser(value.browser);
   if (hasBrowser && !browser) return null;
+  const hasPullRequest = "pullRequest" in value;
+  const pullRequest = sanitizePullRequest(value.pullRequest);
+  if (hasPullRequest && !pullRequest) return null;
+  if (
+    pullRequest &&
+    (value.plan != null ||
+      "releaseNotes" in value ||
+      "commit" in value ||
+      "sessionChanges" in value ||
+      "remoteFile" in value ||
+      browser ||
+      value.review === true ||
+      value.changes === true ||
+      value.terminal === true)
+  ) {
+    return null;
+  }
   if (
     browser &&
     (value.plan != null ||
@@ -646,6 +664,7 @@ function sanitizeFile(raw: unknown): FilePaneTab | null {
     ...(releaseNotes ? { releaseNotes } : {}),
     ...(browser ? { browser } : {}),
     ...(commit ? { commit } : {}),
+    ...(pullRequest ? { pullRequest } : {}),
     ...(sessionChanges ? { sessionChanges, review: true } : {}),
     ...(value.review === true ? { review: true } : {}),
     ...(value.changes === true ? { changes: true, review: true } : {}),
@@ -699,6 +718,21 @@ function sanitizeCommit(raw: unknown): CommitTabSource | undefined {
     shortSha: value.shortSha.trim(),
     subject: value.subject,
   };
+}
+
+function sanitizePullRequest(raw: unknown): PullRequestTabSource | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const value = raw as Record<string, unknown>;
+  const repo = typeof value.repo === "string" ? value.repo.trim() : "";
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) return undefined;
+  const number = value.number;
+  if (typeof number !== "number" || !Number.isSafeInteger(number) || number < 1) {
+    return undefined;
+  }
+  const url = `https://github.com/${repo}/pull/${number}`;
+  const title =
+    typeof value.title === "string" ? value.title.trim().slice(0, 300) : "";
+  return { repo, number, url, ...(title ? { title } : {}) };
 }
 
 /** Only addresses the frame can load; a stored `javascript:` URL never comes back. */

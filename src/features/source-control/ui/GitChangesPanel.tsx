@@ -33,6 +33,8 @@ import { FileTypeIcon } from "../../files/ui/FileTypeIcon";
 import {
   GitHistoryGraph,
   GraphResizeSash,
+  loadPullRequestPanelHeight,
+  savePullRequestPanelHeight,
   GRAPH_PANEL_DEFAULT,
   GRAPH_PANEL_MIN,
   loadGraphPanelHeight,
@@ -79,6 +81,12 @@ import { MOD } from "../../../platform/tauri/platform";
 import { applyProjectDiffStats } from "../hooks/useProjectDiffStats";
 import { useLockOverscroll } from "../../../shared/hooks/useLockOverscroll";
 import { isRemoteProjectPath } from "../../projects/model/recents";
+import type { SessionSummary } from "../../sessions/data/sessionStore";
+import { GitPullRequests } from "./GitPullRequests";
+import {
+  isPullRequestListUnsupported,
+  type ProjectPullRequest,
+} from "../model/pullRequests";
 
 const GIT_POLL_MS = 2000;
 
@@ -93,6 +101,11 @@ function confirmNative(message: string, okLabel?: string): Promise<boolean> {
 let stagedOpen = true;
 let changesOpen = true;
 let graphOpen = true;
+let pullRequestsOpen = true;
+/** A folded section keeps one header row. */
+const SECTION_HEADER_PX = 28;
+/** Changed files keep at least this much room above the bottom sections. */
+const FILES_MIN_PX = 160;
 let changesView: ChangesView = loadChangesView();
 /** Folders the user collapsed in tree view, keyed `<kind>:<dir>`. */
 const collapsedDirs = new Set<string>();
@@ -111,6 +124,11 @@ type Props = {
   onOpenFile: (path: string, kind: GitFileDiffKind, pin?: boolean) => void;
   onOpenAllChanges: (kind: GitFileDiffKind) => void;
   onOpenCommit: (commit: GitHistoryCommit, pin?: boolean) => void;
+  activePullRequest?: { repo: string; number: number } | null;
+  linkedSessions?: readonly SessionSummary[];
+  onOpenPullRequest?: (pr: ProjectPullRequest, repo: string) => void;
+  onOpenSession?: (sessionId: string) => void;
+  onStartPullRequestSession?: (pr: ProjectPullRequest, repo: string) => void;
 };
 
 export function GitChangesPanel({
@@ -123,6 +141,11 @@ export function GitChangesPanel({
   onOpenFile,
   onOpenAllChanges,
   onOpenCommit,
+  activePullRequest,
+  linkedSessions,
+  onOpenPullRequest,
+  onOpenSession,
+  onStartPullRequestSession,
 }: Props) {
   const { index, reload } = useDiffIndex(cwd, enabled);
   const files = index?.files ?? [];
@@ -135,6 +158,18 @@ export function GitChangesPanel({
   const [status, setStatus] = useState<string | null>(null);
   const [graphHeight, setGraphHeight] = useState(loadGraphPanelHeight);
   const [graphExpanded, setGraphExpanded] = useState(graphOpen);
+  const [prsHeight, setPrsHeight] = useState(loadPullRequestPanelHeight);
+  const [prsExpanded, setPrsExpanded] = useState(pullRequestsOpen);
+  const [prsSupported, setPrsSupported] = useState(
+    () => !isPullRequestListUnsupported(cwd),
+  );
+  const showPullRequests = !!onOpenPullRequest && prsSupported;
+  const prsSpace = showPullRequests
+    ? prsExpanded
+      ? prsHeight
+      : SECTION_HEADER_PX
+    : 0;
+  const graphSpace = graphExpanded ? graphHeight : SECTION_HEADER_PX;
 
   useEffect(() => {
     if (!status) return;
@@ -175,13 +210,24 @@ export function GitChangesPanel({
 
   useLayoutEffect(() => {
     const pane = paneRef.current;
-    if (!pane || pane.clientHeight < GRAPH_PANEL_MIN + 160) return;
-    const max = pane.clientHeight - 160;
-    if (graphHeight > max) {
-      setGraphHeight(max);
-      saveGraphPanelHeight(max);
+    if (!pane || pane.clientHeight < GRAPH_PANEL_MIN + FILES_MIN_PX) return;
+    const graphMax = Math.max(
+      GRAPH_PANEL_MIN,
+      pane.clientHeight - FILES_MIN_PX - prsSpace,
+    );
+    if (graphHeight > graphMax) {
+      setGraphHeight(graphMax);
+      saveGraphPanelHeight(graphMax);
     }
-  }, [graphHeight]);
+    const prsMax = Math.max(
+      GRAPH_PANEL_MIN,
+      pane.clientHeight - FILES_MIN_PX - graphSpace,
+    );
+    if (showPullRequests && prsHeight > prsMax) {
+      setPrsHeight(prsMax);
+      savePullRequestPanelHeight(prsMax);
+    }
+  }, [graphHeight, graphSpace, prsHeight, prsSpace, showPullRequests]);
 
   if (!cwd || cwd === "~") {
     return (
@@ -290,6 +336,50 @@ export function GitChangesPanel({
           window.setTimeout(() => invalidateWatchedFiles(paths), 150);
         }}
       />
+      {showPullRequests && prsExpanded ? (
+        <GraphResizeSash
+          label="Resize pull requests"
+          height={prsHeight}
+          onHeightPaint={setPrsHeight}
+          onHeightCommit={(next) => {
+            setPrsHeight(next);
+            savePullRequestPanelHeight(next);
+          }}
+          maxHeight={() => {
+            const pane = paneRef.current;
+            if (!pane) return GRAPH_PANEL_DEFAULT * 2;
+            return Math.max(
+              GRAPH_PANEL_MIN,
+              pane.clientHeight - FILES_MIN_PX - graphSpace,
+            );
+          }}
+        />
+      ) : null}
+      {showPullRequests ? (
+        <div
+          className={`shrink-0 overflow-hidden border-t border-stroke ${
+            prsExpanded ? "min-h-0" : "h-7"
+          }`}
+          style={prsExpanded ? { height: prsHeight } : undefined}
+        >
+          <GitPullRequests
+            cwd={cwd}
+            enabled={enabled}
+            expanded={prsExpanded}
+            branch={index?.branch ?? null}
+            activePullRequest={activePullRequest}
+            linkedSessions={linkedSessions}
+            onToggleExpanded={() => {
+              pullRequestsOpen = !prsExpanded;
+              setPrsExpanded(pullRequestsOpen);
+            }}
+            onOpenPullRequest={onOpenPullRequest}
+            onOpenSession={onOpenSession}
+            onStartSession={onStartPullRequestSession}
+            onUnsupported={() => setPrsSupported(false)}
+          />
+        </div>
+      ) : null}
       {graphExpanded ? (
         <GraphResizeSash
           height={graphHeight}
@@ -301,7 +391,10 @@ export function GitChangesPanel({
           maxHeight={() => {
             const pane = paneRef.current;
             if (!pane) return GRAPH_PANEL_DEFAULT * 2;
-            return Math.max(GRAPH_PANEL_MIN, pane.clientHeight - 160);
+            return Math.max(
+              GRAPH_PANEL_MIN,
+              pane.clientHeight - FILES_MIN_PX - prsSpace,
+            );
           }}
         />
       ) : null}

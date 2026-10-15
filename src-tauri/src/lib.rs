@@ -354,6 +354,7 @@ pub fn run() {
             fs::git_github_repositories,
             fs::git_github_work_item,
             fs::git_github_work_items,
+            fs::git_github_pull_requests,
             fs::git_github_work_item_details,
             fs::git_github_work_item_thread,
             fs::git_github_work_item_comment,

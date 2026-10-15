@@ -12,6 +12,7 @@ import {
   newChangesTab,
   newCommitTab,
   newFileTab,
+  newPullRequestTab,
   newBrowserTab,
   newEditorWorkspaceTab,
   newReleaseNotesWorkspaceTab,
@@ -384,6 +385,72 @@ describe("collectWorkspaceSnapshot", () => {
       shortSha: "abc1234",
       subject: "Fix the graph",
     });
+  });
+
+  it("round-trips a pull request tab and rebuilds its link", () => {
+    const file = newPullRequestTab("/tmp/a", {
+      repo: "caisergan/monocode",
+      number: 32,
+      url: "javascript:alert(1)",
+      title: "Continue in a new chat",
+    });
+    const tab = {
+      ...newTab("s1"),
+      id: "t1",
+      editorPanes: [{ id: "e1", files: [file], activeFileId: file.id }],
+    };
+    const snapshot = collectWorkspaceSnapshot(
+      [tab],
+      [],
+      "t1",
+      "/tmp/a",
+      new Map(),
+    );
+    const workspace = hydrateWorkspaceSnapshot(snapshot, new Map());
+    const restored = workspace?.tabs[0]?.editorPanes[0]?.files[0];
+    expect(restored?.pullRequest).toEqual({
+      repo: "caisergan/monocode",
+      number: 32,
+      url: "https://github.com/caisergan/monocode/pull/32",
+      title: "Continue in a new chat",
+    });
+  });
+
+  it.each([
+    { pullRequest: { repo: "not a repo", number: 1 } },
+    { pullRequest: { repo: "acme/web", number: 0 } },
+    { pullRequest: { repo: "acme/web", number: 1.5 } },
+    { pullRequest: { repo: "acme/web", number: 1 }, terminal: true },
+    {
+      pullRequest: { repo: "acme/web", number: 1 },
+      commit: { sha: "abc", shortSha: "abc", subject: "x" },
+    },
+  ])("drops an invalid pull request tab: %j", (descriptor) => {
+    const parsed = parseWorkspaceSnapshot({
+      tabs: [
+        {
+          kind: "session",
+          id: "t1",
+          layout: leaf("e1"),
+          focusedId: "e1",
+          editorPanes: [
+            {
+              id: "e1",
+              activeFileId: "f1",
+              files: [
+                { id: "f1", path: "pull-request:acme/web#1", cwd: "/tmp/a", ...descriptor },
+              ],
+            },
+          ],
+          terminalPanes: [],
+        },
+      ],
+      sessions: [],
+      activeTabId: "t1",
+      projectCwd: "/tmp/a",
+    });
+    const files = parsed?.tabs[0]?.editorPanes[0]?.files ?? [];
+    expect(files.some((file) => file.pullRequest)).toBe(false);
   });
 
   it("round-trips a browser tab's address", () => {

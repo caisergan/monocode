@@ -32,6 +32,10 @@ import {
   movePane,
   openChangesTab,
   openCommitTab,
+  openPullRequestTab,
+  isPullRequestTab,
+  isPreviewableTab,
+  isFilesystemTab,
   openEditorTab,
   openSessionChangesTab,
   pinEditorFile,
@@ -430,6 +434,28 @@ describe("openChangesTab", () => {
     const files = next.editorPanes[0]?.files ?? [];
     expect(files.filter(isCommitTab)).toHaveLength(1);
     expect(files.filter(isChangesTab)).toHaveLength(1);
+  });
+});
+
+describe("openPullRequestTab", () => {
+  it("opens one pinned tab per pull request and focuses it again", () => {
+    const source = {
+      repo: "caisergan/monocode",
+      number: 32,
+      url: "https://github.com/caisergan/monocode/pull/32",
+      title: "Continue in a new chat",
+    };
+    const first = openPullRequestTab(newTab("session-a"), "/repo", source);
+    const second = openPullRequestTab(first, "/repo", {
+      ...source,
+      repo: "CaiserGan/Monocode",
+    });
+    const files = second.editorPanes.flatMap((pane) => pane.files);
+    expect(files.filter(isPullRequestTab)).toHaveLength(1);
+    const [tab] = files;
+    expect(tab?.preview).toBeUndefined();
+    expect(tab && isPreviewableTab(tab)).toBe(false);
+    expect(tab && isFilesystemTab(tab)).toBe(false);
   });
 });
 

@@ -1,5 +1,5 @@
 import { lazySurface } from "../../../shared/ui/lazySurface";
-import type { PointerEvent as ReactPointerEvent } from "react";
+import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
 import { memo, useSyncExternalStore } from "react";
 import {
   MarkdownViewShell,
@@ -12,12 +12,14 @@ import {
   isChangesTab,
   isCommitTab,
   isPlanTab,
+  isPullRequestTab,
   isReleaseNotesTab,
   isReviewTab,
   isSessionChangesTab,
   isTerminalTab,
   type EditorPane,
   type FilePaneTab,
+  type PullRequestTabSource,
 } from "../../workspace/model/layout";
 import { isImagePath } from "../model/filePreview";
 import type { TerminalMetaPatch } from "../../terminal/model/terminalTab";
@@ -86,6 +88,11 @@ type Props = {
   onTerminalMetaChange?: (fileId: string, patch: TerminalMetaPatch) => void;
   onBrowserNavigate?: (fileId: string, url: string) => void;
   onOpenBrowser?: (url: string, cwd?: string) => void;
+  /** The app owns GitHub data and session actions, so it draws these tabs. */
+  renderPullRequest?: (
+    file: FilePaneTab & { pullRequest: PullRequestTabSource },
+    visible: boolean,
+  ) => ReactNode;
 };
 
 function FilePaneComponent({
@@ -111,6 +118,7 @@ function FilePaneComponent({
   onTerminalMetaChange,
   onBrowserNavigate,
   onOpenBrowser,
+  renderPullRequest,
 }: Props) {
   const diffViewer = useSyncExternalStore(
     subscribeDiffViewer,
@@ -212,6 +220,9 @@ function FilePaneComponent({
                 />
               ) : isReleaseNotesTab(file) ? (
                 <ReleaseNotesSurface source={file.releaseNotes} />
+              ) : isPullRequestTab(file) ? (
+                (renderPullRequest?.(file, file.id === pane.activeFileId) ??
+                null)
               ) : isTerminalTab(file) ? (
                 <TerminalView
                   id={file.id}

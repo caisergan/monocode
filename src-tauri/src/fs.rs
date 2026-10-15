@@ -1210,6 +1210,44 @@ pub struct GitHubWorkItem {
     pub repo: String,
 }
 
+/// One row of a project's pull request list, with enough to triage it at a
+/// glance: who opened it, which branch, how review and CI stand.
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubPullRequest {
+    pub number: i64,
+    pub title: String,
+    pub url: String,
+    /// `open`, `merged` or `closed`.
+    pub state: String,
+    pub draft: bool,
+    pub author: String,
+    pub author_avatar_url: String,
+    pub author_is_bot: bool,
+    pub head_ref: String,
+    pub base_ref: String,
+    /// The head branch lives in another repository, usually a contributor's fork.
+    pub cross_repository: bool,
+    pub created_at: String,
+    pub updated_at: String,
+    pub merged_at: Option<String>,
+    pub closed_at: Option<String>,
+    /// `APPROVED`, `CHANGES_REQUESTED`, `REVIEW_REQUIRED`, or empty.
+    pub review_decision: String,
+    /// Rolled-up CI for open pull requests: `pass`, `fail`, `pending`, or
+    /// empty when there are no checks or they were not requested.
+    pub checks: String,
+}
+
+#[derive(Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitHubPullRequestList {
+    pub repo: String,
+    /// The signed-in GitHub login, so the list can tell your pull requests apart.
+    pub viewer: String,
+    pub items: Vec<GitHubPullRequest>,
+}
+
 #[derive(Serialize, Clone, Debug, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct GitHubStatus {
@@ -1340,6 +1378,20 @@ pub async fn git_github_work_items(
             &search,
             limit.unwrap_or(40),
         )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Pull requests of the repository this working copy pushes to, by state.
+#[tauri::command]
+pub async fn git_github_pull_requests(
+    cwd: String,
+    state: String,
+    limit: Option<u32>,
+) -> Result<GitHubPullRequestList, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        git_github_pull_requests_for(&expand_home(&cwd), &state, limit.unwrap_or(30))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -2779,6 +2831,94 @@ fn git_github_work_items_for(
     parse_github_work_items(&json, kind, &repo)
 }
 
+/// `origin` decides the repository when it is on GitHub. For a fork that is
+/// the user's own copy, where `gh` would pick the parent named by `upstream`.
+fn github_push_repo_for(root: &Path) -> Result<String, String> {
+    git_stdout(root, &["remote", "get-url", "origin"])
+        .and_then(|url| github_slug_from_remote(&url))
+        .map_or_else(|| git_github_repo_for(root), Ok)
+}
+
+/// `owner/name` from an https, ssh or scp-style github.com remote URL.
+fn github_slug_from_remote(url: &str) -> Option<String> {
+    let url = url.trim();
+    let (authority, path) = match url.split_once("://") {
+        Some((_, rest)) => rest.split_once('/')?,
+        None => url.split_once(':')?,
+    };
+    let host = authority.rsplit('@').next()?.split(':').next()?;
+    if !host.eq_ignore_ascii_case("github.com") {
+        return None;
+    }
+    let path = path.trim_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let (owner, name) = split_github_repo(path).ok()?;
+    Some(format!("{owner}/{name}"))
+}
+
+fn git_github_pull_requests_for(
+    root: &Path,
+    state: &str,
+    limit: u32,
+) -> Result<GitHubPullRequestList, String> {
+    let state = match state.trim().to_ascii_lowercase().as_str() {
+        "open" => "open",
+        "merged" => "merged",
+        "closed" => "closed",
+        _ => return Err("Unknown pull request state".into()),
+    };
+    let repo = github_push_repo_for(root)?;
+    let limit = limit.clamp(1, 100).to_string();
+    let mut fields = String::from(
+        "number,title,url,state,isDraft,author,headRefName,baseRefName,isCrossRepository,\
+         createdAt,updatedAt,mergedAt,closedAt,reviewDecision",
+    );
+    // Checks are the expensive part of the query and only matter while open.
+    if state == "open" {
+        fields.push_str(",statusCheckRollup");
+    }
+    let mut args = vec![
+        "pr",
+        "list",
+        "--repo",
+        repo.as_str(),
+        "--state",
+        state,
+        "--limit",
+        limit.as_str(),
+        "--json",
+        fields.as_str(),
+    ];
+    // gh counts merged pull requests as closed; the Closed list is the rest.
+    if state == "closed" {
+        args.extend(["--search", "is:unmerged"]);
+    }
+    let json = gh_checked(root, &args)?;
+    Ok(GitHubPullRequestList {
+        items: parse_github_pull_requests(&json)?,
+        viewer: github_viewer_login(root),
+        repo,
+    })
+}
+
+static GITHUB_VIEWER: Mutex<Option<String>> = Mutex::new(None);
+
+/// Looked up once per run; an empty login just means rows show every author.
+fn github_viewer_login(root: &Path) -> String {
+    if let Some(login) = GITHUB_VIEWER.lock().ok().and_then(|viewer| viewer.clone()) {
+        return login;
+    }
+    let login = gh_stdout(root, &["api", "user", "--jq", ".login"])
+        .map(|login| login.trim().to_string())
+        .unwrap_or_default();
+    if !login.is_empty() {
+        if let Ok(mut viewer) = GITHUB_VIEWER.lock() {
+            *viewer = Some(login.clone());
+        }
+    }
+    login
+}
+
 fn git_github_work_item_for(
     root: &Path,
     repo: &str,
@@ -4022,6 +4162,93 @@ fn parse_github_work_item(json: &str, kind: &str, repo: &str) -> Result<GitHubWo
         .into_iter()
         .next()
         .ok_or_else(|| "GitHub did not return a work item".into())
+}
+
+fn parse_github_pull_requests(json: &str) -> Result<Vec<GitHubPullRequest>, String> {
+    #[derive(Deserialize, Default)]
+    struct Author {
+        #[serde(default)]
+        login: String,
+        #[serde(default)]
+        is_bot: bool,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Row {
+        number: i64,
+        title: String,
+        url: String,
+        state: String,
+        #[serde(default)]
+        is_draft: bool,
+        #[serde(default)]
+        author: Option<Author>,
+        #[serde(default)]
+        head_ref_name: String,
+        #[serde(default)]
+        base_ref_name: String,
+        #[serde(default)]
+        is_cross_repository: bool,
+        #[serde(default)]
+        created_at: String,
+        #[serde(default)]
+        updated_at: String,
+        #[serde(default)]
+        merged_at: Option<String>,
+        #[serde(default)]
+        closed_at: Option<String>,
+        #[serde(default)]
+        review_decision: Option<String>,
+        #[serde(default)]
+        status_check_rollup: Option<Vec<GitHubStatusCheckRow>>,
+    }
+    let rows: Vec<Row> = serde_json::from_str(json).map_err(|error| error.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let author = row.author.unwrap_or_default();
+            GitHubPullRequest {
+                number: row.number,
+                title: row.title,
+                url: row.url,
+                state: row.state.to_lowercase(),
+                draft: row.is_draft,
+                author_avatar_url: if author.login.is_empty() {
+                    String::new()
+                } else {
+                    github_avatar_url(&author.login)
+                },
+                author: author.login,
+                author_is_bot: author.is_bot,
+                head_ref: row.head_ref_name,
+                base_ref: row.base_ref_name,
+                cross_repository: row.is_cross_repository,
+                created_at: row.created_at,
+                updated_at: row.updated_at,
+                merged_at: row.merged_at.filter(|value| !value.is_empty()),
+                closed_at: row.closed_at.filter(|value| !value.is_empty()),
+                review_decision: row.review_decision.unwrap_or_default().to_uppercase(),
+                checks: rollup_checks(row.status_check_rollup.unwrap_or_default()),
+            }
+        })
+        .collect())
+}
+
+/// One word for a PR's CI: any failure wins, then anything still running.
+fn rollup_checks(rows: Vec<GitHubStatusCheckRow>) -> String {
+    let states: Vec<String> = rows
+        .into_iter()
+        .map(|row| github_pr_check_from_row(row).state)
+        .collect();
+    if states.iter().any(|state| state == "fail") {
+        "fail".into()
+    } else if states.iter().any(|state| state == "pending") {
+        "pending".into()
+    } else if states.iter().any(|state| state == "pass") {
+        "pass".into()
+    } else {
+        String::new()
+    }
 }
 
 fn parse_gh_pr_list(json: &str) -> Option<GitPr> {
@@ -7946,6 +8173,100 @@ mod tests {
             serde_json::to_value(&items[0]).unwrap()["stateReason"],
             "completed"
         );
+    }
+
+    #[test]
+    fn github_slug_from_remote_reads_github_urls_only() {
+        for url in [
+            "https://github.com/caisergan/monocode.git",
+            "https://github.com/caisergan/monocode",
+            "https://token@github.com/caisergan/monocode.git/",
+            "git@github.com:caisergan/monocode.git",
+            "ssh://git@github.com:22/caisergan/monocode.git",
+        ] {
+            assert_eq!(
+                github_slug_from_remote(url).as_deref(),
+                Some("caisergan/monocode"),
+                "{url}"
+            );
+        }
+        assert_eq!(github_slug_from_remote("git@gitlab.com:acme/web.git"), None);
+        assert_eq!(github_slug_from_remote("https://github.com/acme"), None);
+        assert_eq!(github_slug_from_remote("/srv/git/web.git"), None);
+    }
+
+    #[test]
+    fn parse_github_pull_requests_rolls_up_rows() {
+        let json = r#"[
+            {
+                "number": 32,
+                "title": "Continue in a new chat",
+                "url": "https://github.com/acme/web/pull/32",
+                "state": "OPEN",
+                "isDraft": false,
+                "author": { "login": "octo", "is_bot": false },
+                "headRefName": "feat/continue",
+                "baseRefName": "dev",
+                "isCrossRepository": false,
+                "createdAt": "2026-10-15T10:00:00Z",
+                "updatedAt": "2026-10-15T11:00:00Z",
+                "mergedAt": null,
+                "closedAt": null,
+                "reviewDecision": "APPROVED",
+                "statusCheckRollup": [
+                    { "__typename": "CheckRun", "status": "COMPLETED", "conclusion": "SUCCESS" },
+                    { "__typename": "CheckRun", "status": "IN_PROGRESS", "conclusion": "" }
+                ]
+            },
+            {
+                "number": 7,
+                "title": "Bump deps",
+                "url": "https://github.com/acme/web/pull/7",
+                "state": "MERGED",
+                "author": { "login": "app/dependabot", "is_bot": true },
+                "headRefName": "deps",
+                "baseRefName": "main",
+                "isCrossRepository": true,
+                "mergedAt": "2026-10-01T09:00:00Z",
+                "closedAt": "2026-10-01T09:00:00Z",
+                "reviewDecision": ""
+            }
+        ]"#;
+        let items = parse_github_pull_requests(json).unwrap();
+        assert_eq!(items[0].state, "open");
+        assert_eq!(items[0].author, "octo");
+        assert!(!items[0].author_avatar_url.is_empty());
+        assert_eq!(items[0].head_ref, "feat/continue");
+        assert_eq!(items[0].review_decision, "APPROVED");
+        assert_eq!(items[0].checks, "pending");
+        assert_eq!(items[0].merged_at, None);
+        assert_eq!(items[1].state, "merged");
+        assert!(items[1].author_is_bot);
+        assert!(items[1].cross_repository);
+        assert_eq!(items[1].merged_at.as_deref(), Some("2026-10-01T09:00:00Z"));
+        assert_eq!(items[1].checks, "");
+    }
+
+    #[test]
+    fn rollup_checks_prefers_failure_then_pending() {
+        let row = |conclusion: &str| GitHubStatusCheckRow {
+            typename: "CheckRun".into(),
+            name: String::new(),
+            context: String::new(),
+            status: "COMPLETED".into(),
+            conclusion: Some(conclusion.into()),
+            state: String::new(),
+            workflow_name: String::new(),
+            details_url: None,
+            target_url: None,
+            created_at: None,
+            started_at: None,
+            completed_at: None,
+        };
+        assert_eq!(rollup_checks(vec![row("SUCCESS"), row("FAILURE")]), "fail");
+        assert_eq!(rollup_checks(vec![row("SUCCESS"), row("NEUTRAL")]), "pass");
+        assert_eq!(rollup_checks(vec![row("SKIPPED")]), "");
+        assert_eq!(rollup_checks(Vec::new()), "");
     }
 
     #[test]
