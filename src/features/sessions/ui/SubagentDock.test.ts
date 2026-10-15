@@ -3,7 +3,7 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentRunMeta, Block } from "../model/session";
-import { SubagentDock } from "./SubagentDock";
+import { SubagentCountBadge, SubagentDock } from "./SubagentDock";
 import { SubagentSheet } from "./SubagentSheet";
 
 let container: HTMLDivElement;
@@ -149,6 +149,30 @@ describe("subagent dock", () => {
       ),
     );
     expect(container.querySelector("[data-subagent-dock]")).toBeNull();
+  });
+});
+
+describe("subagent count badge", () => {
+  it("counts the running runs and names them on hover", () => {
+    act(() =>
+      root.render(
+        createElement(SubagentCountBadge, {
+          names: ["Review the diff", "Run the tests"],
+        }),
+      ),
+    );
+    const badge = container.querySelector<HTMLElement>("[data-subagent-count]")!;
+    expect(badge.getAttribute("aria-label")).toBe("2 subagents running");
+    expect(badge.textContent).toBe("2");
+    expect(document.body.textContent).not.toContain("Run the tests");
+
+    act(() => {
+      badge.dispatchEvent(new MouseEvent("mouseover", { bubbles: true }));
+    });
+    const tooltip = document.body.querySelector('[role="tooltip"]')!;
+    expect(tooltip.textContent).toContain("2 running");
+    expect(tooltip.textContent).toContain("Review the diff");
+    expect(tooltip.textContent).toContain("Run the tests");
   });
 });
 

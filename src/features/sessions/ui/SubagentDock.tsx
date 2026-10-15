@@ -416,3 +416,63 @@ export function useSecondClock(ticking: boolean): number {
   }, [ticking]);
   return now;
 }
+
+/**
+ * How many delegated runs a session has working, for its card in the sidebar.
+ * The same hopping face as the dock's chips, so the two read as one thing;
+ * hovering lists who they are.
+ */
+export function SubagentCountBadge({ names }: { names: readonly string[] }) {
+  const ref = useRef<HTMLSpanElement>(null);
+  const [hovered, setHovered] = useState(false);
+  const label = `${names.length} ${names.length === 1 ? "subagent" : "subagents"} running`;
+  return (
+    <span
+      ref={ref}
+      role="img"
+      aria-label={label}
+      data-subagent-count
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      className="subagent-chip flex h-5 shrink-0 items-center gap-1 px-0.5 text-[11px] tabular-nums text-content/60"
+    >
+      <SubagentFace name={names[0]} state="running" className="size-3" />
+      <span key={names.length} className="subagent-mark">
+        {names.length}
+      </span>
+      {hovered ? (
+        <Popover
+          anchor={ref}
+          side="right"
+          align="end"
+          width={248}
+          maxHeight={320}
+          role="tooltip"
+          className="pointer-events-none overflow-y-auto p-2.5"
+        >
+          <div className="flex items-center justify-between gap-3">
+            <span className="text-[11px] font-semibold text-content/85">
+              Subagents
+            </span>
+            <span className="shrink-0 text-[10px] tabular-nums text-content/45">
+              {names.length} running
+            </span>
+          </div>
+          <div className="mt-1.5 flex flex-col gap-0.5">
+            {names.map((name, index) => (
+              <div
+                key={`${index}:${name}`}
+                className="flex min-w-0 items-center gap-1.5 rounded-md px-1 py-1"
+              >
+                <SubagentFace name={name} state="running" />
+                <span className="min-w-0 flex-1 truncate text-[11px] text-content/75">
+                  {name}
+                </span>
+              </div>
+            ))}
+          </div>
+        </Popover>
+      ) : null}
+    </span>
+  );
+}
