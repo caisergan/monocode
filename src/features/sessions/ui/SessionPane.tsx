@@ -231,6 +231,7 @@ export type SessionPaneProps = {
     turn: Block[],
   ) => void;
   onHandoff?: (sessionId: string, target: ModelTarget, turn: Block[]) => void;
+  onContinueInNewChat?: (sessionId: string, turn: Block[]) => void;
   onBtwSubmit?: (
     sessionId: string,
     turn: Block[],
@@ -374,6 +375,7 @@ const LocalSessionPane = memo(function LocalSessionPane({
   onBuildPlan,
   onSecondOpinion,
   onHandoff,
+  onContinueInNewChat,
   onBtwSubmit,
   onBtwRetry,
   onBtwDelete,
@@ -1024,6 +1026,14 @@ const LocalSessionPane = memo(function LocalSessionPane({
                       !session.worktreeRemoved &&
                       onHandoff
                         ? (target, turn) => onHandoff(session.id, target, turn)
+                        : undefined
+                    }
+                    onContinueInNewChat={
+                      !agent &&
+                      !session.inboxAsk &&
+                      !session.worktreeRemoved &&
+                      onContinueInNewChat
+                        ? (turn) => onContinueInNewChat(session.id, turn)
                         : undefined
                     }
                     onJumpToBottomChange={jumpVisibility.setVisible}

@@ -325,7 +325,7 @@ describe("handoff composer card", () => {
           files: [],
         }),
       ),
-    ).toEqual({ from: "cursor", to: "pi", kind: "handoff" });
+    ).toEqual({ from: "cursor", to: "pi", kind: "handoff", brief: "hello" });
   });
 });
 

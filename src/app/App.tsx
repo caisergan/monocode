@@ -352,6 +352,7 @@ import {
   wrapHandoffPrompt,
 } from "../features/sessions/model/handoff";
 import { requestOutgoingHandoff } from "../features/sessions/model/handoffTurn";
+import { buildContinuationBrief } from "../features/sessions/model/continuation";
 import {
   planProviderAccountSwitch,
   sessionOnProviderAccount,
@@ -10135,6 +10136,41 @@ function Workspace({
     [openSessionBeside],
   );
 
+  const onContinueInNewChat = useCallback(
+    (sourceId: string, turn: Block[]) => {
+      const source = sessionsRef.current.find(
+        (session) => session.id === sourceId,
+      );
+      if (!source || source.worktreeRemoved) return;
+      // A fresh chat runs on whatever account is selected now, like any new one.
+      const { harness } = source;
+      const { brief, changedFiles } = buildContinuationBrief(
+        sessionThroughTurn(source, turn),
+        sessionWorkCwd(source),
+      );
+      const display = sessionDisplayTitle(source.title, source.harness);
+      const session = {
+        ...newSession(harness, source.cwd, source.model, source.runtimeMode),
+        worktreeCwd: source.worktreeCwd,
+        branch: source.branch,
+        modelSettings: source.modelSettings,
+        title: formatSessionTitle(
+          harness,
+          display === "New session" ? HANDOFF_TITLE : display,
+        ),
+        handoffCard: buildHandoffComposerCard({
+          from: harness,
+          to: harness,
+          brief,
+          userRequest: "",
+          files: changedFiles,
+        }),
+      };
+      openSessionBeside(sourceId, session, source.cwd, true);
+    },
+    [openSessionBeside],
+  );
+
   const autoContinueKey = sessions
     .filter(
       (session) => canAutoContinue(session) && isLiveHarness(session.harness),
@@ -12828,6 +12864,7 @@ function Workspace({
     onBuildPlan,
     onSecondOpinion,
     onHandoff,
+    onContinueInNewChat,
     onBtwSubmit,
     onBtwRetry,
     onBtwDelete,

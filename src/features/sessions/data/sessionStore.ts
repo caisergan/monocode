@@ -1577,6 +1577,8 @@ function sanitizeHandoff(value: Block["handoff"]): HandoffMeta | undefined {
   };
 }
 
+const HANDOFF_BRIEF_LIMIT = 24_000;
+
 function sanitizeSecondOpinion(
   value: Block["secondOpinion"],
 ): SecondOpinionMeta | undefined {
@@ -1589,12 +1591,17 @@ function sanitizeSecondOpinion(
     typeof value.files === "number" && Number.isFinite(value.files)
       ? Math.max(0, Math.round(value.files))
       : 0;
+  const brief =
+    value.kind === "handoff" && typeof value.brief === "string"
+      ? value.brief.trim().slice(0, HANDOFF_BRIEF_LIMIT)
+      : "";
   return {
     from: value.from,
     to: value.to,
     ...(request ? { request } : {}),
     ...(files > 0 ? { files } : {}),
     ...(value.kind === "handoff" ? { kind: "handoff" as const } : {}),
+    ...(brief ? { brief } : {}),
   };
 }
 
