@@ -586,6 +586,7 @@ describe("sanitizeSessionForPersist", () => {
           outputTokens: 20,
           cacheReadTokens: 80,
           cacheHitPercent: 40,
+          cacheTtlSeconds: 3600,
         },
       },
     ];
@@ -595,6 +596,7 @@ describe("sanitizeSessionForPersist", () => {
       outputTokens: 20,
       cacheReadTokens: 80,
       cacheHitPercent: 40,
+      cacheTtlSeconds: 3600,
     });
   });
 

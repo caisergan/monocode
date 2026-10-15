@@ -329,6 +329,7 @@ import {
   loadQuickComposerEnabled,
   loadQuickComposerShortcut,
   loadResumeAfterUsageLimit,
+  loadConfirmExpiredCacheSend,
   loadContinueOnAccountSwitch,
   loadTabAnimationsEnabled,
   saveClaudeHooks,
@@ -347,6 +348,7 @@ import {
   subscribeMonosEnabled,
   saveKeybindingOverride,
   saveResumeAfterUsageLimit,
+  saveConfirmExpiredCacheSend,
   saveContinueOnAccountSwitch,
   validateKeybindingShortcut,
   saveQuickComposerEnabled,
@@ -973,6 +975,9 @@ function ChatPage() {
   const [resumeAfterUsageLimit, setResumeAfterUsageLimit] = useState(
     loadResumeAfterUsageLimit,
   );
+  const [confirmExpiredCacheSend, setConfirmExpiredCacheSend] = useState(
+    loadConfirmExpiredCacheSend,
+  );
   const [diffViewer, setDiffViewer] = useState<DiffViewer>(loadDiffViewer);
   const [formatOnSave, setFormatOnSave] = useState(loadFormatOnSave);
   const [composerRunner, setComposerRunner] = useState(loadComposerRunner);
@@ -1013,6 +1018,11 @@ function ChatPage() {
   const onResumeAfterUsageLimit = (next: boolean) => {
     saveResumeAfterUsageLimit(next);
     setResumeAfterUsageLimit(next);
+  };
+
+  const onConfirmExpiredCacheSend = (next: boolean) => {
+    saveConfirmExpiredCacheSend(next);
+    setConfirmExpiredCacheSend(next);
   };
 
   const onDiffViewer = (next: DiffViewer) => {
@@ -1118,6 +1128,23 @@ function ChatPage() {
             label="Resume after usage limit"
             on={resumeAfterUsageLimit}
             onChange={onResumeAfterUsageLimit}
+          />
+        </Row>
+      </Group>
+
+      <Group
+        title="Prompt cache"
+        description="Claude keeps a chat's context cached for 5 minutes or an hour after the last request. A message sent after that re-reads the whole context uncached."
+      >
+        <Row
+          id="confirm-expired-cache-send"
+          label="Confirm send after cache expires"
+          description="Ask before sending a message that will re-read the whole context. The warning beside the send button stays either way."
+        >
+          <Toggle
+            label="Confirm send after cache expires"
+            on={confirmExpiredCacheSend}
+            onChange={onConfirmExpiredCacheSend}
           />
         </Row>
       </Group>

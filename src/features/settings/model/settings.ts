@@ -377,6 +377,12 @@ export const SETTINGS_INDEX: SettingsEntry[] = [
     keywords: "rate limit quota reset continue auto resume arm wait",
   },
   {
+    id: "confirm-expired-cache-send",
+    section: "chat",
+    label: "Confirm send after cache expires",
+    keywords: "prompt cache expired ttl re-read context tokens warning",
+  },
+  {
     id: "composer-mascot",
     section: "chat",
     label: "Composer mascot",
@@ -599,6 +605,8 @@ const RESUME_AFTER_USAGE_LIMIT_KEY = "monocode.resumeAfterUsageLimit";
 
 const CONTINUE_ON_ACCOUNT_SWITCH_KEY = "monocode.continueOnAccountSwitch";
 
+const CONFIRM_EXPIRED_CACHE_SEND_KEY = "monocode.confirmExpiredCacheSend";
+
 const COMPOSER_EFFORT_VISIBLE_KEY = "monocode.composerEffortVisible";
 
 const MODEL_CONTROLS_KEY = "monocode.modelControls";
@@ -643,6 +651,20 @@ export function loadResumeAfterUsageLimit(): boolean {
 
 export function saveResumeAfterUsageLimit(value: boolean) {
   writeFlag(RESUME_AFTER_USAGE_LIMIT_KEY, value);
+}
+
+export const CONFIRM_EXPIRED_CACHE_SEND_DEFAULT = true;
+
+/** Ask before a send re-reads a chat whose prompt cache has expired. */
+export function loadConfirmExpiredCacheSend(): boolean {
+  return (
+    readFlag(CONFIRM_EXPIRED_CACHE_SEND_KEY) ??
+    CONFIRM_EXPIRED_CACHE_SEND_DEFAULT
+  );
+}
+
+export function saveConfirmExpiredCacheSend(value: boolean) {
+  writeFlag(CONFIRM_EXPIRED_CACHE_SEND_KEY, value);
 }
 
 export const CONTINUE_ON_ACCOUNT_SWITCH_DEFAULT = false;
