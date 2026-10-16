@@ -3,6 +3,7 @@ import {
   claudeSubagentTranscript,
   claudeSubagentUsage,
   feedClaudeSubagentTranscript,
+  takeClaudeTranscriptSteps,
 } from "./claudeSubagentTranscript";
 
 function lines(records: Record<string, unknown>[]): string {
@@ -114,6 +115,56 @@ describe("claude subagent transcripts", () => {
       status: "completed",
       detail: "src/auth.ts",
     });
+  });
+
+  it("reads the run's trail and brief, for a run the stream says nothing of", () => {
+    const transcript = claudeSubagentTranscript("/t/agent.jsonl", {
+      trail: true,
+    });
+    feedClaudeSubagentTranscript(transcript, lines(run.slice(0, 4)));
+    expect(transcript.brief).toBe("Find where auth lives.");
+    expect(takeClaudeTranscriptSteps(transcript, 300)).toEqual([
+      { stepId: "msg_1:thinking", kind: "reasoning", text: "Search for it." },
+      expect.objectContaining({
+        stepId: "toolu_grep",
+        kind: "tool",
+        text: expect.stringContaining("auth"),
+        toolKind: "search",
+        status: "in_progress",
+      }),
+    ]);
+    expect(takeClaudeTranscriptSteps(transcript, 300)).toEqual([]);
+
+    // The result settles the same step, which the session merges by its id.
+    feedClaudeSubagentTranscript(transcript, lines(run.slice(4)));
+    expect(takeClaudeTranscriptSteps(transcript, 300)).toEqual([
+      { stepId: "toolu_grep", kind: "tool", text: "", status: "completed" },
+      {
+        stepId: "msg_2:text",
+        kind: "message",
+        text: "Auth lives in src/auth.ts.",
+      },
+    ]);
+
+    // Read in one go, a call and its result are one step, and past the cap
+    // only the newest are handed over. The counts and the brief stay right.
+    feedClaudeSubagentTranscript(transcript, lines(run));
+    const steps = takeClaudeTranscriptSteps(transcript, 2);
+    expect(steps.map((step) => [step.stepId, step.status])).toEqual([
+      ["toolu_grep", "completed"],
+      ["msg_2:text", undefined],
+    ]);
+    expect(steps[0].text).toContain("auth");
+    expect(transcript.brief).toBe("Find where auth lives.");
+    expect(claudeSubagentUsage(transcript)?.output).toBe(150);
+  });
+
+  it("keeps no trail for a reader that only counts", () => {
+    const transcript = claudeSubagentTranscript("/t/agent.jsonl");
+    feedClaudeSubagentTranscript(transcript, lines(run));
+    expect(transcript.steps).toBeUndefined();
+    expect(transcript.brief).toBeUndefined();
+    expect(takeClaudeTranscriptSteps(transcript, 300)).toEqual([]);
   });
 
   it("skips lines it cannot read", () => {

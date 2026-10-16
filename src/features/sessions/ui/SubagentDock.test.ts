@@ -177,6 +177,7 @@ describe("subagent sheet", () => {
     const onStop = sheet(
       run("a", "Explore the shell", "in_progress", {
         agentType: "explorer",
+        taskId: "task-a",
         startedAt: Date.now() - 5_000,
         usage: {
           uncached: 48_200,
@@ -204,6 +205,21 @@ describe("subagent sheet", () => {
     act(() => stop.click());
     expect(onStop).toHaveBeenCalledWith("call-a");
     expect(stop.textContent).toBe("Stopping…");
+  });
+
+  it("offers no stop for a run without a task of its own", () => {
+    sheet(
+      run("a", "Ara: ing-turkiye", "in_progress", {
+        agentType: "workflow",
+        startedAt: Date.now() - 5_000,
+      }),
+    );
+    expect(container.textContent).toContain("Working 5s");
+    expect(
+      [...container.querySelectorAll("button")].some(
+        (button) => button.textContent === "Stop",
+      ),
+    ).toBe(false);
   });
 
   it("offers no stop once a run is over, and shows its brief as context", () => {

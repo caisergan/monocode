@@ -183,7 +183,11 @@ export function SubagentSheet({
             <RunHeader
               run={current}
               state={state}
-              canStop={canStop && state === "running"}
+              // Stopping goes by the run's task. A run without one of its own,
+              // like an agent a workflow started, can't be stopped by itself.
+              canStop={
+                canStop && state === "running" && !!current.agentRun?.taskId
+              }
               onStop={() => {
                 const callId = current.tool?.callId;
                 if (callId) onStop(callId);
