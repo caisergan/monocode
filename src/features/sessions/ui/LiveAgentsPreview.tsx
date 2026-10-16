@@ -16,7 +16,6 @@ import { HarnessIcon } from "./HarnessIcon";
 import { ProjectMascot } from "../../projects/ui/ProjectMascot";
 import { TerminalSpinner } from "./TerminalSpinner";
 
-const LIVE_AGENT_MIN = 2;
 const LIVE_AGENT_CAP = 4;
 
 type Props = {
@@ -51,9 +50,9 @@ export function LiveAgentsPreview({
   const [expanded, setExpanded] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const lockList = useLockOverscroll<HTMLDivElement>();
-  const ticking =
-    agents.length >= LIVE_AGENT_MIN &&
-    agents.some((agent) => !agent.done && agent.startedAt != null);
+  const ticking = agents.some(
+    (agent) => !agent.done && agent.startedAt != null,
+  );
 
   useEffect(() => {
     if (!ticking) return;
@@ -61,7 +60,7 @@ export function LiveAgentsPreview({
     return () => window.clearInterval(id);
   }, [ticking]);
 
-  if (agents.length < LIVE_AGENT_MIN) return null;
+  if (agents.length === 0) return null;
 
   const extra = agents.length - LIVE_AGENT_CAP;
   const visible =
@@ -74,7 +73,9 @@ export function LiveAgentsPreview({
       data-live-agents-preview="full"
     >
       <span className="sr-only" aria-live="polite" aria-atomic="true">
-        {agents.length} working agents
+        {agents.length === 1
+          ? "1 working agent"
+          : `${agents.length} working agents`}
       </span>
       <div className="overflow-hidden rounded-lg bg-content/5">
         <div className="flex items-center gap-2 px-3.5 py-1.5">

@@ -47,6 +47,7 @@ beforeEach(() => {
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
+  vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
@@ -121,5 +122,54 @@ describe("LiveAgentsPreview", () => {
     expect(liveRegion.textContent).toBe("2 working agents");
     expect(liveRegion.textContent).not.toMatch(/\d+s/);
     expect(container.querySelector("[role=status]")).toBeNull();
+  });
+
+  it("keeps a lone working agent listed while another chat is open", () => {
+    render({
+      agents: [agent("a", "/repo/a")],
+      activeSessionId: "finished",
+      groupLabels: {},
+      groupColors: {},
+      groupCustomColors: {},
+      groupMascots: {},
+    });
+
+    const cards = container.querySelectorAll<HTMLElement>(
+      "[data-live-agent-card]",
+    );
+    expect(cards).toHaveLength(1);
+    expect(cards[0].dataset.liveAgentCard).toBe("a");
+    expect(cards[0].getAttribute("aria-current")).toBeNull();
+    expect(container.querySelector('[aria-live="polite"]')!.textContent).toBe(
+      "1 working agent",
+    );
+  });
+
+  it("ticks a lone agent's elapsed time", () => {
+    vi.useFakeTimers({ now: 10_000 });
+    render({
+      agents: [agent("a", "/repo/a")],
+      groupLabels: {},
+      groupColors: {},
+      groupCustomColors: {},
+      groupMascots: {},
+    });
+
+    const card = container.querySelector('[data-live-agent-card="a"]')!;
+    expect(card.textContent).toContain("9s");
+    act(() => vi.advanceTimersByTime(2_000));
+    expect(card.textContent).toContain("11s");
+  });
+
+  it("renders nothing without agents", () => {
+    render({
+      agents: [],
+      groupLabels: {},
+      groupColors: {},
+      groupCustomColors: {},
+      groupMascots: {},
+    });
+
+    expect(container.childElementCount).toBe(0);
   });
 });
