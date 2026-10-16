@@ -83,7 +83,8 @@ export function createdPullRequests(
     if (!PR_CREATE_RE.test(command)) continue;
     const output = block.tool?.detail || block.tool?.preview?.output || "";
     // gh prints the new PR's URL last; earlier URLs can be warnings or links.
-    const url = output.match(PR_URL_RE)?.at(-1);
+    const urls = output.match(PR_URL_RE);
+    const url = urls ? urls[urls.length - 1] : undefined;
     const item = url ? parseGithubWorkItemUrl(url) : null;
     if (item && !created.some((seen) => sameLinkedWorkItem(seen, item))) {
       created.push(item);
