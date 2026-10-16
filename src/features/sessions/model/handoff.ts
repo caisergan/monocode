@@ -24,6 +24,7 @@ export type HandoffComposerCard = {
   files?: number;
   /** Title of the chat the recap was read from. */
   source?: string;
+  sourceId?: string;
 };
 
 export function buildHandoffComposerCard(input: {
@@ -33,6 +34,7 @@ export function buildHandoffComposerCard(input: {
   userRequest: string;
   files: string[];
   source?: string;
+  sourceId?: string;
 }): HandoffComposerCard {
   const request = input.userRequest.replace(/\s+/g, " ").trim();
   return {
@@ -42,6 +44,7 @@ export function buildHandoffComposerCard(input: {
     ...(request ? { request: request.slice(0, 240) } : {}),
     ...(input.files.length > 0 ? { files: input.files.length } : {}),
     ...(input.source ? { source: input.source } : {}),
+    ...(input.sourceId ? { sourceId: input.sourceId } : {}),
   };
 }
 
@@ -53,6 +56,8 @@ export function handoffTurnCard(card: HandoffComposerCard): SecondOpinionMeta {
     ...(card.request ? { request: card.request } : {}),
     ...(card.files != null && card.files > 0 ? { files: card.files } : {}),
     ...(card.brief.trim() ? { brief: card.brief } : {}),
+    ...(card.source ? { source: card.source } : {}),
+    ...(card.sourceId ? { sourceId: card.sourceId } : {}),
   };
 }
 

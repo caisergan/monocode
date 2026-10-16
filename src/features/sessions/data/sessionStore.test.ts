@@ -820,6 +820,43 @@ describe("sanitizeSessionForPersist", () => {
     });
   });
 
+  it("keeps a continued chat's source on the user turn", () => {
+    const session = newSession("claude", "/tmp/project");
+    session.blocks = [
+      {
+        id: "u1",
+        role: "user",
+        text: "Go on",
+        secondOpinion: {
+          from: "claude",
+          to: "claude",
+          kind: "handoff",
+          source: "  Fix the footer ",
+          sourceId: "0b5c1f2e-source",
+        },
+      },
+      {
+        id: "u2",
+        role: "user",
+        text: "Go on",
+        secondOpinion: {
+          from: "claude",
+          to: "claude",
+          kind: "handoff",
+          source: "Fix the footer",
+          sourceId: "../not an id",
+        },
+      },
+    ];
+    const [kept, unsafe] = sanitizeSessionForPersist(session).blocks;
+    expect(kept?.secondOpinion).toMatchObject({
+      source: "Fix the footer",
+      sourceId: "0b5c1f2e-source",
+    });
+    expect(unsafe?.secondOpinion?.source).toBe("Fix the footer");
+    expect(unsafe?.secondOpinion?.sourceId).toBeUndefined();
+  });
+
   it("keeps a note card on the user turn without the note body", () => {
     const session = newSession("codex", "/tmp/project");
     session.blocks = [

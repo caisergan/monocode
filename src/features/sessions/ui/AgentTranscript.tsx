@@ -45,6 +45,7 @@ import { OrchestrationPreview } from "../../orchestration/ui/OrchestrationPrevie
 import { TaskListPreview } from "./TaskListPreview";
 import { HandoffButton, SecondOpinionButton } from "./SecondOpinionButton";
 import { SecondOpinionCard } from "./SecondOpinionCard";
+import { ContinuedChatBubble } from "./ContinuedChatBubble";
 import { NoteMiniCard } from "../../notes/ui/NoteMiniCard";
 import { ArtifactCard } from "../../artifacts/ui/ArtifactCard";
 import { artifactCards } from "../../artifacts/artifacts";
@@ -221,6 +222,8 @@ type Props = {
   onSaveNote?: (text: string) => void | Promise<void>;
   onSendDraft?: (block: Block) => boolean | void;
   onRemoveDraft?: (block: Block) => boolean | void;
+  /** Opens another chat, e.g. the one a continued chat was read from. */
+  onOpenSession?: (sessionId: string) => void;
   onSaveSelectionNote?: (text: string) => void | Promise<void>;
   onOpenFile?: (path: string) => void;
   onOpenArtifact?: (id: string) => void;
@@ -284,6 +287,7 @@ function AgentTranscriptComponent({
   onSaveNote,
   onSendDraft,
   onRemoveDraft,
+  onOpenSession,
   onSaveSelectionNote,
   onOpenFile,
   onOpenArtifact,
@@ -1181,6 +1185,7 @@ function AgentTranscriptComponent({
                 onSaveNote={onSaveNote}
                 onSendDraft={onSendDraft}
                 onRemoveDraft={onRemoveDraft}
+                onOpenSession={onOpenSession}
                 onOpenFile={onOpenFile}
                 onOpenDiff={onOpenDiff}
                 onOpenPlan={onOpenPlan}
@@ -2001,6 +2006,7 @@ const TranscriptBlock = memo(function TranscriptBlock({
   onSaveNote,
   onSendDraft,
   onRemoveDraft,
+  onOpenSession,
   onOpenFile,
   onOpenDiff,
   onOpenPlan,
@@ -2030,6 +2036,8 @@ const TranscriptBlock = memo(function TranscriptBlock({
   onSaveNote?: (text: string) => void | Promise<void>;
   onSendDraft?: (block: Block) => boolean | void;
   onRemoveDraft?: (block: Block) => boolean | void;
+  /** Opens another chat, e.g. the one a continued chat was read from. */
+  onOpenSession?: (sessionId: string) => void;
   onOpenFile?: (path: string) => void;
   onOpenDiff?: (path: string) => void;
   onOpenPlan?: (blockId: string) => void;
@@ -2058,6 +2066,7 @@ const TranscriptBlock = memo(function TranscriptBlock({
         onSaveNote={onSaveNote}
         onSendDraft={onSendDraft}
         onRemoveDraft={onRemoveDraft}
+        onOpenSession={onOpenSession}
       />
     );
   }
@@ -2189,6 +2198,7 @@ function UserMessageBlock({
   onSaveNote,
   onSendDraft,
   onRemoveDraft,
+  onOpenSession,
 }: {
   block: Block;
   layout: TranscriptLayout;
@@ -2204,12 +2214,19 @@ function UserMessageBlock({
   onSaveNote?: (text: string) => void | Promise<void>;
   onSendDraft?: (block: Block) => boolean | void;
   onRemoveDraft?: (block: Block) => boolean | void;
+  /** Opens another chat, e.g. the one a continued chat was read from. */
+  onOpenSession?: (sessionId: string) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [overflows, setOverflows] = useState(false);
   const [singleLine, setSingleLine] = useState(false);
   const textRef = useRef<HTMLElement>(null);
   const card = block.secondOpinion;
+  // A continued chat names its source in a bubble of its own above the
+  // message; other handoffs and second opinions stay inside the bubble.
+  const continued =
+    card?.kind === "handoff" && card.from === card.to ? card : undefined;
+  const bubbleCard = continued ? undefined : card;
   const note = block.noteCard;
   const monocode = isOperatorUserTurn(block);
   const text =
@@ -2242,15 +2259,16 @@ function UserMessageBlock({
     Boolean(text) &&
     !block.draft &&
     !bubbleAttachments?.length &&
-    !card &&
+    !bubbleCard &&
     !note &&
     !block.ciContext;
-  // Images sent on their own need no bubble beneath them.
+  // Images or a continued chat sent on their own need no bubble beneath them.
+  const grouped = photos.length > 0 || !!continued;
   const bubbleEmpty =
-    photos.length > 0 &&
+    grouped &&
     !text &&
     !bubbleAttachments?.length &&
-    !card &&
+    !bubbleCard &&
     !note &&
     !block.ciContext;
 
@@ -2343,6 +2361,7 @@ function UserMessageBlock({
     bubbleTail &&
     chat &&
     textOnly &&
+    !continued &&
     !monocode &&
     !messageLink &&
     isEmojiOnlyMessage(displayText)
@@ -2381,16 +2400,23 @@ function UserMessageBlock({
       <div
         className={`user-message-hover-zone min-w-0 overflow-visible ${chat ? "flex w-fit max-w-full flex-col items-end" : "w-full"}`}
       >
-        {/* Photos and their bubble enter as one message. */}
+        {/* Photos, a continued chat and their bubble enter as one message. */}
         <div
-          data-chat-message={photos.length ? block.id : undefined}
-          data-chat-message-role={photos.length ? "user" : undefined}
+          data-chat-message={grouped ? block.id : undefined}
+          data-chat-message-role={grouped ? "user" : undefined}
           className={
-            photos.length
-              ? "flex min-w-0 max-w-full flex-col items-end gap-1"
+            grouped
+              ? `flex min-w-0 max-w-full flex-col gap-1 ${chat ? "items-end" : "w-full items-stretch"}`
               : "contents"
           }
         >
+          {continued ? (
+            <ContinuedChatBubble
+              card={continued}
+              chat={chat}
+              onOpenSession={onOpenSession}
+            />
+          ) : null}
           {photos.length ? (
             <div className="flex max-w-full flex-wrap justify-end gap-1.5">
               {photos.map((file) => (
@@ -2402,8 +2428,8 @@ function UserMessageBlock({
             <div
               data-draft={block.draft ? "true" : undefined}
               data-monocode={monocode ? "true" : undefined}
-              data-chat-message={photos.length ? undefined : block.id}
-              data-chat-message-role={photos.length ? undefined : "user"}
+              data-chat-message={grouped ? undefined : block.id}
+              data-chat-message-role={grouped ? undefined : "user"}
               className={`user-message-bubble relative min-w-0 px-3 py-2 font-sans text-content transition-[background-color] duration-200 ${
                 block.draft
                   ? "border border-dashed border-content/30 bg-content/4"
@@ -2421,7 +2447,7 @@ function UserMessageBlock({
             >
               {bubbleAttachments?.length ? (
                 <div
-                  className={`flex flex-wrap gap-1.5 ${text || card || note ? "mb-2" : ""}`}
+                  className={`flex flex-wrap gap-1.5 ${text || bubbleCard || note ? "mb-2" : ""}`}
                 >
                   {bubbleAttachments.map((file) => (
                     <AttachmentChip key={file.id} attachment={file} />
@@ -2429,13 +2455,13 @@ function UserMessageBlock({
                 </div>
               ) : null}
               {note ? (
-                <div className={text || card ? "mb-2" : ""}>
+                <div className={text || bubbleCard ? "mb-2" : ""}>
                   <NoteMiniCard card={note} embedded />
                 </div>
               ) : null}
-              {card ? (
+              {bubbleCard ? (
                 <div className={text ? "mb-1.5" : undefined}>
-                  <SecondOpinionCard card={card} />
+                  <SecondOpinionCard card={bubbleCard} />
                 </div>
               ) : null}
               {messageLink ? (

@@ -191,6 +191,7 @@ type Shared = {
   onNewTerminal: (sessionId: string) => void;
   onBindProviderSession?: (sessionId: string, providerSessionId: string) => void;
   onOpenSessionAsChat?: (sessionId: string) => void;
+  onOpenSession?: (sessionId: string) => void;
   onOpenSessionInTerminal?: (sessionId: string) => void;
   onTerminalExit?: (sessionId: string) => void;
   onTerminalMetaChange?: (fileId: string, patch: TerminalMetaPatch) => void;
@@ -286,6 +287,7 @@ function PaneTreeComponent({
   onNewTerminal,
   onBindProviderSession,
   onOpenSessionAsChat,
+  onOpenSession,
   onOpenSessionInTerminal,
   onTerminalExit,
   onTerminalMetaChange,
@@ -585,6 +587,7 @@ function PaneTreeComponent({
                   onNewTerminal={onNewTerminal}
                   onBindProviderSession={onBindProviderSession}
                   onOpenSessionAsChat={onOpenSessionAsChat}
+                  onOpenSession={onOpenSession}
                   onOpenSessionInTerminal={onOpenSessionInTerminal}
                   onTerminalExit={onTerminalExit}
                   onPaneDragStart={onPaneDragStart}

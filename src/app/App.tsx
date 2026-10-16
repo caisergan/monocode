@@ -10216,6 +10216,7 @@ function Workspace({
           userRequest: "",
           files: changedFiles,
           source: display,
+          sourceId: source.id,
         }),
       };
       setSearchViewOpen(false);
@@ -13025,6 +13026,7 @@ function Workspace({
     onBindProviderSession,
     onOpenSessionAsChat,
     onOpenSessionInTerminal,
+    onOpenSession: onOpenInboxSession,
     onTerminalExit,
   };
 

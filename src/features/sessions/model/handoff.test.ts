@@ -345,6 +345,30 @@ describe("handoff composer card", () => {
       ),
     ).toEqual({ from: "cursor", to: "pi", kind: "handoff", brief: "hello" });
   });
+
+  it("names the source chat on a continued chat's transcript card", () => {
+    expect(
+      handoffTurnCard(
+        buildHandoffComposerCard({
+          from: "claude",
+          to: "claude",
+          brief: "Recap",
+          userRequest: "",
+          files: ["a.ts"],
+          source: "Fix the footer",
+          sourceId: "source-1",
+        }),
+      ),
+    ).toEqual({
+      from: "claude",
+      to: "claude",
+      kind: "handoff",
+      brief: "Recap",
+      files: 1,
+      source: "Fix the footer",
+      sourceId: "source-1",
+    });
+  });
 });
 
 describe("wrapHandoffPrompt", () => {

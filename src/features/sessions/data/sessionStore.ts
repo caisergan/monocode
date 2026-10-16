@@ -1686,6 +1686,16 @@ function sanitizeSecondOpinion(
     value.kind === "handoff" && typeof value.brief === "string"
       ? value.brief.trim().slice(0, HANDOFF_BRIEF_LIMIT)
       : "";
+  const source =
+    value.kind === "handoff" && typeof value.source === "string"
+      ? value.source.trim().slice(0, 200)
+      : "";
+  const sourceId =
+    source &&
+    typeof value.sourceId === "string" &&
+    isPersistableId(value.sourceId)
+      ? value.sourceId
+      : "";
   return {
     from: value.from,
     to: value.to,
@@ -1693,6 +1703,8 @@ function sanitizeSecondOpinion(
     ...(files > 0 ? { files } : {}),
     ...(value.kind === "handoff" ? { kind: "handoff" as const } : {}),
     ...(brief ? { brief } : {}),
+    ...(source ? { source } : {}),
+    ...(sourceId ? { sourceId } : {}),
   };
 }
 
