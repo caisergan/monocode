@@ -31,7 +31,11 @@ import {
   type NativeCommand,
 } from "../../core/nativeCommands";
 import { streamTextDelta } from "../../core/streamText";
-import type { ApprovalDecision, HarnessEvent } from "../../core/types";
+import type {
+  ApprovalDecision,
+  HarnessEvent,
+  LiveMcpServer,
+} from "../../core/types";
 
 /** Claude Code versions that first ship Opus 5.5 / Opus 5 / Sonnet 5 / Fable 5 / Opus 4.8 / 4.7. */
 export const MINIMUM_CLAUDE_OPUS_5_5_VERSION = "2.1.280";
@@ -360,6 +364,29 @@ export function parseControlResponse(
     ok: true,
     payload: asRecord(nested?.response) ?? {},
   };
+}
+
+/** Servers from an `mcp_status` reply, skipping rows without a name. */
+export function mcpServersFromStatus(
+  payload: Record<string, unknown> | null,
+): LiveMcpServer[] {
+  const rows = Array.isArray(payload?.mcpServers) ? payload.mcpServers : [];
+  return rows.flatMap((row) => {
+    const rec = asRecord(row);
+    const name = stringField(rec, "name");
+    const status = stringField(rec, "status");
+    if (!name || !status) return [];
+    const error = stringField(rec, "error");
+    const scope = stringField(rec, "scope");
+    return [
+      {
+        name,
+        status,
+        ...(error ? { error } : {}),
+        ...(scope ? { scope } : {}),
+      },
+    ];
+  });
 }
 
 /** Rows from a `list_models` control response, or null if this line is something else. */

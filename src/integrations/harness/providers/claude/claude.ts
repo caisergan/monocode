@@ -52,12 +52,14 @@ import {
   isWorkflowToolName,
   applyClaudeTaskTool,
   isUsageLimitResult,
+  mcpServersFromStatus,
   modelWindowsFromResult,
   normalizeClaudeCliEffort,
   parseBackgroundTasks,
   parseControlCancelId,
   parseControlRequest,
   parseControlResponse,
+  type ClaudeControlResponse,
   parseJsonLine,
   parseTaskNotification,
   parseTaskProgress,
@@ -114,6 +116,7 @@ import type {
   CompactContextInput,
   HarnessEvent,
   HarnessSessionInput,
+  LiveMcpServer,
   SendTurnInput,
   SteerTurnInput,
 } from "../../core/types";
@@ -283,6 +286,13 @@ type Live = {
    * reading arrives, so the late reply only fills in the window.
    */
   contextProbe: { requestId: string; level: boolean } | null;
+  /** Control requests awaiting Claude's reply, by request id. */
+  controlReplies: Map<string, ControlWaiter>;
+};
+
+type ControlWaiter = {
+  resolve: (reply: ClaudeControlResponse) => void;
+  reject: (error: Error) => void;
 };
 
 type Resume = {
@@ -482,6 +492,7 @@ export async function stopClaudeSession(sessionId: string): Promise<void> {
     live.turnFailed = null;
     live.initDone?.();
     live.initDone = null;
+    failControlReplies(live, "Claude Code stopped");
   }
   unwatchChild(sessionId);
   await killChild(sessionId).catch(() => undefined);
@@ -633,6 +644,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     settingsSwitch: null,
     settingsCheck: null,
     contextProbe: null,
+    controlReplies: new Map(),
   };
   liveRef.current = live;
 
@@ -651,6 +663,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
         (current?.onEvent ?? input.onEvent)({ type: "session.ended", code });
       }
       current?.turnFailed?.(new Error("Claude Code exited"));
+      if (current) failControlReplies(current, "Claude Code exited");
       current?.initDone?.();
       if (current) {
         current.turnDone = null;
@@ -793,6 +806,8 @@ function handleLine(sessionId: string, live: Live, line: string): void {
     );
     return;
   }
+
+  if (type === "control_response" && settleControlReply(live, rec)) return;
 
   if (live.muteUpdates) return;
 
@@ -2657,6 +2672,126 @@ function noteModelWindows(live: Live, rec: Record<string, unknown>): void {
     const model = tally.transcript?.model ?? tally.model;
     if (model && live.modelWindows.has(model)) emitSubagentUsage(live, callId);
   }
+}
+
+/** How long `mcp_status` may take; it reads state Claude already has. */
+const MCP_STATUS_REPLY_MS = 5_000;
+/**
+ * How long one reconnect may take. Claude gives a server 30 seconds to
+ * connect by default (`MCP_TIMEOUT`), and an OAuth refresh can come first.
+ */
+const MCP_RECONNECT_REPLY_MS = 90_000;
+
+/**
+ * Send a control request and wait for the reply that carries its id. Fails
+ * when Claude exits, is stopped, or does not answer in `timeoutMs`.
+ */
+function requestControl(
+  sessionId: string,
+  live: Live,
+  request: Record<string, unknown>,
+  timeoutMs: number,
+): Promise<ClaudeControlResponse> {
+  const requestId = nextControlId(live);
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      live.controlReplies.delete(requestId);
+      reject(new Error("Claude Code did not answer in time"));
+    }, timeoutMs);
+    const settle =
+      <T>(finish: (value: T) => void) =>
+      (value: T) => {
+        clearTimeout(timer);
+        live.controlReplies.delete(requestId);
+        finish(value);
+      };
+    live.controlReplies.set(requestId, {
+      resolve: settle(resolve),
+      reject: settle(reject),
+    });
+    writeJson(sessionId, buildControlRequest(requestId, request)).catch(
+      (error: unknown) =>
+        live.controlReplies
+          .get(requestId)
+          ?.reject(error instanceof Error ? error : new Error(String(error))),
+    );
+  });
+}
+
+/** True when the reply answered a `requestControl` call. */
+function settleControlReply(live: Live, rec: Record<string, unknown>): boolean {
+  const reply = parseControlResponse(rec);
+  const waiter = reply && live.controlReplies.get(reply.requestId);
+  if (!reply || !waiter) return false;
+  waiter.resolve(reply);
+  return true;
+}
+
+function failControlReplies(live: Live, message: string): void {
+  for (const waiter of [...live.controlReplies.values()]) {
+    waiter.reject(new Error(message));
+  }
+  live.controlReplies.clear();
+}
+
+/**
+ * The MCP servers of the running Claude process, or null when none runs for
+ * this session or this Claude Code cannot report them.
+ */
+export async function claudeMcpStatus(
+  sessionId: string,
+): Promise<LiveMcpServer[] | null> {
+  const live = liveByThread.get(sessionId);
+  if (!live) return null;
+  const reply = await requestControl(
+    sessionId,
+    live,
+    { subtype: "mcp_status" },
+    MCP_STATUS_REPLY_MS,
+  ).catch(() => null);
+  return reply?.ok ? mcpServersFromStatus(reply.payload) : null;
+}
+
+/**
+ * Ask the running Claude process to connect one MCP server again. Resolves
+ * with every server's status afterwards, or null when no process runs for
+ * this session. Rejects with the server's own error when it still fails.
+ */
+export async function reconnectClaudeMcp(
+  sessionId: string,
+  serverName: string,
+): Promise<LiveMcpServer[] | null> {
+  const live = liveByThread.get(sessionId);
+  if (!live) return null;
+  const reply = await requestControl(
+    sessionId,
+    live,
+    { subtype: "mcp_reconnect", serverName },
+    MCP_RECONNECT_REPLY_MS,
+  );
+  const servers = await claudeMcpStatus(sessionId);
+  if (reply.ok) return servers;
+  const server = servers?.find((entry) => entry.name === serverName);
+  throw new Error(reconnectFailure(server, reply.error));
+}
+
+/**
+ * Claude's reply to a failed reconnect can be as bare as "Connection failed",
+ * while `mcp_status` keeps the server's own error.
+ */
+function reconnectFailure(
+  server: LiveMcpServer | undefined,
+  reply: string | undefined,
+): string {
+  if (server?.status === "needs-auth") {
+    return "Needs authentication. Sign in to this server, then reconnect.";
+  }
+  if (server?.status === "disabled") return "This server is disabled.";
+  // Added after this process started; Claude reads its servers at launch.
+  if (!server && /not found/i.test(reply ?? "")) {
+    return "This session started before the server was added. It connects when the session restarts.";
+  }
+  return server?.error || reply || "Connection failed";
 }
 
 /**

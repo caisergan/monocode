@@ -1,4 +1,5 @@
 import type { HarnessId } from "./session";
+import type { LiveMcpServer } from "../../../integrations/harness/core/types";
 import {
   MCP_PROVIDER_LABELS,
   type McpConnection,
@@ -7,7 +8,36 @@ import {
 export type McpPickerServer = McpConnection & {
   availability: "available" | "authentication" | "unavailable";
   detail: string;
+  /** Claude can be asked to connect this server again. */
+  reconnectable: boolean;
 };
+
+/** A reconnect MonoCode asked the running Claude for, by server name. */
+export type McpReconnect =
+  | { state: "running" }
+  | { state: "connected" }
+  | { state: "failed"; error: string };
+
+/** Status of a configured server the running Claude does not have. */
+const NOT_LOADED = "Not loaded";
+
+/** Status words for what a running Claude reports through `mcp_status`. */
+export function liveMcpStatusText(status: string): string {
+  switch (status) {
+    case "connected":
+      return "Connected";
+    case "failed":
+      return "Failed to connect";
+    case "needs-auth":
+      return "Needs authentication";
+    case "pending":
+      return "Connecting";
+    case "disabled":
+      return "Disabled";
+    default:
+      return status;
+  }
+}
 
 export type McpTag = { server: McpConnection; token: string };
 
@@ -86,7 +116,7 @@ export function mcpPickerServers(
   const priority = { available: 0, authentication: 1, unavailable: 2 };
   return connections
     .filter((server) =>
-      `${server.name} ${MCP_PROVIDER_LABELS[server.provider]} ${server.scope}`
+      `${server.name} ${MCP_PROVIDER_LABELS[server.provider]} ${server.scopeLabel ?? server.scope}`
         .toLowerCase()
         .includes(search),
     )
@@ -96,7 +126,9 @@ export function mcpPickerServers(
           ? claudeStatus.get(server.name)
           : undefined;
       const matches = server.provider === harness;
-      const disabled = server.enabled === false;
+      const disabled =
+        server.enabled === false || (matches && status === "Disabled");
+      const notLoaded = matches && status === NOT_LOADED;
       const authentication =
         matches &&
         status != null &&
@@ -108,7 +140,7 @@ export function mcpPickerServers(
       return {
         ...server,
         availability:
-          !matches || disabled || failed
+          !matches || disabled || notLoaded || failed
             ? ("unavailable" as const)
             : authentication
               ? ("authentication" as const)
@@ -117,17 +149,106 @@ export function mcpPickerServers(
           ? "Different provider"
           : disabled
             ? "Disabled in provider configuration"
-            : failed
-              ? "Connection unavailable"
-              : "Configured for this provider",
+            : notLoaded
+              ? "Loads when the session restarts"
+              : failed
+                ? "Failed to connect"
+                : "Configured for this provider",
+        reconnectable:
+          matches &&
+          server.provider === "claude" &&
+          !disabled &&
+          (failed || authentication),
       };
     })
     .sort(
       (a, b) =>
         priority[a.availability] - priority[b.availability] ||
+        // A server Claude can reconnect comes before another provider's.
+        Number(b.reconnectable) - Number(a.reconnectable) ||
         a.name.localeCompare(b.name) ||
         a.provider.localeCompare(b.provider),
     );
+}
+
+/**
+ * The picker's rows and Claude statuses once the running Claude has said
+ * which servers it has. Servers no local config file holds, such as claude.ai
+ * connectors and plugin servers, get rows of their own.
+ */
+export function withLiveMcpServers(
+  connections: McpConnection[],
+  live: LiveMcpServer[],
+): { connections: McpConnection[]; status: Map<string, string> } {
+  const status = new Map(
+    live.map((server) => [server.name, liveMcpStatusText(server.status)]),
+  );
+  const configured = connections.filter(
+    // Rows a health check added for servers it could not place.
+    (server) =>
+      server.provider !== "claude" ||
+      server.configPath !== "" ||
+      !status.has(server.name),
+  );
+  const known = new Set(
+    configured
+      .filter((server) => server.provider === "claude")
+      .map((server) => server.name),
+  );
+  // Claude reads its servers at launch; one added since is not loaded.
+  for (const server of configured) {
+    if (server.provider === "claude" && !status.has(server.name)) {
+      status.set(server.name, NOT_LOADED);
+    }
+  }
+  const extra = live
+    .filter((server) => !known.has(server.name))
+    .map((server): McpConnection => ({
+      provider: "claude",
+      name: server.name,
+      scope:
+        server.scope === "project" || server.scope === "local"
+          ? server.scope
+          : "user",
+      scopeLabel:
+        server.scope === "claudeai" ? "claude.ai" : (server.scope ?? "user"),
+      configPath: "",
+      transport: "",
+    }));
+  return { connections: [...configured, ...extra], status };
+}
+
+/** Why a reconnect left a server unusable, from its Claude status text. */
+export function mcpReconnectError(status: string | undefined): string {
+  if (!status) return "Claude Code did not list this server";
+  if (/auth|sign.?in|log.?in|unauthorized/i.test(status)) {
+    return "Needs authentication. Sign in to this server, then reconnect.";
+  }
+  return status;
+}
+
+/** Claude's health text for a server it reached. */
+export function isConnectedMcpStatus(status: string | undefined): boolean {
+  return /(^|[^a-z])connected/i.test(status ?? "");
+}
+
+export function mcpPickerKey(server: McpConnection): string {
+  return `${server.provider}:${server.scope}:${server.configPath}:${server.name}`;
+}
+
+/**
+ * Keeps rows where they were once a reconnect has been asked for, so a
+ * server that comes back does not slide another row's button under the
+ * pointer. Rows that were not listed before go last.
+ */
+export function keepMcpPickerOrder(
+  servers: McpPickerServer[],
+  previous: readonly string[],
+): McpPickerServer[] {
+  const index = new Map(previous.map((key, position) => [key, position]));
+  const at = (server: McpPickerServer) =>
+    index.get(mcpPickerKey(server)) ?? previous.length;
+  return [...servers].sort((a, b) => at(a) - at(b));
 }
 
 export function mcpContextText(servers: McpConnection[], text: string): string {

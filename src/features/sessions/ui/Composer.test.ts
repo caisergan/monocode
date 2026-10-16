@@ -17,6 +17,18 @@ vi.mock("@tauri-apps/api/core", async (importOriginal) => {
   };
 });
 
+const liveMcp = vi.hoisted(() => ({ status: vi.fn(), reconnect: vi.fn() }));
+vi.mock(
+  "../../../integrations/harness/core/registry",
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import("../../../integrations/harness/core/registry")
+    >()),
+    harnessMcpStatus: (...args: unknown[]) => liveMcp.status(...args),
+    reconnectHarnessMcp: (...args: unknown[]) => liveMcp.reconnect(...args),
+  }),
+);
+
 vi.mock("@tauri-apps/api/webview", () => ({
   getCurrentWebview: () => ({ onDragDropEvent: async () => () => {} }),
 }));
@@ -104,6 +116,10 @@ describe("Composer question focus", () => {
 
   beforeEach(() => {
     clearMcpSettingsCache();
+    liveMcp.status.mockReset();
+    liveMcp.status.mockResolvedValue(null);
+    liveMcp.reconnect.mockReset();
+    liveMcp.reconnect.mockResolvedValue(null);
     mcpInvoke.mockReset();
     mcpInvoke.mockImplementation(async (command: string) =>
       command === "mcp_discover"
@@ -400,6 +416,182 @@ describe("Composer question focus", () => {
     } finally {
       window.removeEventListener("monocode:open-mcp-settings", onOpen);
     }
+  });
+
+  async function openMcpPicker(sessionId?: string) {
+    await renderComposer(
+      undefined,
+      vi.fn(),
+      false,
+      0,
+      "/mcp",
+      undefined,
+      undefined,
+      sessionId,
+    );
+    const textarea = container.querySelector("textarea")!;
+    await act(async () =>
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          bubbles: true,
+          cancelable: true,
+        }),
+      ),
+    );
+  }
+
+  const mcpRow = (name: string) =>
+    [
+      ...container.querySelectorAll<HTMLButtonElement>(
+        '[data-mcp-picker] [role="option"]',
+      ),
+    ].find((button) => button.textContent?.includes(name))!;
+  const reconnectButton = (name: string) =>
+    container.querySelector<HTMLButtonElement>(
+      `[aria-label="Reconnect ${name}"]`,
+    );
+
+  it("reconnects a server through the session's running Claude", async () => {
+    liveMcp.status.mockResolvedValue([
+      { name: "docs", status: "failed", scope: "project" },
+      { name: "claude.ai Gmail", status: "connected", scope: "claudeai" },
+    ]);
+    let finish!: (servers: unknown) => void;
+    liveMcp.reconnect.mockReturnValue(
+      new Promise((resolve) => {
+        finish = resolve;
+      }),
+    );
+    await openMcpPicker("s1");
+    await vi.waitFor(() => expect(reconnectButton("docs")).not.toBeNull());
+    // The running Claude knows; its own health check is not needed.
+    expect(mcpInvoke).not.toHaveBeenCalledWith(
+      "claude_mcp_list",
+      expect.anything(),
+    );
+    expect(mcpRow("claude.ai Gmail").textContent).toContain("claude.ai");
+    expect(mcpRow("docs").disabled).toBe(true);
+    await act(async () => reconnectButton("docs")!.click());
+    expect(liveMcp.reconnect).toHaveBeenCalledWith("claude", "s1", "docs");
+    expect(mcpRow("docs").textContent).toContain("Reconnecting…");
+    expect(reconnectButton("docs")!.disabled).toBe(true);
+    await act(async () =>
+      finish([
+        { name: "docs", status: "connected", scope: "project" },
+        { name: "claude.ai Gmail", status: "connected", scope: "claudeai" },
+      ]),
+    );
+    expect(mcpRow("docs").textContent).toContain("Connected");
+    expect(mcpRow("docs").disabled).toBe(false);
+    expect(reconnectButton("docs")).toBeNull();
+  });
+
+  it("shows why a reconnect failed and offers to retry", async () => {
+    liveMcp.status.mockResolvedValue([{ name: "docs", status: "failed" }]);
+    liveMcp.reconnect.mockRejectedValue(new Error("HTTP 401 Unauthorized"));
+    await openMcpPicker("s1");
+    await vi.waitFor(() => expect(reconnectButton("docs")).not.toBeNull());
+    await act(async () => reconnectButton("docs")!.click());
+    await vi.waitFor(() =>
+      expect(mcpRow("docs").textContent).toContain("Reconnect failed"),
+    );
+    expect(mcpRow("docs").textContent).toContain("HTTP 401 Unauthorized");
+    expect(reconnectButton("docs")!.textContent).toContain("Retry");
+    expect(reconnectButton("docs")!.disabled).toBe(false);
+  });
+
+  it("checks again from scratch without a running Claude", async () => {
+    let health = "docs: local - ✗ Failed to connect";
+    mcpInvoke.mockImplementation(async (command: string) =>
+      command === "mcp_discover"
+        ? [
+            {
+              provider: "claude",
+              name: "docs",
+              scope: "project",
+              configPath: "/repo/.mcp.json",
+              transport: "stdio",
+            },
+          ]
+        : health,
+    );
+    await openMcpPicker("s1");
+    await vi.waitFor(() => expect(reconnectButton("docs")).not.toBeNull());
+    expect(mcpInvoke).toHaveBeenCalledTimes(2);
+    health = "docs: local - ✔ Connected";
+    await act(async () => reconnectButton("docs")!.click());
+    expect(liveMcp.reconnect).toHaveBeenCalledWith("claude", "s1", "docs");
+    await vi.waitFor(() =>
+      expect(mcpRow("docs").textContent).toContain("Connected"),
+    );
+    expect(mcpInvoke).toHaveBeenCalledTimes(3);
+    expect(mcpRow("docs").disabled).toBe(false);
+  });
+
+  it("reports a server that still needs sign-in after checking again", async () => {
+    mcpInvoke.mockImplementation(async (command: string) =>
+      command === "mcp_discover"
+        ? [
+            {
+              provider: "claude",
+              name: "docs",
+              scope: "project",
+              configPath: "/repo/.mcp.json",
+              transport: "http",
+            },
+          ]
+        : "docs: https://docs.example - ! Needs authentication",
+    );
+    // A chat that has not started has no Claude to ask.
+    await openMcpPicker();
+    await vi.waitFor(() => expect(reconnectButton("docs")).not.toBeNull());
+    expect(liveMcp.status).not.toHaveBeenCalled();
+    await act(async () => reconnectButton("docs")!.click());
+    expect(liveMcp.reconnect).not.toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(mcpRow("docs").textContent).toContain("Sign in to this server"),
+    );
+  });
+
+  it("offers no reconnect for another harness", async () => {
+    mcpInvoke.mockImplementation(async (command: string) =>
+      command === "mcp_discover"
+        ? [
+            {
+              provider: "claude",
+              name: "docs",
+              scope: "project",
+              configPath: "/repo/.mcp.json",
+              transport: "stdio",
+            },
+          ]
+        : "docs: local - ✗ Failed to connect",
+    );
+    await renderComposer(
+      undefined,
+      vi.fn(),
+      false,
+      0,
+      "/mcp",
+      undefined,
+      undefined,
+      "s1",
+      "codex",
+    );
+    const textarea = container.querySelector("textarea")!;
+    await act(async () =>
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          bubbles: true,
+          cancelable: true,
+        }),
+      ),
+    );
+    await vi.waitFor(() => expect(mcpRow("docs")).toBeDefined());
+    expect(reconnectButton("docs")).toBeNull();
+    expect(liveMcp.status).not.toHaveBeenCalled();
   });
 
   it("reuses MCP discovery on reopen and applies shared settings refreshes", async () => {
