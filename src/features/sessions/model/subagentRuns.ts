@@ -1,12 +1,42 @@
-import type { AgentRunUsage, Block } from "./session";
+import {
+  isTerminalSession,
+  type AgentRunUsage,
+  type Block,
+  type SessionSurface,
+} from "./session";
 import {
   isSubagentBlock,
+  subagentBrief,
+  subagentModelName,
   subagentName,
   toolCallState,
 } from "./transcriptActivity";
 
 /** Where a delegated run stands, as the dock and its sheet tell it. */
 export type SubagentRunState = "running" | "done" | "failed" | "stopped";
+
+/**
+ * One run as the sidebar lists it under its session: who it is and where it
+ * stands. Its steps and tokens are left out on purpose, since they change with
+ * every stream tick and the sidebar must not redraw for them; the run's sheet
+ * reads those from the block itself.
+ */
+export type SubagentSummary = {
+  /** The Agent call's block, which is also how its sheet is opened. */
+  id: string;
+  name: string;
+  /** The whole brief the run was named from, for the row's tooltip. */
+  brief: string;
+  /** Agent type and model, e.g. "code-reviewer · Sonnet 5.5". */
+  kind?: string;
+  state: SubagentRunState;
+  startedAt?: number;
+  endedAt?: number;
+  /** Provider-measured run time, once the run has reported it. */
+  durationMs?: number;
+};
+
+type RunTiming = Pick<SubagentSummary, "startedAt" | "endedAt" | "durationMs">;
 
 /**
  * Every delegated run of the latest turn, in the order they started. Walks
@@ -38,18 +68,100 @@ export function subagentRunState(
   return state === "rejected" ? "failed" : "done";
 }
 
-/**
- * Names of the runs still working in a live session, for the sidebar's count.
- * A session that has stopped has none running.
- */
-export function runningSubagentNames(
+/** The latest turn's runs as the sidebar lists them, in the order they started. */
+export function latestTurnSubagentSummaries(
   blocks: readonly Block[],
   live: boolean,
-): string[] {
-  if (!live) return [];
-  return latestTurnSubagents(blocks)
-    .filter((block) => subagentRunState(block, true) === "running")
-    .map(subagentName);
+): SubagentSummary[] {
+  return latestTurnSubagents(blocks).map((block) => {
+    const run = block.agentRun;
+    const kind = [run?.agentType, subagentModelName(block)]
+      .filter(Boolean)
+      .join(" · ");
+    return {
+      id: block.id,
+      name: subagentName(block),
+      brief: subagentBrief(block),
+      ...(kind ? { kind } : {}),
+      state: subagentRunState(block, live),
+      ...(run?.startedAt != null ? { startedAt: run.startedAt } : {}),
+      ...(run?.endedAt != null ? { endedAt: run.endedAt } : {}),
+      ...(run?.usage?.durationMs != null
+        ? { durationMs: run.usage.durationMs }
+        : {}),
+    };
+  });
+}
+
+export function subagentSummariesEqual(
+  a: readonly SubagentSummary[],
+  b: readonly SubagentSummary[],
+): boolean {
+  if (a === b) return true;
+  if (a.length !== b.length) return false;
+  return a.every((run, index) => {
+    const other = b[index];
+    return (
+      run.id === other.id &&
+      run.name === other.name &&
+      run.brief === other.brief &&
+      run.kind === other.kind &&
+      run.state === other.state &&
+      run.startedAt === other.startedAt &&
+      run.endedAt === other.endedAt &&
+      run.durationMs === other.durationMs
+    );
+  });
+}
+
+/**
+ * Summaries by the blocks they were read from. A session's blocks are replaced
+ * whenever they change, so only the sessions that are streaming are read again
+ * on each update; the rest cost a lookup.
+ */
+const summariesRead = new WeakMap<
+  readonly Block[],
+  { live: boolean; runs: SubagentSummary[] }
+>();
+
+/**
+ * The sidebar's runs for every session with any in its latest turn, finished
+ * ones included so a tree can show how its runs ended before it folds. A
+ * session keeps its previous array while nothing the tree shows has changed,
+ * and the map itself is kept while no session's has, so a run streaming its
+ * steps or tokens leaves the sidebar and its cards alone.
+ */
+export function subagentSummariesBySession(
+  sessions: readonly {
+    id: string;
+    blocks: readonly Block[];
+    busy?: boolean;
+    surface?: SessionSurface;
+  }[],
+  previous: ReadonlyMap<string, readonly SubagentSummary[]>,
+): ReadonlyMap<string, readonly SubagentSummary[]> {
+  const next = new Map<string, readonly SubagentSummary[]>();
+  let changed = false;
+  for (const session of sessions) {
+    // A session in the agent's own CLI has no pane to open a run's sheet in.
+    if (isTerminalSession(session)) continue;
+    const live = !!session.busy;
+    let read = summariesRead.get(session.blocks);
+    if (read?.live !== live) {
+      read = { live, runs: latestTurnSubagentSummaries(session.blocks, live) };
+      summariesRead.set(session.blocks, read);
+    }
+    const { runs } = read;
+    if (runs.length === 0) continue;
+    const kept = previous.get(session.id);
+    if (kept && subagentSummariesEqual(kept, runs)) {
+      next.set(session.id, kept);
+    } else {
+      next.set(session.id, runs);
+      changed = true;
+    }
+  }
+  return changed || next.size !== previous.size ? next : previous;
 }
 
 /** How long the run has worked, or worked for, when the app knows. */
@@ -59,11 +171,35 @@ export function subagentElapsedMs(
   running: boolean,
 ): number | undefined {
   const run = block.agentRun;
-  if (!running && run?.usage?.durationMs != null) return run.usage.durationMs;
-  if (run?.startedAt == null) return undefined;
-  const end = run.endedAt ?? (running ? now : undefined);
+  return elapsedMs(
+    {
+      startedAt: run?.startedAt,
+      endedAt: run?.endedAt,
+      durationMs: run?.usage?.durationMs,
+    },
+    now,
+    running,
+  );
+}
+
+/** The same, for a run the sidebar lists. */
+export function subagentSummaryElapsedMs(
+  run: SubagentSummary,
+  now: number,
+): number | undefined {
+  return elapsedMs(run, now, run.state === "running");
+}
+
+function elapsedMs(
+  timing: RunTiming,
+  now: number,
+  running: boolean,
+): number | undefined {
+  if (!running && timing.durationMs != null) return timing.durationMs;
+  if (timing.startedAt == null) return undefined;
+  const end = timing.endedAt ?? (running ? now : undefined);
   if (end == null) return undefined;
-  const elapsed = end - run.startedAt;
+  const elapsed = end - timing.startedAt;
   // A run replayed from an import starts and ends in the same instant.
   return elapsed >= 1_000 ? elapsed : undefined;
 }

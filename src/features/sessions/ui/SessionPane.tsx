@@ -30,6 +30,17 @@ import {
   type UserQuestionReply,
 } from "../../../integrations/harness";
 import { latestTurnSubagents } from "../model/subagentRuns";
+import {
+  closeSubagentSheet,
+  holdSubagentSheet,
+  peekSubagentSheet,
+  subscribeSubagentSheets,
+  toggleSubagentSheet,
+} from "../model/subagentSheets";
+import {
+  subagentsListed,
+  subscribeSubagentListing,
+} from "../model/subagentListing";
 import { SubagentDock } from "./SubagentDock";
 import { SubagentSheet } from "./SubagentSheet";
 import {
@@ -318,6 +329,9 @@ export const SessionPane = memo(function SessionPane(props: SessionPaneProps) {
     );
   return <LocalSessionPane {...props} />;
 });
+
+/** No runs to dock, kept as one array so the dock's fold isn't restarted. */
+const NO_RUNS: Block[] = [];
 
 const LocalSessionPane = memo(function LocalSessionPane({
   remoteSession = false,
@@ -673,17 +687,31 @@ const LocalSessionPane = memo(function LocalSessionPane({
     remoteSessionLoading ||
     (!draftBlock && (!isEmpty || inSplit || !!session.inboxAsk || !!agent));
   const composerDockMotion = useComposerDockMotion(dockComposer);
-  // The turn's delegated runs dock on the composer; one opens in a sheet.
-  // A Mono's chat shows its work in its own panel instead.
+  // The turn's delegated runs are listed under the session's card in the
+  // sidebar, or docked on the composer when the sidebar can't show them; one
+  // opens in a sheet. A Mono's chat shows its work in its own panel instead.
   const turnSubagents = useMemo(
-    () => (agent ? [] : latestTurnSubagents(session.blocks)),
+    () => (agent ? NO_RUNS : latestTurnSubagents(session.blocks)),
     [agent, session.blocks],
   );
-  const [openSubagentId, setOpenSubagentId] = useState<string | null>(null);
+  const openSubagentId = useSyncExternalStore(
+    subscribeSubagentSheets,
+    () => peekSubagentSheet(session.id),
+    () => null,
+  );
+  // Showing the session keeps its sheet; leaving it closes the sheet.
+  useEffect(() => holdSubagentSheet(session.id), [session.id]);
   const openSubagent =
     turnSubagents.find((run) => run.id === openSubagentId) ?? null;
-  const closeSubagent = useCallback(() => setOpenSubagentId(null), []);
-  useEffect(() => setOpenSubagentId(null), [session.id]);
+  const closeSubagent = useCallback(
+    () => closeSubagentSheet(session.id),
+    [session.id],
+  );
+  const subagentsInSidebar = useSyncExternalStore(
+    subscribeSubagentListing,
+    () => subagentsListed(session.id),
+    () => false,
+  );
   const draftRef = useRef<string | undefined>(getComposerDraft(session.id));
   const composer = (
     <Composer
@@ -827,12 +855,10 @@ const LocalSessionPane = memo(function LocalSessionPane({
       onEditingLastTurnChange={setEditingLastTurn}
     >
       <SubagentDock
-        runs={turnSubagents}
+        runs={subagentsInSidebar ? NO_RUNS : turnSubagents}
         live={!!session.busy}
         selectedId={openSubagent?.id}
-        onOpen={(id) =>
-          setOpenSubagentId((current) => (current === id ? null : id))
-        }
+        onOpen={(id) => toggleSubagentSheet(session.id, id)}
       />
     </Composer>
   );

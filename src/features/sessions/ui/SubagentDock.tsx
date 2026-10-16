@@ -17,7 +17,7 @@ import { subagentModelName, subagentName } from "../model/transcriptActivity";
 /** Chips that fit beside the totals before the rest fold into "+N". */
 const CHIP_LIMIT = 3;
 /** How long finished runs stay up once the turn is over. */
-const LINGER_MS = 1_600;
+const LINGER_MS = 2_000;
 /** Matches the card's height transition in index.css. */
 const EXIT_MS = 260;
 /** Hovering this long over a chip opens its peek. */
@@ -147,7 +147,7 @@ function SubagentChip({
       <button
         ref={ref}
         type="button"
-        aria-label={`${name}, ${stateLabel(state)}. Open its work`}
+        aria-label={`${name}, ${subagentStateLabel(state)}. Open its work`}
         aria-pressed={selected}
         onClick={() => {
           setPeek(false);
@@ -177,7 +177,7 @@ function SubagentChip({
         >
           {name}
         </span>
-        <RunMark state={state} elapsed={elapsed} />
+        <SubagentRunMark state={state} elapsed={elapsed} />
       </button>
       {peek ? <SubagentPeek anchor={ref} run={run} state={state} /> : null}
     </>
@@ -213,7 +213,7 @@ export function SubagentFace({
  * Time while it runs, a tick once it is done. Swapping the two re-keys the
  * mark so the new one fades in rather than replacing the old in place.
  */
-function RunMark({
+export function SubagentRunMark({
   state,
   elapsed,
 }: {
@@ -360,7 +360,7 @@ function isRunning(run: Block, live: boolean): boolean {
   return subagentRunState(run, live) === "running";
 }
 
-function stateLabel(state: SubagentRunState): string {
+export function subagentStateLabel(state: SubagentRunState): string {
   return state === "running" ? "working" : state;
 }
 
@@ -368,9 +368,9 @@ function stateLabel(state: SubagentRunState): string {
  * The runs to draw, held a little past the end of the turn so the last tick
  * lands before the card folds away, then kept through the fold itself.
  */
-function useLingeringRuns(runs: Block[], live: boolean) {
+export function useLingeringRuns<T>(runs: readonly T[], live: boolean) {
   const active = runs.length > 0 && live;
-  const [held, setHeld] = useState<{ runs: Block[]; open: boolean }>({
+  const [held, setHeld] = useState<{ runs: readonly T[]; open: boolean }>({
     runs: active ? runs : [],
     open: active,
   });
@@ -415,64 +415,4 @@ export function useSecondClock(ticking: boolean): number {
     return () => window.clearInterval(id);
   }, [ticking]);
   return now;
-}
-
-/**
- * How many delegated runs a session has working, for its card in the sidebar.
- * The same hopping face as the dock's chips, so the two read as one thing;
- * hovering lists who they are.
- */
-export function SubagentCountBadge({ names }: { names: readonly string[] }) {
-  const ref = useRef<HTMLSpanElement>(null);
-  const [hovered, setHovered] = useState(false);
-  const label = `${names.length} ${names.length === 1 ? "subagent" : "subagents"} running`;
-  return (
-    <span
-      ref={ref}
-      role="img"
-      aria-label={label}
-      data-subagent-count
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
-      className="subagent-chip flex h-5 shrink-0 items-center gap-1 px-0.5 text-[11px] tabular-nums text-content/60"
-    >
-      <SubagentFace name={names[0]} state="running" className="size-3" />
-      <span key={names.length} className="subagent-mark">
-        {names.length}
-      </span>
-      {hovered ? (
-        <Popover
-          anchor={ref}
-          side="right"
-          align="end"
-          width={248}
-          maxHeight={320}
-          role="tooltip"
-          className="pointer-events-none overflow-y-auto p-2.5"
-        >
-          <div className="flex items-center justify-between gap-3">
-            <span className="text-[11px] font-semibold text-content/85">
-              Subagents
-            </span>
-            <span className="shrink-0 text-[10px] tabular-nums text-content/45">
-              {names.length} running
-            </span>
-          </div>
-          <div className="mt-1.5 flex flex-col gap-0.5">
-            {names.map((name, index) => (
-              <div
-                key={`${index}:${name}`}
-                className="flex min-w-0 items-center gap-1.5 rounded-md px-1 py-1"
-              >
-                <SubagentFace name={name} state="running" />
-                <span className="min-w-0 flex-1 truncate text-[11px] text-content/75">
-                  {name}
-                </span>
-              </div>
-            ))}
-          </div>
-        </Popover>
-      ) : null}
-    </span>
-  );
 }

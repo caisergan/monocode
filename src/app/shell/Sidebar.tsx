@@ -171,7 +171,12 @@ import {
 } from "../../features/files/ui/ExplorerMenu";
 import { FileTree } from "../../features/files/ui/FileTree";
 import { HarnessIcon } from "../../features/sessions/ui/HarnessIcon";
-import { SubagentCountBadge } from "../../features/sessions/ui/SubagentDock";
+import {
+  SubagentTree,
+  SubagentTreeToggle,
+  useSubagentListing,
+} from "../../features/sessions/ui/SubagentTree";
+import type { SubagentSummary } from "../../features/sessions/model/subagentRuns";
 import { LiveAgentsPreview } from "../../features/sessions/ui/LiveAgentsPreview";
 import { ProjectRail } from "./ProjectRail";
 import { InboxNotificationMenu } from "../../features/inbox/ui/InboxNotificationMenu";
@@ -266,8 +271,8 @@ type Props = {
   sessions: SessionSummary[];
   busySessionIds: Set<string>;
   approvalSessionIds: Set<string>;
-  /** Names of the delegated runs still working, by session. */
-  runningSubagents?: ReadonlyMap<string, readonly string[]>;
+  /** The delegated runs of each session's latest turn, listed under its card. */
+  subagentRuns?: ReadonlyMap<string, readonly SubagentSummary[]>;
   activeSessionId?: string;
   /** Open tabs, including blank ones not yet in history. */
   openSessions?: readonly SessionSummary[];
@@ -394,7 +399,7 @@ function SidebarComponent({
   sessions,
   busySessionIds,
   approvalSessionIds,
-  runningSubagents,
+  subagentRuns,
   activeSessionId,
   openSessions = [],
   status,
@@ -655,6 +660,11 @@ function SidebarComponent({
   const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(
     () => new Set(),
   );
+  // Sessions whose subagent tree the user folded under the card. Runs come and
+  // go with each turn, so this is only remembered while the sidebar is up.
+  const [foldedSubagentIds, setFoldedSubagentIds] = useState<
+    ReadonlySet<string>
+  >(() => new Set());
   const contextSelectionRef = useRef(false);
   const selectionAnchorRef = useRef<string | null>(null);
   const [folderMenu, setFolderMenu] = useState<{
@@ -1606,6 +1616,15 @@ function SidebarComponent({
         cardHandlers.current.setRenamingSessionId(sessionId),
       delete: (sessionId: string) =>
         cardHandlers.current.onDeleteSession?.(sessionId),
+      // A subagent row brings its session forward the way a plain click does.
+      openSession: (sessionId: string) =>
+        cardHandlers.current.onSessionCardSelect(sessionId, NO_MODIFIERS),
+      toggleSubagents: (sessionId: string) =>
+        setFoldedSubagentIds((current) => {
+          const next = new Set(current);
+          if (!next.delete(sessionId)) next.add(sessionId);
+          return next;
+        }),
     }),
     [],
   );
@@ -1622,51 +1641,78 @@ function SidebarComponent({
     for (const session of listedSessions) motion.seen.add(session.id);
   });
 
-  const renderSessionCard = (session: SessionSummary, compact = false) =>
-    renamingSessionId === session.id && onRenameSession ? (
-      <SessionRenameRow
-        session={session}
-        isActive={session.id === activeListedSessionId}
-        needsApproval={listedApprovalSessionIds.has(session.id)}
-        onCommit={(title) => {
-          onRenameSession(session.id, title);
-          setRenamingSessionId(null);
-        }}
-        onCancel={() => setRenamingSessionId(null)}
-      />
-    ) : (
-      <SessionCard
-        session={session}
-        isActive={session.id === activeListedSessionId}
-        isSelected={selectedSessionIds.has(session.id)}
-        busy={listedBusySessionIds.has(session.id)}
-        done={unseenFinishedIds.has(session.id)}
-        linkedUpdate={linkedSessionUpdateIds.has(session.id)}
-        needsApproval={listedApprovalSessionIds.has(session.id)}
-        subagents={
-          remoteProject ? undefined : runningSubagents?.get(session.id)
-        }
-        dropTarget={isSessionDrop("session", session.id)}
-        compact={compact}
-        now={now}
-        onSelect={cardActions.select}
-        onOpenWorkItem={onOpenInboxItem && !remoteProject ? cardActions.openWorkItem : undefined}
-        workItemsMenuOpen={workItemsMenu?.session.id === session.id}
-        onToggleWorkItems={cardActions.toggleWorkItems}
-        onPrefetch={onPrefetchSession ? cardActions.prefetch : undefined}
-        onPlaceOnPane={
-          onPlaceSessionOnPane ? cardActions.placeOnPane : undefined
-        }
-        onListDrop={
-          reminderIds.has(session.id) ? undefined : cardActions.listDrop
-        }
-        onListDropTargetChange={setSessionDrop}
-        onContextMenu={cardActions.contextMenu}
-        onArchive={onArchiveSession ? cardActions.archive : undefined}
-        onRename={onRenameSession ? cardActions.rename : undefined}
-        onDelete={onDeleteSession ? cardActions.delete : undefined}
-      />
+  // Rows on the Sessions tab list their session's runs, so the composer's
+  // dock stands aside for them. A host's runs aren't listed here.
+  const subagentsListed = tab === "sessions" && !remoteProject;
+
+  const renderSessionCard = (session: SessionSummary, compact = false) => {
+    const isActive = session.id === activeListedSessionId;
+    const busy = listedBusySessionIds.has(session.id);
+    // A host's sessions carry the host's ids, which the local runs don't use.
+    const subagents = remoteProject ? undefined : subagentRuns?.get(session.id);
+    const subagentsExpanded = !foldedSubagentIds.has(session.id);
+    return (
+      <>
+        {renamingSessionId === session.id && onRenameSession ? (
+          <SessionRenameRow
+            session={session}
+            isActive={isActive}
+            needsApproval={listedApprovalSessionIds.has(session.id)}
+            onCommit={(title) => {
+              onRenameSession(session.id, title);
+              setRenamingSessionId(null);
+            }}
+            onCancel={() => setRenamingSessionId(null)}
+          />
+        ) : (
+          <SessionCard
+            session={session}
+            isActive={isActive}
+            isSelected={selectedSessionIds.has(session.id)}
+            busy={busy}
+            done={unseenFinishedIds.has(session.id)}
+            linkedUpdate={linkedSessionUpdateIds.has(session.id)}
+            needsApproval={listedApprovalSessionIds.has(session.id)}
+            subagents={subagents}
+            subagentsExpanded={subagentsExpanded}
+            onToggleSubagents={cardActions.toggleSubagents}
+            dropTarget={isSessionDrop("session", session.id)}
+            compact={compact}
+            now={now}
+            onSelect={cardActions.select}
+            onOpenWorkItem={onOpenInboxItem && !remoteProject ? cardActions.openWorkItem : undefined}
+            workItemsMenuOpen={workItemsMenu?.session.id === session.id}
+            onToggleWorkItems={cardActions.toggleWorkItems}
+            onPrefetch={onPrefetchSession ? cardActions.prefetch : undefined}
+            onPlaceOnPane={
+              onPlaceSessionOnPane ? cardActions.placeOnPane : undefined
+            }
+            onListDrop={
+              reminderIds.has(session.id) ? undefined : cardActions.listDrop
+            }
+            onListDropTargetChange={setSessionDrop}
+            onContextMenu={cardActions.contextMenu}
+            onArchive={onArchiveSession ? cardActions.archive : undefined}
+            onRename={onRenameSession ? cardActions.rename : undefined}
+            onDelete={onDeleteSession ? cardActions.delete : undefined}
+          />
+        )}
+        {/* Kept while the session works even before its first run, so a
+            new turn without runs folds the last turn's tree away. */}
+        {subagents || (busy && !remoteProject) ? (
+          <SubagentTree
+            sessionId={session.id}
+            sessionTitle={sessionDisplayTitle(session.title, session.harness)}
+            runs={subagents ?? NO_SUBAGENTS}
+            live={busy}
+            active={isActive}
+            expanded={subagentsExpanded}
+            onOpenSession={cardActions.openSession}
+          />
+        ) : null}
+      </>
     );
+  };
 
   const onSessionFiltersChange = (next: SessionSidebarFilters) => {
     setSessionFilters(next);
@@ -2036,6 +2082,7 @@ function SidebarComponent({
                                     session={session}
                                     cwd={cwd}
                                     motion={sessionInsertMotion}
+                                    listsSubagents={subagentsListed}
                                   >
                                     {renderSessionCard(session, true)}
                                   </SessionListItem>
@@ -2167,6 +2214,7 @@ function SidebarComponent({
                                       session={session}
                                       cwd={cwd}
                                       motion={sessionInsertMotion}
+                                      listsSubagents={subagentsListed}
                                     >
                                       {renderSessionCard(session, true)}
                                     </SessionListItem>
@@ -2207,6 +2255,7 @@ function SidebarComponent({
                         session={entry.session}
                         cwd={cwd}
                         motion={sessionInsertMotion}
+                        listsSubagents={subagentsListed}
                       >
                         {renderSessionCard(entry.session)}
                       </SessionListItem>
@@ -3187,6 +3236,10 @@ function FolderRenameRow({
 }
 
 const SESSION_PREFETCH_DELAY_MS = 120;
+/** A click with no keys held, which selects one session and opens it. */
+const NO_MODIFIERS = { shiftKey: false, ctrlKey: false, metaKey: false };
+/** Stands in for a working session's runs until its first one starts. */
+const NO_SUBAGENTS: readonly SubagentSummary[] = [];
 /** Rows created this recently slide in; older ones are just being listed. */
 const SESSION_INSERT_WINDOW_MS = 15_000;
 
@@ -3197,14 +3250,18 @@ function SessionListItem({
   session,
   cwd,
   motion,
+  listsSubagents,
   children,
 }: {
   session: SessionSummary;
   cwd: string;
   motion: RefObject<SessionInsertMotion>;
+  /** Shown where its subagents can be listed beneath it. */
+  listsSubagents: boolean;
   children: ReactNode;
 }) {
   const ref = useRef<HTMLLIElement>(null);
+  useSubagentListing(session.id, listsSubagents);
   // Decided once per row: effects can replay (StrictMode, reordering), and a
   // row that already slid in must not do it again.
   const played = useRef(false);
@@ -3272,6 +3329,8 @@ const SessionCard = memo(function SessionCard({
   linkedUpdate,
   needsApproval,
   subagents,
+  subagentsExpanded = true,
+  onToggleSubagents,
   dropTarget,
   compact = false,
   now,
@@ -3295,8 +3354,11 @@ const SessionCard = memo(function SessionCard({
   done: boolean;
   linkedUpdate: boolean;
   needsApproval: boolean;
-  /** Names of its delegated runs still working. */
-  subagents?: readonly string[];
+  /** Its latest turn's delegated runs, listed in the tree under the card. */
+  subagents?: readonly SubagentSummary[];
+  /** The tree under the card is unfolded. */
+  subagentsExpanded?: boolean;
+  onToggleSubagents?: (sessionId: string) => void;
   dropTarget?: boolean;
   compact?: boolean;
   now: number;
@@ -3329,6 +3391,13 @@ const SessionCard = memo(function SessionCard({
   const [agentsOpen, setAgentsOpen] = useState(false);
   const orchestration = session.orchestration;
   const draft = !!session.draft;
+  const workingSubagents = useMemo(
+    () =>
+      subagents
+        ?.filter((run) => run.state === "running")
+        .map((run) => run.name) ?? [],
+    [subagents],
+  );
   const orchestrationExpanded =
     !!orchestration && (isActive || isSelected || busy);
   const orchestrationDone =
@@ -3712,8 +3781,13 @@ const SessionCard = memo(function SessionCard({
                 <Archive className="size-3 shrink-0" strokeWidth={1.75} />
               </button>
             ) : null}
-            {subagents?.length ? (
-              <SubagentCountBadge names={subagents} />
+            {workingSubagents.length > 0 && onToggleSubagents ? (
+              <SubagentTreeToggle
+                sessionId={session.id}
+                names={workingSubagents}
+                expanded={subagentsExpanded}
+                onToggle={onToggleSubagents}
+              />
             ) : null}
             {workItemBadge}
             {session.automationId ? (

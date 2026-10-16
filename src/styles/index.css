@@ -3556,8 +3556,10 @@ html.theme-light .btw-burst {
 }
 
 /* The subagent card rises out of the composer's top edge and sinks back
-   into it, the grid row carrying the height so nothing above it jumps. */
-.subagent-dock {
+   into it, the grid row carrying the height so nothing above it jumps. A
+   session's tree in the sidebar unfolds from under its card the same way. */
+.subagent-dock,
+.subagent-tree {
   display: grid;
   grid-template-rows: 1fr;
   opacity: 1;
@@ -3567,12 +3569,14 @@ html.theme-light .btw-burst {
   animation: subagent-dock-in 260ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
 }
 
-.subagent-dock > * {
+.subagent-dock > *,
+.subagent-tree > * {
   min-height: 0;
   overflow: hidden;
 }
 
-.subagent-dock[data-open="false"] {
+.subagent-dock[data-open="false"],
+.subagent-tree[data-open="false"] {
   grid-template-rows: 0fr;
   opacity: 0;
 }
@@ -3608,8 +3612,56 @@ html.theme-light .btw-burst {
   }
 }
 
+/* A run hangs off its session's card: a guide comes down from under the
+   card's icon, an elbow turns into each row, and the last row's guide turns
+   the corner instead of running on. */
+.subagent-tree {
+  --subagent-tree-guide: color-mix(
+    in srgb,
+    var(--color-content) 14%,
+    transparent
+  );
+}
+
+.subagent-tree-item {
+  position: relative;
+  padding-left: 0.5rem;
+}
+
+.subagent-tree-item::before,
+.subagent-tree-item::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  pointer-events: none;
+}
+
+.subagent-tree-item::before {
+  top: 0;
+  bottom: 0;
+  border-left: 1px solid var(--subagent-tree-guide);
+}
+
+.subagent-tree-item::after {
+  top: 50%;
+  width: 6px;
+  border-top: 1px solid var(--subagent-tree-guide);
+}
+
+.subagent-tree-item:last-child::before {
+  bottom: 50%;
+  width: 6px;
+  border-bottom: 1px solid var(--subagent-tree-guide);
+  border-bottom-left-radius: 5px;
+}
+
+.subagent-tree-item:last-child::after {
+  display: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .subagent-dock,
+  .subagent-tree,
   .subagent-chip,
   .subagent-mark {
     animation: none;
@@ -3617,7 +3669,8 @@ html.theme-light .btw-burst {
   }
 }
 
-/* The open run stands on the subagent card, as tall as a side question. */
+/* The open run stands on the composer, or on the subagent card when the dock
+   is there, as tall as a side question. */
 .subagent-sheet {
   top: clamp(2.5rem, 16%, 11rem);
 }
