@@ -223,3 +223,14 @@ export type RewindLastTurnResult = {
   /** True when the harness already ran the replacement turn. */
   submitted: boolean;
 };
+
+/** One MCP server as a running provider process reports it. */
+export type LiveMcpServer = {
+  name: string;
+  /** `connected`, `failed`, `needs-auth`, `pending` or `disabled`. */
+  status: string;
+  /** Why the server failed, when the provider says. */
+  error?: string;
+  /** Where the server is configured, such as `user`, `project` or `claudeai`. */
+  scope?: string;
+};

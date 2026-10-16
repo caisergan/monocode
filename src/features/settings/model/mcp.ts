@@ -7,6 +7,8 @@ export type McpConnection = {
   configPath: string;
   transport: string;
   enabled?: boolean;
+  /** Shown instead of `scope` for a server no local config file holds. */
+  scopeLabel?: string;
 };
 
 export const MCP_PROVIDER_LABELS: Record<McpConnection["provider"], string> = {

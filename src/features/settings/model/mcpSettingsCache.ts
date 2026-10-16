@@ -70,6 +70,22 @@ export function loadMcpSettings(
   });
 }
 
+/**
+ * Run Claude's health check again and resolve with what it found. `claude
+ * mcp list` connects every server itself, so this is a fresh attempt.
+ */
+export async function recheckClaudeMcpHealth(
+  cwd: string,
+): Promise<McpSettingsSnapshot> {
+  const snapshot = await loadMcpSettings(cwd, false, { claudeHealth: false });
+  const discovery = requests.get(cwd);
+  if (snapshot.error || !discovery) return snapshot;
+  healthRequests.delete(cwd);
+  loadClaudeHealth(cwd, discovery);
+  await healthRequests.get(cwd);
+  return snapshots.get(cwd) ?? snapshot;
+}
+
 async function fetchMcpSettings(cwd: string): Promise<McpSettingsSnapshot> {
   try {
     const configured = await invoke<McpConnection[]>("mcp_discover", { cwd });
@@ -88,9 +104,12 @@ function loadClaudeHealth(
   discovery: Promise<McpSettingsSnapshot>,
 ) {
   if (healthRequests.has(cwd)) return;
-  const request = invoke<string>("claude_mcp_list", { cwd })
+  // A newer discovery or a recheck replaces this one.
+  const stale = () =>
+    requests.get(cwd) !== discovery || healthRequests.get(cwd) !== request;
+  const request: Promise<void> = invoke<string>("claude_mcp_list", { cwd })
     .then((output) => {
-      if (requests.get(cwd) !== discovery) return;
+      if (stale()) return;
       const snapshot = snapshots.get(cwd)!;
       const health = new Map(
         parseClaudeMcpList(output).map((server) => [
@@ -127,7 +146,7 @@ function loadClaudeHealth(
       publish(cwd, { ...snapshot, servers, claudeError: "" });
     })
     .catch((cause) => {
-      if (requests.get(cwd) !== discovery) return;
+      if (stale()) return;
       publish(cwd, { ...snapshots.get(cwd)!, claudeError: String(cause) });
     });
   healthRequests.set(cwd, request);

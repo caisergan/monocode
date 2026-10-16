@@ -14,6 +14,7 @@ import type {
   ApprovalDecision,
   CompactContextInput,
   HarnessEvent,
+  LiveMcpServer,
   RewindLastTurnInput,
   RewindLastTurnResult,
   SendTurnInput,
@@ -65,6 +66,19 @@ export type HarnessAdapter = {
    * carry on. Resolves false when the provider has no such run to stop.
    */
   stopSubagent?(sessionId: string, callId: string): Promise<boolean>;
+  /**
+   * MCP servers of the session's running process, or null when none runs or
+   * the provider cannot say.
+   */
+  mcpStatus?(sessionId: string): Promise<LiveMcpServer[] | null>;
+  /**
+   * Connect one MCP server again in the running process. Resolves with the
+   * statuses afterwards, or null when no process runs; rejects on failure.
+   */
+  reconnectMcp?(
+    sessionId: string,
+    serverName: string,
+  ): Promise<LiveMcpServer[] | null>;
   respondApproval(
     sessionId: string,
     requestId: number,
@@ -339,6 +353,27 @@ export async function stopHarnessSubagent(
   const adapter = getHarness(harness);
   if (!adapter?.live || !adapter.stopSubagent) return false;
   return adapter.stopSubagent(sessionId, callId);
+}
+
+export async function harnessMcpStatus(
+  harness: HarnessId,
+  sessionId: string,
+): Promise<LiveMcpServer[] | null> {
+  const adapter = getHarness(harness);
+  if (!adapter?.live || !adapter.mcpStatus) return null;
+  return adapter.mcpStatus(sessionId);
+}
+
+export async function reconnectHarnessMcp(
+  harness: HarnessId,
+  sessionId: string,
+  serverName: string,
+): Promise<LiveMcpServer[] | null> {
+  const adapter = getHarness(harness);
+  if (!adapter?.live || !adapter.reconnectMcp) return null;
+  // Someone is using the session; keep its process warm a while longer.
+  if (idleParkTimers.has(sessionId)) scheduleIdlePark(harness, sessionId);
+  return adapter.reconnectMcp(sessionId, serverName);
 }
 
 export function respondHarnessApproval(

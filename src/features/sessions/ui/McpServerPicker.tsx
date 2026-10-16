@@ -1,30 +1,78 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
-import { ChevronDown, Search, Settings } from "../../../shared/ui/icons";
+import {
+  ChevronDown,
+  LoaderCircle,
+  RefreshCw,
+  Search,
+  Settings,
+} from "../../../shared/ui/icons";
 import { useLockOverscroll } from "../../../shared/hooks/useLockOverscroll";
 import { HarnessIcon } from "./HarnessIcon";
 import {
   MCP_PROVIDER_LABELS,
   type McpConnection,
 } from "../../settings/model/mcp";
-import { mcpPickerServers } from "../model/mcpPicker";
+import {
+  keepMcpPickerOrder,
+  mcpPickerKey,
+  mcpPickerServers,
+  type McpPickerServer,
+  type McpReconnect,
+} from "../model/mcpPicker";
 import type { HarnessId } from "../model/session";
+
+const STATUS_TONE = {
+  muted: "text-content/45",
+  warning: "text-amber-400",
+  error: "text-red-400",
+  success: "text-diff-add",
+} as const;
+
+function rowStatus(
+  server: McpPickerServer,
+  reconnect: McpReconnect | undefined,
+): { text: string; tone: keyof typeof STATUS_TONE } {
+  if (reconnect?.state === "running") {
+    return { text: "Reconnecting…", tone: "muted" };
+  }
+  if (reconnect?.state === "failed") {
+    return { text: "Reconnect failed", tone: "error" };
+  }
+  if (server.availability === "authentication") {
+    return { text: "Needs authentication", tone: "warning" };
+  }
+  if (server.availability === "unavailable") {
+    return { text: server.detail, tone: "muted" };
+  }
+  return reconnect?.state === "connected"
+    ? { text: "Connected", tone: "success" }
+    : { text: "Available", tone: "muted" };
+}
+
+const NO_RECONNECTS: ReadonlyMap<string, McpReconnect> = new Map();
 
 export function McpServerPicker({
   connections,
   harness,
   claudeStatus,
+  reconnects = NO_RECONNECTS,
   loading,
   error,
   onPick,
+  onReconnect,
   onManage,
   onDismiss,
 }: {
   connections: McpConnection[];
   harness: HarnessId;
   claudeStatus: ReadonlyMap<string, string>;
+  /** Reconnects asked for in this picker, by Claude server name. */
+  reconnects?: ReadonlyMap<string, McpReconnect>;
   loading: boolean;
   error: string;
   onPick: (server: McpConnection) => void;
+  /** Absent when this session cannot reconnect a server. */
+  onReconnect?: (server: McpConnection) => void;
   onManage: () => void;
   onDismiss: (reason: "escape" | "outside") => void;
 }) {
@@ -35,10 +83,20 @@ export function McpServerPicker({
   const picker = useRef<HTMLDivElement>(null);
   const activeOption = useRef<HTMLButtonElement>(null);
   const lockOverscroll = useLockOverscroll<HTMLDivElement>();
-  const servers = useMemo(
-    () => mcpPickerServers(connections, harness, claudeStatus, query),
-    [connections, harness, claudeStatus, query],
-  );
+  const order = useRef<{ query: string; keys: string[] }>({
+    query,
+    keys: [],
+  });
+  const [reconnected, setReconnected] = useState(false);
+  const servers = useMemo(() => {
+    const ranked = mcpPickerServers(connections, harness, claudeStatus, query);
+    const kept =
+      reconnected && order.current.query === query
+        ? keepMcpPickerOrder(ranked, order.current.keys)
+        : ranked;
+    order.current = { query, keys: kept.map(mcpPickerKey) };
+    return kept;
+  }, [connections, harness, claudeStatus, query, reconnected]);
   const selectable = servers.flatMap((server, index) =>
     server.availability === "available" ? [index] : [],
   );
@@ -150,51 +208,101 @@ export function McpServerPicker({
         ) : (
           servers.map((server, index) => {
             const available = server.availability === "available";
+            const reconnect =
+              server.provider === "claude"
+                ? reconnects.get(server.name)
+                : undefined;
+            const reconnecting = reconnect?.state === "running";
+            const status = rowStatus(server, reconnect);
+            const canReconnect =
+              onReconnect != null && (server.reconnectable || reconnecting);
             return (
-              <button
-                key={`${server.provider}:${server.scope}:${server.configPath}:${server.name}`}
-                id={`${listboxId}-option-${index}`}
-                ref={available && active === index ? activeOption : undefined}
-                type="button"
-                role="option"
-                aria-selected={available && active === index}
-                aria-disabled={!available}
-                disabled={!available}
-                onFocus={() => {
-                  if (available) setActive(index);
-                }}
-                onMouseEnter={() => {
-                  if (available) setActive(index);
-                }}
-                onClick={() => onPick(server)}
-                className={`flex h-11 w-full items-center gap-2 rounded-md px-2 py-1.5 text-left focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent ${available ? (active === index ? "bg-selection text-content" : "text-content hover:bg-content/5") : "cursor-default text-content/40"}`}
+              <div
+                key={mcpPickerKey(server)}
+                className={`flex items-center gap-1 rounded-md ${available && active === index ? "bg-selection" : available ? "hover:bg-content/5" : ""}`}
               >
-                <HarnessIcon
-                  harness={
-                    server.provider === "claude_desktop"
-                      ? "claude"
-                      : server.provider
-                  }
-                  className="size-4 shrink-0"
-                />
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-[13px]">
-                    {server.name}
-                  </span>
-                  <span className="block truncate text-[11px] text-content/45">
-                    {MCP_PROVIDER_LABELS[server.provider]} · {server.scope}
-                  </span>
-                </span>
-                <span
-                  className={`max-w-[40%] shrink-0 truncate text-[11px] ${server.availability === "authentication" ? "text-amber-400" : "text-content/45"}`}
+                <button
+                  id={`${listboxId}-option-${index}`}
+                  ref={available && active === index ? activeOption : undefined}
+                  type="button"
+                  role="option"
+                  aria-selected={available && active === index}
+                  aria-disabled={!available}
+                  disabled={!available}
+                  onFocus={() => {
+                    if (available) setActive(index);
+                  }}
+                  onMouseEnter={() => {
+                    if (available) setActive(index);
+                  }}
+                  onClick={() => onPick(server)}
+                  className={`flex h-11 min-w-0 flex-1 items-center gap-2 rounded-md px-2 py-1.5 text-left focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent ${available ? "text-content" : "cursor-default text-content/40"}`}
                 >
-                  {server.availability === "authentication"
-                    ? "Needs authentication"
-                    : server.availability === "unavailable"
-                      ? server.detail
-                      : "Available"}
-                </span>
-              </button>
+                  <HarnessIcon
+                    harness={
+                      server.provider === "claude_desktop"
+                        ? "claude"
+                        : server.provider
+                    }
+                    className="size-4 shrink-0"
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-[13px]">
+                      {server.name}
+                    </span>
+                    {reconnect?.state === "failed" ? (
+                      <span
+                        title={reconnect.error}
+                        className="block truncate text-[11px] text-red-400/80"
+                      >
+                        {reconnect.error}
+                      </span>
+                    ) : (
+                      <span className="block truncate text-[11px] text-content/45">
+                        {MCP_PROVIDER_LABELS[server.provider]} ·{" "}
+                        {server.scopeLabel ?? server.scope}
+                      </span>
+                    )}
+                  </span>
+                  <span
+                    className={`max-w-[40%] shrink-0 truncate text-[11px] ${STATUS_TONE[status.tone]}`}
+                  >
+                    {status.text}
+                  </span>
+                </button>
+                {canReconnect && (
+                  <button
+                    type="button"
+                    aria-label={`Reconnect ${server.name}`}
+                    title={
+                      reconnecting
+                        ? "Reconnecting…"
+                        : `Ask Claude to connect ${server.name} again`
+                    }
+                    disabled={reconnecting}
+                    onClick={() => {
+                      setReconnected(true);
+                      onReconnect(server);
+                    }}
+                    className="mr-1 flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-content/10 px-2 text-[11px] text-content/70 transition-colors hover:bg-content/8 hover:text-content disabled:cursor-default disabled:text-content/45 disabled:hover:bg-transparent focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-accent"
+                  >
+                    {reconnecting ? (
+                      <LoaderCircle
+                        className="size-3 animate-spin"
+                        strokeWidth={1.75}
+                        aria-hidden
+                      />
+                    ) : (
+                      <RefreshCw
+                        className="size-3"
+                        strokeWidth={1.75}
+                        aria-hidden
+                      />
+                    )}
+                    {reconnect?.state === "failed" ? "Retry" : "Reconnect"}
+                  </button>
+                )}
+              </div>
             );
           })
         )}

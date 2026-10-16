@@ -200,8 +200,10 @@ import {
   mcpTagParts,
   newMcpTag,
   taggedMcpServers,
+  withLiveMcpServers,
   type McpTag,
 } from "../model/mcpPicker";
+import { useMcpReconnect } from "./useMcpReconnect";
 import { getComposerMcpTags, setComposerMcpTags } from "../model/draftCache";
 import { type McpConnection } from "../../settings/model/mcp";
 import {
@@ -710,11 +712,30 @@ export function Composer({
     const stop = subscribeMcpSettings(executionCwd, apply);
     const cached = getCachedMcpSettings(executionCwd);
     if (cached) apply(cached);
-    void loadMcpSettings(executionCwd, false, {
-      claudeHealth: harness === "claude",
-    });
+    // Claude's health check waits to hear whether a running Claude can say.
+    void loadMcpSettings(executionCwd, false, { claudeHealth: false });
     return stop;
   }, [executionCwd, harness, mcpPickerOpen]);
+
+  const mcpLive = useMcpReconnect({
+    open: mcpPickerOpen,
+    harness,
+    sessionId,
+    cwd: executionCwd,
+    remote,
+  });
+  useEffect(() => {
+    if (!mcpPickerOpen || harness !== "claude") return;
+    if (!mcpLive.checked || mcpLive.live) return;
+    void loadMcpSettings(executionCwd, false, { claudeHealth: true });
+  }, [executionCwd, harness, mcpPickerOpen, mcpLive.checked, mcpLive.live]);
+  const mcpRows = useMemo(
+    () =>
+      mcpLive.live
+        ? withLiveMcpServers(mcpConnections, mcpLive.live)
+        : { connections: mcpConnections, status: mcpStatus },
+    [mcpConnections, mcpStatus, mcpLive.live],
+  );
 
   useEffect(() => {
     setMcpPickerOpen(false);
@@ -1793,9 +1814,11 @@ export function Composer({
         {mcpPickerOpen ? (
           <div className="absolute inset-x-0 bottom-full z-30 mb-1">
             <McpServerPicker
-              connections={mcpConnections}
+              connections={mcpRows.connections}
               harness={harness}
-              claudeStatus={mcpStatus}
+              claudeStatus={mcpRows.status}
+              reconnects={mcpLive.reconnects}
+              onReconnect={mcpLive.reconnect}
               loading={mcpLoading}
               error={mcpError}
               onPick={(server) => {
