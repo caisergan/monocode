@@ -169,6 +169,10 @@ export type SecondOpinionMeta = {
   kind?: "handoff";
   /** Recap sent with a handoff, kept so a later continuation can carry it. */
   brief?: string;
+  /** Title of the chat a continued chat was read from. */
+  source?: string;
+  /** That chat's session id, so the turn can lead back to it. */
+  sourceId?: string;
 };
 
 /** A mid-turn interjection the harness asked to surface, e.g. OMP advisor notes. */

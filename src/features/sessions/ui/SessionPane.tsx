@@ -275,6 +275,8 @@ export type SessionPaneProps = {
   onBindProviderSession?: (sessionId: string, providerSessionId: string) => void;
   /** Moves a terminal session back to MonoCode's own chat. */
   onOpenSessionAsChat?: (sessionId: string) => void;
+  /** Opens another chat, e.g. the one a continued chat was read from. */
+  onOpenSession?: (sessionId: string) => void;
   /** Runs a session in the agent's own CLI instead of MonoCode's chat. */
   onOpenSessionInTerminal?: (sessionId: string) => void;
   /** The session's CLI ended, so its transcript is complete. */
@@ -390,6 +392,7 @@ const LocalSessionPane = memo(function LocalSessionPane({
   onQuestionInteraction,
   onOpenFile,
   onOpenDiff,
+  onOpenSession,
   onShowMonoActivity,
   monoActivityTurnId,
   onShowMonoSessions,
@@ -1018,6 +1021,7 @@ const LocalSessionPane = memo(function LocalSessionPane({
                         : undefined
                     }
                     agentMascot={agent}
+                    onOpenSession={onOpenSession}
                     bottomAligned={!!agent}
                     inlineWork={!!agent}
                     messageDeliveries={agent ? messageDeliveries : undefined}
