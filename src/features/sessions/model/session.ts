@@ -93,6 +93,8 @@ export type ComposerTurnOptions = {
   onResendRejected?: (recovery: EditedResendRejection) => void;
   /** Promote an existing unsent transcript block instead of appending a turn. */
   draftBlockId?: string;
+  /** `/queue`: wait for the running turn, and behind any message already waiting. */
+  queue?: boolean;
 };
 
 export type PlanStatus = "streaming" | "ready" | "building" | "built";
