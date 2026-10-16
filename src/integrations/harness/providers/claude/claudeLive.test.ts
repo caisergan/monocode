@@ -2917,3 +2917,384 @@ describe("claude subagent runs", () => {
     expect(block?.tool?.status).toBe("failed");
   });
 });
+
+describe("claude workflow agents", () => {
+  const dir = "/p/sess/subagents/workflows/wf_1";
+  /** The mock reads a `.jsonl` path through its `.output` name. */
+  const agentFile = (agentId: string) => `${dir}/agent-${agentId}.output`;
+
+  function lines(records: Record<string, unknown>[]) {
+    return records.map((record) => JSON.stringify(record)).join("\n") + "\n";
+  }
+
+  /** One agent's own transcript, as Claude writes it under the run's folder. */
+  const agentTranscript = [
+    {
+      type: "user",
+      uuid: "u1",
+      message: { role: "user", content: "Find ING's interview stages." },
+    },
+    {
+      type: "assistant",
+      uuid: "r1",
+      message: {
+        id: "msg_1",
+        model: "claude-haiku-5-5",
+        content: [{ type: "thinking", thinking: "Open the careers page." }],
+        usage: {
+          input_tokens: 3,
+          output_tokens: 5,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 9_000,
+        },
+      },
+    },
+    {
+      type: "assistant",
+      uuid: "r2",
+      message: {
+        id: "msg_1",
+        model: "claude-haiku-5-5",
+        content: [
+          {
+            type: "tool_use",
+            id: "toolu_fetch",
+            name: "WebFetch",
+            input: { url: "https://example.com/careers" },
+          },
+        ],
+        usage: {
+          input_tokens: 3,
+          output_tokens: 140,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 9_000,
+        },
+      },
+    },
+    {
+      type: "user",
+      uuid: "u2",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_fetch",
+            content: "Stages: HR, technical",
+          },
+        ],
+      },
+    },
+    {
+      type: "assistant",
+      uuid: "r3",
+      message: {
+        id: "msg_2",
+        model: "claude-haiku-5-5",
+        content: [{ type: "text", text: "Two stages." }],
+        usage: {
+          input_tokens: 2,
+          output_tokens: 20,
+          cache_read_input_tokens: 9_000,
+          cache_creation_input_tokens: 400,
+        },
+      },
+    },
+  ];
+
+  /** A Workflow call, its task, and the result that names the run's folder. */
+  function emitWorkflow() {
+    emit({
+      type: "assistant",
+      session_id: "sess_1",
+      message: {
+        content: [
+          {
+            type: "tool_use",
+            id: "toolu_wf",
+            name: "Workflow",
+            input: { description: "Scan the companies", script: "…" },
+          },
+        ],
+      },
+    });
+    emit({
+      type: "system",
+      subtype: "task_started",
+      task_id: "w1",
+      tool_use_id: "toolu_wf",
+      description: "Scan the companies",
+      task_type: "local_workflow",
+    });
+    emit({
+      type: "user",
+      session_id: "sess_1",
+      message: {
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "toolu_wf",
+            content: "Workflow launched in background. Task ID: w1",
+          },
+        ],
+      },
+      tool_use_result: {
+        status: "async_launched",
+        taskId: "w1",
+        taskType: "local_workflow",
+        runId: "wf_1",
+        transcriptDir: dir,
+      },
+    });
+  }
+
+  /** Progress names the agent that moved last; only some carry the list. */
+  function emitProgress(agents?: Record<string, unknown>[]) {
+    emit({
+      type: "system",
+      subtype: "task_progress",
+      task_id: "w1",
+      tool_use_id: "toolu_wf",
+      description: "Ara: ing",
+      usage: { total_tokens: 393_000, tool_uses: 82, duration_ms: 27_000 },
+      ...(agents
+        ? {
+            workflow_progress: agents.map((agent) => ({
+              type: "workflow_agent",
+              phaseTitle: "Ara",
+              ...agent,
+            })),
+          }
+        : {}),
+    });
+  }
+
+  function emitWorkflowEnd(status: string) {
+    emit({
+      type: "system",
+      subtype: "task_notification",
+      task_id: "w1",
+      tool_use_id: "toolu_wf",
+      status,
+      output_file: "/tmp/tasks/w1.output",
+      summary: "Workflow finished",
+    });
+    emit({ type: "result", subtype: "success", session_id: "sess_1" });
+  }
+
+  function rows(events: HarnessEvent[]) {
+    return events.reduce(applyHarnessEvent, newSession("claude", "/repo"))
+      .blocks;
+  }
+
+  it("gives each started agent a row of its own, read from its transcript", async () => {
+    const { events, turn } = await startTurn("s1");
+    transcripts.set(agentFile("a1"), lines(agentTranscript));
+    emitWorkflow();
+    emitProgress([
+      {
+        index: 1,
+        label: "ing",
+        agentId: "a1",
+        state: "start",
+        startedAt: 1_000,
+      },
+      { index: 2, label: "boyner", state: "start" },
+    ]);
+    emitProgress();
+    // Should an agent's messages reach the parent's stream, they are not the
+    // Workflow call's own.
+    emit({
+      type: "assistant",
+      session_id: "sess_1",
+      parent_tool_use_id: "toolu_wf",
+      message: {
+        id: "msg_x",
+        model: "claude-haiku-5-5",
+        content: [{ type: "text", text: "Looking." }],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      },
+    });
+
+    const row = () =>
+      rows(events).find((block) => block.tool?.callId === "toolu_wf:a1");
+    await waitFor(() => row()?.agentRun?.steps.length === 3, "agent trail");
+    expect(row()?.tool).toMatchObject({
+      title: "Ara: ing",
+      kind: "agent",
+      status: "in_progress",
+    });
+    expect(row()?.agentRun).toMatchObject({
+      name: "Ara: ing",
+      agentType: "workflow",
+      model: "claude-haiku-5-5",
+      prompt: "Find ING's interview stages.",
+      transcriptPath: `${dir}/agent-a1.jsonl`,
+      startedAt: 1_000,
+      usage: {
+        uncached: 9_003 + 402,
+        cacheRead: 9_000,
+        cacheWrite: 9_400,
+        output: 160,
+        contextUsed: 9_422,
+      },
+    });
+    expect(
+      row()?.agentRun?.steps.map((step) => [step.id, step.kind, step.status]),
+    ).toEqual([
+      ["msg_1:thinking", "reasoning", undefined],
+      ["toolu_fetch", "tool", "completed"],
+      ["msg_2:text", "message", undefined],
+    ]);
+    // Claude can only stop the whole workflow, so the agent has no task.
+    expect(row()?.agentRun?.taskId).toBeUndefined();
+    expect(await stopClaudeSubagent("s1", "toolu_wf:a1")).toBe(false);
+
+    // The Workflow row stays the Workflow call, whoever moved last.
+    const workflow = rows(events).find(
+      (block) => block.tool?.callId === "toolu_wf",
+    );
+    expect(workflow?.tool?.kind).not.toBe("agent");
+    expect(workflow?.tool?.title).not.toContain("ing");
+    expect(workflow?.agentRun).toBeUndefined();
+    // An agent still queued has no row yet.
+    expect(
+      rows(events).filter((block) => block.tool?.kind === "agent"),
+    ).toHaveLength(1);
+
+    emitProgress([
+      {
+        index: 1,
+        label: "ing",
+        agentId: "a1",
+        state: "done",
+        startedAt: 1_000,
+        toolCalls: 1,
+        durationMs: 9_000,
+        resultPreview: '{"stages":2}',
+      },
+      { index: 2, label: "boyner", state: "start" },
+    ]);
+    emitWorkflowEnd("completed");
+    await turn;
+    expect(row()?.tool).toMatchObject({
+      status: "completed",
+      detail: '{"stages":2}',
+    });
+    expect(row()?.agentRun?.usage).toMatchObject({
+      output: 160,
+      toolUses: 1,
+      durationMs: 9_000,
+    });
+    expect(row()?.agentRun?.endedAt).toBeTypeOf("number");
+    // The workflow's result file is not read as anyone's transcript.
+    expect(
+      rows(events).find((block) => block.tool?.callId === "toolu_wf")
+        ?.agentRun,
+    ).toBeUndefined();
+  });
+
+  it("keeps looking for an agent's transcript until Claude has written it", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      const { events, turn } = await startTurn("s1");
+      emitWorkflow();
+      emitProgress([
+        { index: 1, label: "ing", agentId: "a1", state: "start", startedAt: 1 },
+      ]);
+      const row = () =>
+        rows(events).find((block) => block.tool?.callId === "toolu_wf:a1");
+      await waitFor(() => row() !== undefined, "agent row");
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(row()?.agentRun?.transcriptPath).toBeUndefined();
+
+      transcripts.set(agentFile("a1"), lines(agentTranscript));
+      vi.advanceTimersByTime(2_000);
+      await waitFor(
+        () => row()?.agentRun?.usage?.output === 160,
+        "transcript found on a later poll",
+      );
+      expect(row()?.agentRun?.transcriptPath).toBe(`${dir}/agent-a1.jsonl`);
+      emitWorkflowEnd("completed");
+      await turn;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ends each agent the way it ended, and the rest with the workflow", async () => {
+    const { events, turn } = await startTurn("s1");
+    emitWorkflow();
+    emitProgress([
+      { index: 1, label: "ing", agentId: "a1", state: "start", startedAt: 1 },
+      {
+        index: 2,
+        label: "akbank",
+        agentId: "a2",
+        state: "start",
+        startedAt: 1,
+      },
+      {
+        index: 3,
+        label: "turksat",
+        agentId: "a3",
+        state: "start",
+        startedAt: 1,
+      },
+      {
+        index: 4,
+        label: "garanti",
+        state: "error",
+        error: "blocked by safety classifier",
+      },
+    ]);
+    emitProgress([
+      { index: 1, label: "ing", agentId: "a1", state: "start", startedAt: 1 },
+      {
+        index: 2,
+        label: "akbank",
+        agentId: "a2",
+        state: "error",
+        error: "skipped by user",
+        skipped: true,
+      },
+      // Tried again: the attempt before is over, the new one gets a row.
+      {
+        index: 3,
+        label: "turksat",
+        agentId: "a3b",
+        state: "start",
+        startedAt: 2,
+      },
+      {
+        index: 4,
+        label: "garanti",
+        state: "error",
+        error: "blocked by safety classifier",
+      },
+    ]);
+    emitWorkflowEnd("killed");
+    await turn;
+
+    const byCall = (callId: string) =>
+      rows(events).find((block) => block.tool?.callId === callId);
+    expect(byCall("toolu_wf:a2")?.tool?.status).toBe("failed");
+    expect(byCall("toolu_wf:a2")?.agentRun?.stopped).toBe(true);
+    expect(byCall("toolu_wf:#4")?.tool).toMatchObject({
+      title: "Ara: garanti",
+      status: "failed",
+      detail: "blocked by safety classifier",
+    });
+    expect(byCall("toolu_wf:#4")?.agentRun?.stopped).toBeUndefined();
+    expect(byCall("toolu_wf:a3")?.tool?.status).toBe("failed");
+    expect(byCall("toolu_wf:a3")?.agentRun?.stopped).toBeUndefined();
+    // Stopped along with the workflow, not failed on their own.
+    for (const callId of ["toolu_wf:a1", "toolu_wf:a3b"]) {
+      expect(byCall(callId)?.tool?.status).toBe("failed");
+      expect(byCall(callId)?.agentRun?.stopped).toBe(true);
+    }
+    expect(
+      rows(events).filter((block) => block.tool?.kind === "agent"),
+    ).toHaveLength(5);
+  });
+});

@@ -48,6 +48,8 @@ import {
   isSubagentMessage,
   isTerminalAgentTaskStatus,
   isTodoTool,
+  isWorkflowTaskType,
+  isWorkflowToolName,
   applyClaudeTaskTool,
   isUsageLimitResult,
   modelWindowsFromResult,
@@ -79,10 +81,13 @@ import {
   tryParseJsonRecord,
   turnStatusFromResult,
   usageLimitFromRateLimitEvent,
+  workflowLaunchFromToolResult,
   type ClaudeAgentTaskNotification,
+  type ClaudeAgentTaskProgress,
   type ClaudeCliSettings,
   type ClaudeTaskUsage,
   type ClaudeControlRequest,
+  type ClaudeWorkflowAgent,
 } from "./claudeProtocol";
 import { noteClaudeCommands } from "./claudeCommands";
 import {
@@ -91,10 +96,12 @@ import {
   mergeRequestUsage,
   readClaudeSubagentTranscript,
   requestUsage,
+  takeClaudeTranscriptSteps,
   usageFromRequests,
   type ClaudeSubagentTranscript,
   type RequestUsage,
 } from "./claudeSubagentTranscript";
+import { MAX_AGENT_STEPS } from "../../core/apply";
 import { isAgentToolName } from "../../core/preview";
 import { joinStreamText, snapshotRemainder } from "../../core/streamText";
 import {
@@ -145,6 +152,29 @@ type LiveAgentTask = {
   backgrounded: boolean;
 };
 
+/**
+ * A Workflow call running in the background. Claude reports it as one task;
+ * each agent its script starts gets a row of its own, read from the file
+ * Claude keeps for that agent.
+ */
+type LiveWorkflow = {
+  /** The Workflow tool call. */
+  callId: string;
+  taskId?: string;
+  /** Where each agent's transcript is written, from the Workflow result. */
+  transcriptDir?: string;
+  /** Rows by the agent they show: its id, or `#<index>` if it never started. */
+  agents: Map<string, WorkflowAgentRow>;
+  /** The row each agent call of the script is on now; a retry moves it. */
+  current: Map<number, WorkflowAgentRow>;
+};
+
+type WorkflowAgentRow = {
+  callId: string;
+  agentId?: string;
+  settled: boolean;
+};
+
 type BackgroundTask = {
   description: string;
   toolUseId?: string;
@@ -154,6 +184,15 @@ type BackgroundTask = {
 type SubagentTally = {
   /** The run's own transcript, once Claude has said where it is. */
   transcript?: ClaudeSubagentTranscript;
+  /** The transcript has been read; until then the stream's numbers stand. */
+  read: boolean;
+  /** Reads that found no transcript yet, while the run had never been read. */
+  misses: number;
+  /**
+   * The run's model, brief and steps are read from its transcript too, as last
+   * passed on. Set for a workflow's agents, which say nothing on the stream.
+   */
+  trail?: { model?: string; brief?: string };
   /** Usage mirrored on the parent's stream, until the transcript is found. */
   streamed: Map<string, RequestUsage>;
   lastStreamed?: string;
@@ -178,6 +217,8 @@ type Live = {
   toolsByIndex: Map<number, InFlightTool>;
   toolsById: Map<string, InFlightTool>;
   agentTasks: Map<string, LiveAgentTask>;
+  /** Workflow calls still running, by the Workflow call. */
+  workflows: Map<string, LiveWorkflow>;
   /** Tokens each subagent has spent, by the Agent call that spawned it. */
   subagents: Map<string, SubagentTally>;
   /** Reads the transcripts of subagents still at work. */
@@ -562,6 +603,7 @@ async function ensureLive(input: HarnessSessionInput): Promise<Live> {
     toolsByIndex: new Map(),
     toolsById: new Map(),
     agentTasks: new Map(),
+    workflows: new Map(),
     subagents: new Map(),
     subagentPoll: null,
     modelWindows: new Map(),
@@ -670,6 +712,7 @@ async function runTurn(live: Live, input: SendTurnInput): Promise<void> {
   live.toolsByIndex.clear();
   live.toolsById.clear();
   live.agentTasks.clear();
+  live.workflows.clear();
   live.subagents.clear();
   stopSubagentPoll(live);
   live.backgroundTasks.clear();
@@ -1203,6 +1246,10 @@ function handleUser(live: Live, rec: Record<string, unknown>): void {
         watchSubagentTranscript(live, tool.id, launch.outputFile);
       }
     }
+    if (results.length === 1 && isWorkflowToolName(tool.name)) {
+      const launched = workflowLaunchFromToolResult(rec);
+      if (launched) noteWorkflowLaunch(live, tool.id, launched);
+    }
     if (isAgentToolName(tool.name) && isBackgroundedAgentTool(live, tool.id)) {
       continue;
     }
@@ -1528,6 +1575,12 @@ function handleAgentLifecycle(
       toolUseId: started.toolUseId,
     });
     syncBackgroundWait(live);
+    if (isWorkflowTaskType(started.taskType)) {
+      if (started.toolUseId) {
+        liveWorkflow(live, started.toolUseId).taskId = started.taskId;
+      }
+      return true;
+    }
     if (!isAgentTaskType(started.taskType)) return true;
     live.agentTasks.set(started.taskId, {
       taskId: started.taskId,
@@ -1557,6 +1610,13 @@ function handleAgentLifecycle(
 
   const progress = parseTaskProgress(rec);
   if (progress) {
+    // A workflow's progress is named after whichever agent moved last; it
+    // must not rename the Workflow row into that agent.
+    const workflow = workflowForProgress(live, progress);
+    if (workflow) {
+      noteWorkflowProgress(live, workflow, progress);
+      return true;
+    }
     const task = live.agentTasks.get(progress.taskId);
     const title = progress.description || task?.description || "Subagent";
     const detail =
@@ -1598,6 +1658,8 @@ function handleAgentLifecycle(
         updated.status ?? "completed",
         updated.error,
       );
+      const workflow = findWorkflow(live, updated.taskId);
+      if (workflow) settleWorkflow(live, workflow, updated.status);
       finishBackgroundTask(live, updated.taskId);
       completeAgentTask(
         live,
@@ -1613,7 +1675,13 @@ function handleAgentLifecycle(
   if (notice) {
     const noticeCall =
       notice.toolUseId ?? live.agentTasks.get(notice.taskId)?.toolUseId;
-    if (!notice.ambient && noticeCall && live.subagents.has(noticeCall)) {
+    // A workflow's output file is its result, not a transcript to read.
+    if (
+      !notice.ambient &&
+      !isWorkflowCall(live, noticeCall) &&
+      noticeCall &&
+      live.subagents.has(noticeCall)
+    ) {
       const tally = subagentTally(live, noticeCall);
       if (notice.usage) tally.task = notice.usage;
       if (notice.outputFile) {
@@ -1622,6 +1690,8 @@ function handleAgentLifecycle(
     }
     if (!notice.ambient) {
       noteTaskNotification(live, notice);
+      const ended = findWorkflow(live, notice.taskId, notice.toolUseId);
+      if (ended) settleWorkflow(live, ended, notice.status);
       finishBackgroundTask(live, notice.taskId);
       completeAgentTask(
         live,
@@ -1639,6 +1709,9 @@ function handleAgentLifecycle(
   for (const id of [...live.backgroundTasks.keys()]) {
     if (next.has(id)) continue;
     settleBackgroundRow(live, id, "completed");
+    // Gone without a word: whatever of its work hadn't ended was cut short.
+    const workflow = findWorkflow(live, id);
+    if (workflow) settleWorkflow(live, workflow, "stopped");
     finishBackgroundTask(live, id);
   }
   for (const row of allTasks) {
@@ -1662,6 +1735,14 @@ function handleAgentLifecycle(
       backgrounded: true,
     });
     upsertAgentTool(live, toolUseId, row.description, "in_progress");
+    // The task id is what stops the run, so the row can offer to.
+    if (toolUseId) {
+      live.onEvent({
+        type: "agent.run",
+        callId: toolUseId,
+        taskId: row.taskId,
+      });
+    }
   }
   maybeFinishTurn(live);
   syncBackgroundWait(live);
@@ -1884,6 +1965,220 @@ function upsertAgentTool(
     status,
     ...(detail ? { detail } : {}),
   });
+}
+
+/** A workflow Claude has said is running, by its task or its Workflow call. */
+function findWorkflow(
+  live: Live,
+  taskId: string,
+  callId?: string,
+): LiveWorkflow | undefined {
+  const byCall = callId ? live.workflows.get(callId) : undefined;
+  if (byCall) return byCall;
+  for (const workflow of live.workflows.values()) {
+    if (workflow.taskId === taskId) return workflow;
+  }
+  return undefined;
+}
+
+function isWorkflowCall(live: Live, callId: string | undefined): boolean {
+  if (!callId) return false;
+  if (live.workflows.has(callId)) return true;
+  const tool = live.toolsById.get(callId);
+  return !!tool && isWorkflowToolName(tool.name);
+}
+
+function liveWorkflow(live: Live, callId: string): LiveWorkflow {
+  let workflow = live.workflows.get(callId);
+  if (!workflow) {
+    workflow = { callId, agents: new Map(), current: new Map() };
+    live.workflows.set(callId, workflow);
+  }
+  return workflow;
+}
+
+/**
+ * The workflow a progress event is about, if it is one. Claude only lists the
+ * agents now and then, so the call it names counts too.
+ */
+function workflowForProgress(
+  live: Live,
+  progress: ClaudeAgentTaskProgress,
+): LiveWorkflow | undefined {
+  const known = findWorkflow(live, progress.taskId, progress.toolUseId);
+  if (known) return known;
+  if (!progress.workflowAgents && !isWorkflowCall(live, progress.toolUseId)) {
+    return undefined;
+  }
+  const callId = progress.toolUseId ?? `workflow:${progress.taskId}`;
+  return liveWorkflow(live, callId);
+}
+
+function noteWorkflowLaunch(
+  live: Live,
+  callId: string,
+  launch: { taskId?: string; transcriptDir?: string },
+): void {
+  const workflow = liveWorkflow(live, callId);
+  if (launch.taskId) workflow.taskId = launch.taskId;
+  if (!launch.transcriptDir || workflow.transcriptDir) return;
+  workflow.transcriptDir = launch.transcriptDir;
+  // Agents listed before the result named their folder are read from now on.
+  for (const agent of workflow.agents.values()) {
+    watchWorkflowAgent(live, workflow, agent);
+  }
+}
+
+function noteWorkflowProgress(
+  live: Live,
+  workflow: LiveWorkflow,
+  progress: ClaudeAgentTaskProgress,
+): void {
+  workflow.taskId ??= progress.taskId;
+  for (const entry of progress.workflowAgents ?? []) {
+    noteWorkflowAgent(live, workflow, entry);
+  }
+}
+
+function noteWorkflowAgent(
+  live: Live,
+  workflow: LiveWorkflow,
+  entry: ClaudeWorkflowAgent,
+): void {
+  const key = entry.agentId ?? `#${entry.index}`;
+  let agent = workflow.agents.get(key);
+  if (!agent) {
+    // Queued agents have no id yet; one gets a row once it starts, or fails.
+    if (!entry.agentId && entry.state !== "error") return;
+    // Another attempt at the same call: the one before it is over.
+    const before = workflow.current.get(entry.index);
+    if (before) settleWorkflowAgent(live, before, "failed");
+    agent = openWorkflowAgent(live, workflow, key, entry);
+  }
+  workflow.current.set(entry.index, agent);
+  noteWorkflowAgentCounts(live, agent, entry);
+  if (entry.state === "done") {
+    settleWorkflowAgent(live, agent, "completed", entry.resultPreview);
+  } else if (entry.state === "error") {
+    settleWorkflowAgent(
+      live,
+      agent,
+      entry.skipped ? "stopped" : "failed",
+      entry.error,
+    );
+  }
+}
+
+function openWorkflowAgent(
+  live: Live,
+  workflow: LiveWorkflow,
+  key: string,
+  entry: ClaudeWorkflowAgent,
+): WorkflowAgentRow {
+  const agent: WorkflowAgentRow = {
+    callId: `${workflow.callId}:${key}`,
+    ...(entry.agentId ? { agentId: entry.agentId } : {}),
+    settled: false,
+  };
+  workflow.agents.set(key, agent);
+  // Named the way Claude names it, after the script's phase and label.
+  const title = entry.phase ? `${entry.phase}: ${entry.label}` : entry.label;
+  live.onEvent({
+    type: "tool.started",
+    callId: agent.callId,
+    title,
+    kind: "agent",
+    status: "in_progress",
+  });
+  live.onEvent({
+    type: "agent.run",
+    callId: agent.callId,
+    startedAt: entry.startedAt ?? Date.now(),
+    agentType: entry.agentType ?? "workflow",
+    ...(entry.promptPreview ? { prompt: entry.promptPreview } : {}),
+  });
+  subagentTally(live, agent.callId).trail = {};
+  watchWorkflowAgent(live, workflow, agent);
+  return agent;
+}
+
+function watchWorkflowAgent(
+  live: Live,
+  workflow: LiveWorkflow,
+  agent: WorkflowAgentRow,
+): void {
+  const dir = workflow.transcriptDir;
+  if (!dir || !agent.agentId) return;
+  const separator = dir.includes("/") ? "/" : "\\";
+  watchSubagentTranscript(
+    live,
+    agent.callId,
+    `${dir.replace(/[\\/]+$/, "")}${separator}agent-${agent.agentId}.jsonl`,
+    { trail: true },
+  );
+}
+
+/**
+ * The calls and time the workflow counted for one agent. Its tokens come from
+ * its transcript: the workflow's count is a running sum, not a context size.
+ */
+function noteWorkflowAgentCounts(
+  live: Live,
+  agent: WorkflowAgentRow,
+  entry: ClaudeWorkflowAgent,
+): void {
+  if (entry.toolCalls === undefined && entry.durationMs === undefined) return;
+  const tally = subagentTally(live, agent.callId);
+  if (
+    tally.task?.toolUses === entry.toolCalls &&
+    tally.task?.durationMs === entry.durationMs
+  ) {
+    return;
+  }
+  tally.task = {
+    ...(entry.toolCalls !== undefined ? { toolUses: entry.toolCalls } : {}),
+    ...(entry.durationMs !== undefined ? { durationMs: entry.durationMs } : {}),
+  };
+  emitSubagentUsage(live, agent.callId);
+}
+
+function settleWorkflowAgent(
+  live: Live,
+  agent: WorkflowAgentRow,
+  outcome: "completed" | "failed" | "stopped",
+  detail?: string,
+): void {
+  if (agent.settled) return;
+  agent.settled = true;
+  if (outcome === "stopped") {
+    live.onEvent({ type: "agent.run", callId: agent.callId, stopped: true });
+  }
+  live.onEvent({
+    type: "tool.updated",
+    callId: agent.callId,
+    kind: "agent",
+    status: outcome === "completed" ? "completed" : "failed",
+    ...(detail ? { detail } : {}),
+  });
+  finishSubagentTally(live, agent.callId);
+}
+
+/** The workflow ended: its agents that never said so end with it. */
+function settleWorkflow(
+  live: Live,
+  workflow: LiveWorkflow,
+  status: string | undefined,
+): void {
+  live.workflows.delete(workflow.callId);
+  const outcome =
+    status === "completed"
+      ? "completed"
+      : status === "failed"
+        ? "failed"
+        : "stopped";
+  for (const agent of workflow.agents.values()) {
+    settleWorkflowAgent(live, agent, outcome);
+  }
 }
 
 function completeAgentTask(
@@ -2173,11 +2468,17 @@ export function __claudeTestReset(): void {
 
 /** How often the transcripts of running subagents are read for new usage. */
 const SUBAGENT_POLL_MS = 2_000;
+/**
+ * Polls a transcript may come up missing before it is given up on. Claude
+ * names a workflow agent's file as the agent starts, a moment before it
+ * writes to it.
+ */
+const TRANSCRIPT_MISSES = 15;
 
 function subagentTally(live: Live, callId: string): SubagentTally {
   let tally = live.subagents.get(callId);
   if (!tally) {
-    tally = { streamed: new Map(), running: true };
+    tally = { streamed: new Map(), running: true, read: false, misses: 0 };
     live.subagents.set(callId, tally);
   }
   return tally;
@@ -2193,7 +2494,8 @@ function noteSubagentStreamUsage(
   rec: Record<string, unknown>,
 ): void {
   const callId = stringField(rec, "parent_tool_use_id");
-  if (!callId) return;
+  // A workflow's agents have rows of their own, counted from their files.
+  if (!callId || isWorkflowCall(live, callId)) return;
   const message = asRecord(rec.message);
   const id = stringField(message, "id");
   const usage = requestUsage(asRecord(message?.usage));
@@ -2203,7 +2505,7 @@ function noteSubagentStreamUsage(
   tally.lastStreamed = id;
   const model = stringField(message, "model");
   if (model) tally.model = model;
-  if (!tally.transcript) emitSubagentUsage(live, callId);
+  if (!tally.transcript || !tally.read) emitSubagentUsage(live, callId);
 }
 
 /** Start reading a subagent's transcript, then keep up with it while it runs. */
@@ -2211,13 +2513,16 @@ function watchSubagentTranscript(
   live: Live,
   callId: string,
   path: string,
+  options: { trail?: boolean } = {},
 ): void {
   const tally = subagentTally(live, callId);
   if (tally.transcript) {
     if (!tally.running) void refreshSubagent(live, callId);
     return;
   }
-  tally.transcript = claudeSubagentTranscript(path);
+  tally.transcript = claudeSubagentTranscript(path, options);
+  tally.read = false;
+  tally.misses = 0;
   void refreshSubagent(live, callId);
   if (tally.running && !live.subagentPoll) {
     live.subagentPoll = setInterval(() => {
@@ -2242,10 +2547,11 @@ async function refreshSubagent(live: Live, callId: string): Promise<void> {
   const tally = live.subagents.get(callId);
   const transcript = tally?.transcript;
   if (!tally || !transcript) return;
-  const first = transcript.offset === 0;
+  const first = !tally.read;
   try {
     const changed = await readClaudeSubagentTranscript(transcript);
     if (live.subagents.get(callId) !== tally) return;
+    tally.read = true;
     if (first) {
       live.onEvent({
         type: "agent.run",
@@ -2253,13 +2559,51 @@ async function refreshSubagent(live: Live, callId: string): Promise<void> {
         transcriptPath: transcript.path,
       });
     }
-    if (changed || first) emitSubagentUsage(live, callId);
+    if (changed || first) {
+      emitSubagentTrail(live, callId, tally, transcript);
+      emitSubagentUsage(live, callId);
+    }
   } catch {
+    if (live.subagents.get(callId) !== tally) return;
+    // A file not written yet is looked for again while the run works.
+    if (!tally.read && tally.running && ++tally.misses < TRANSCRIPT_MISSES) {
+      return;
+    }
     // An unreadable transcript (removed, or on a host without the reader)
     // leaves the stream's own numbers in charge.
-    if (live.subagents.get(callId) !== tally) return;
     tally.transcript = undefined;
     emitSubagentUsage(live, callId);
+  }
+}
+
+/**
+ * What a workflow's agent did, from its transcript: the model it ran on, the
+ * brief it was given, and each step since the last read, under the ids the
+ * stream would have used.
+ */
+function emitSubagentTrail(
+  live: Live,
+  callId: string,
+  tally: SubagentTally,
+  transcript: ClaudeSubagentTranscript,
+): void {
+  const trail = tally.trail;
+  if (!trail || live.muteUpdates) return;
+  if (transcript.model && transcript.model !== trail.model) {
+    trail.model = transcript.model;
+    live.onEvent({
+      type: "tool.updated",
+      callId,
+      kind: "agent",
+      agentModel: transcript.model,
+    });
+  }
+  if (transcript.brief && transcript.brief !== trail.brief) {
+    trail.brief = transcript.brief;
+    live.onEvent({ type: "agent.run", callId, prompt: transcript.brief });
+  }
+  for (const step of takeClaudeTranscriptSteps(transcript, MAX_AGENT_STEPS)) {
+    live.onEvent({ type: "agent.step", callId, ...step });
   }
 }
 
@@ -2276,12 +2620,13 @@ function emitSubagentUsage(live: Live, callId: string): void {
   if (live.muteUpdates) return;
   const tally = live.subagents.get(callId);
   if (!tally) return;
-  const counted = tally.transcript
-    ? claudeSubagentUsage(tally.transcript)
+  const transcript = tally.read ? tally.transcript : undefined;
+  const counted = transcript
+    ? claudeSubagentUsage(transcript)
     : usageFromRequests(tally.streamed, tally.lastStreamed);
   const task = tally.task;
   if (!counted && !task) return;
-  const model = tally.transcript?.model ?? tally.model;
+  const model = transcript?.model ?? tally.model;
   const window = model ? live.modelWindows.get(model) : undefined;
   live.onEvent({
     type: "agent.run",

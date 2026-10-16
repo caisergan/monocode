@@ -1106,7 +1106,7 @@ function fillPreview(
  * thousands of calls long; the transcript only ever shows a window of it, and
  * an unbounded array would grow the saved session without bound.
  */
-const MAX_AGENT_STEPS = 300;
+export const MAX_AGENT_STEPS = 300;
 
 const MAX_AGENT_STEP_CHARS = 2_000;
 

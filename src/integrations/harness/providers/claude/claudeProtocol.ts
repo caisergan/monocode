@@ -687,6 +687,18 @@ export function isAgentTaskType(taskType: string | undefined): boolean {
   return key === "local_agent" || key === "remote_agent";
 }
 
+/**
+ * A Workflow run: a script Claude runs in the background. It is one task, but
+ * the agents it starts are not tasks of their own.
+ */
+export function isWorkflowTaskType(taskType: string | undefined): boolean {
+  return (taskType ?? "").toLowerCase() === "local_workflow";
+}
+
+export function isWorkflowToolName(name: string): boolean {
+  return name.trim().toLowerCase() === "workflow";
+}
+
 export type ClaudeAgentTaskStarted = {
   taskId: string;
   toolUseId?: string;
@@ -761,6 +773,36 @@ export type ClaudeAgentTaskProgress = {
   lastToolName?: string;
   summary?: string;
   usage?: ClaudeTaskUsage;
+  /**
+   * A workflow's agents, when the task is a workflow. Claude sends the whole
+   * list when one of them starts or ends, and now and then while they work;
+   * the progress in between leaves it out.
+   */
+  workflowAgents?: ClaudeWorkflowAgent[];
+};
+
+/**
+ * One of a workflow's agents as its progress lists it. Claude passes the list
+ * on as it keeps it, so these keys are camelCase where the event's are not.
+ */
+export type ClaudeWorkflowAgent = {
+  /** Its place among the script's agent calls, which a retry keeps. */
+  index: number;
+  label: string;
+  phase?: string;
+  /** Set once the agent has started; its transcript is named after it. */
+  agentId?: string;
+  agentType?: string;
+  /** "start", "progress", "done" or "error". A queued agent is "start" too. */
+  state: string;
+  startedAt?: number;
+  toolCalls?: number;
+  durationMs?: number;
+  error?: string;
+  /** The user skipped it in Claude Code; it did not fail on its own. */
+  skipped: boolean;
+  resultPreview?: string;
+  promptPreview?: string;
 };
 
 export function parseTaskProgress(
@@ -774,6 +816,7 @@ export function parseTaskProgress(
   }
   const taskId = stringField(rec, "task_id");
   if (!taskId) return null;
+  const agents = workflowAgents(rec.workflow_progress);
   return {
     taskId,
     toolUseId: stringField(rec, "tool_use_id"),
@@ -782,7 +825,52 @@ export function parseTaskProgress(
     lastToolName: stringField(rec, "last_tool_name"),
     summary: stringField(rec, "summary"),
     usage: taskUsage(rec.usage),
+    ...(agents ? { workflowAgents: agents } : {}),
   };
+}
+
+/** The agents in a workflow's progress list, without its phases and logs. */
+function workflowAgents(value: unknown): ClaudeWorkflowAgent[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.flatMap((item): ClaudeWorkflowAgent[] => {
+    const entry = asRecord(item);
+    if (!entry || stringField(entry, "type") !== "workflow_agent") return [];
+    const index = count(entry.index);
+    const state = stringField(entry, "state");
+    if (index === undefined || !state) return [];
+    const text = (key: string) => {
+      const value = stringField(entry, key);
+      return value ? { [key]: value } : {};
+    };
+    const number = (key: string) => {
+      const value = count(entry[key]);
+      return value !== undefined ? { [key]: value } : {};
+    };
+    const phase = stringField(entry, "phaseTitle");
+    return [
+      {
+        index,
+        label: stringField(entry, "label") ?? `Agent ${index}`,
+        ...(phase ? { phase } : {}),
+        ...text("agentId"),
+        ...text("agentType"),
+        state,
+        ...number("startedAt"),
+        ...number("toolCalls"),
+        ...number("durationMs"),
+        ...text("error"),
+        skipped: entry.skipped === true,
+        ...text("resultPreview"),
+        ...text("promptPreview"),
+      },
+    ];
+  });
+}
+
+function count(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
 }
 
 export type ClaudeAgentTaskUpdated = {
@@ -872,6 +960,26 @@ export function agentLaunchFromToolResult(
     ...(agentId ? { agentId } : {}),
     ...(outputFile ? { outputFile } : {}),
     ...(prompt ? { prompt } : {}),
+  };
+}
+
+/**
+ * What the Workflow tool's own result says about the run it started: its task,
+ * and the folder each of its agents writes its transcript to. A script that
+ * failed to compile reports a task but no folder; it never runs.
+ */
+export function workflowLaunchFromToolResult(
+  rec: Record<string, unknown>,
+): { taskId?: string; transcriptDir?: string } | undefined {
+  const result = asRecord(rec.tool_use_result) ?? asRecord(rec.toolUseResult);
+  if (!result || !isWorkflowTaskType(stringField(result, "taskType"))) {
+    return undefined;
+  }
+  const taskId = stringField(result, "taskId");
+  const transcriptDir = stringField(result, "transcriptDir");
+  return {
+    ...(taskId ? { taskId } : {}),
+    ...(transcriptDir ? { transcriptDir } : {}),
   };
 }
 

@@ -41,7 +41,9 @@ import {
   turnStatusFromResult,
   turnMetricsFromResult,
   isUsageLimitResult,
+  isWorkflowTaskType,
   usageLimitFromRateLimitEvent,
+  workflowLaunchFromToolResult,
 } from "./claudeProtocol";
 
 describe("runtimeModeToPermission", () => {
@@ -1154,6 +1156,150 @@ describe("subagent messages", () => {
         tool_name: "Bash",
       }),
     ).toMatchObject({ toolUseId: "toolu_bash", toolName: "Bash" });
+  });
+
+  it("reads a workflow's agents from its progress, in the list's own casing", () => {
+    const progress = parseTaskProgress({
+      type: "system",
+      subtype: "task_progress",
+      task_id: "w1",
+      tool_use_id: "toolu_workflow",
+      description: "Ara: akbank",
+      usage: { total_tokens: 393_000, tool_uses: 82, duration_ms: 27_000 },
+      workflow_progress: [
+        { type: "workflow_phase", index: 1, title: "Ara" },
+        {
+          type: "workflow_agent",
+          index: 1,
+          label: "boyner",
+          phaseTitle: "Ara",
+          state: "start",
+          queuedAt: 1,
+        },
+        {
+          type: "workflow_agent",
+          index: 2,
+          label: "ing-turkiye",
+          phaseTitle: "Ara",
+          agentId: "a748",
+          model: "haiku",
+          state: "progress",
+          startedAt: 1_000,
+          tokens: 90_000,
+          toolCalls: 28,
+          promptPreview: "Find ING's interview stages",
+        },
+        {
+          type: "workflow_agent",
+          index: 3,
+          label: "turksat",
+          agentId: "acdb",
+          state: "done",
+          toolCalls: 4,
+          durationMs: 9_000,
+          resultPreview: '{"found":true}',
+        },
+        {
+          type: "workflow_agent",
+          index: 4,
+          label: "akbank",
+          agentId: "ad16",
+          state: "error",
+          error: "skipped by user",
+          skipped: true,
+        },
+        { type: "workflow_log", message: "half way" },
+      ],
+    });
+    expect(progress?.workflowAgents).toEqual([
+      {
+        index: 1,
+        label: "boyner",
+        phase: "Ara",
+        state: "start",
+        skipped: false,
+      },
+      {
+        index: 2,
+        label: "ing-turkiye",
+        phase: "Ara",
+        agentId: "a748",
+        state: "progress",
+        startedAt: 1_000,
+        toolCalls: 28,
+        skipped: false,
+        promptPreview: "Find ING's interview stages",
+      },
+      {
+        index: 3,
+        label: "turksat",
+        agentId: "acdb",
+        state: "done",
+        toolCalls: 4,
+        durationMs: 9_000,
+        skipped: false,
+        resultPreview: '{"found":true}',
+      },
+      {
+        index: 4,
+        label: "akbank",
+        agentId: "ad16",
+        state: "error",
+        error: "skipped by user",
+        skipped: true,
+      },
+    ]);
+    // Progress between two lists leaves the list out: no list, not no agents.
+    expect(
+      parseTaskProgress({
+        type: "system",
+        subtype: "task_progress",
+        task_id: "w1",
+        description: "Ara: akbank",
+      })?.workflowAgents,
+    ).toBeUndefined();
+  });
+
+  it("reads where a workflow's agents write their transcripts", () => {
+    expect(
+      workflowLaunchFromToolResult({
+        type: "user",
+        tool_use_result: {
+          status: "async_launched",
+          taskId: "w7eg4s2h6",
+          taskType: "local_workflow",
+          workflowName: "company-stages",
+          runId: "wf_0ceec824-df9",
+          transcriptDir: "/p/sess/subagents/workflows/wf_0ceec824-df9",
+          scriptPath: "/p/sess/workflows/scripts/company-stages.js",
+        },
+      }),
+    ).toEqual({
+      taskId: "w7eg4s2h6",
+      transcriptDir: "/p/sess/subagents/workflows/wf_0ceec824-df9",
+    });
+    // A script that didn't compile never runs, so it has no folder.
+    expect(
+      workflowLaunchFromToolResult({
+        tool_use_result: {
+          status: "async_launched",
+          taskId: "w2",
+          taskType: "local_workflow",
+          error: "Unexpected token",
+        },
+      }),
+    ).toEqual({ taskId: "w2" });
+    expect(
+      workflowLaunchFromToolResult({
+        tool_use_result: {
+          status: "async_launched",
+          agentId: "a1",
+          outputFile: "/tmp/tasks/a1.output",
+        },
+      }),
+    ).toBeUndefined();
+    expect(isWorkflowTaskType("local_workflow")).toBe(true);
+    expect(isWorkflowTaskType("local_agent")).toBe(false);
   });
 });
 
