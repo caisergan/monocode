@@ -81,6 +81,21 @@ describe("ComposerAction", () => {
     expect(typed).toContain('aria-label="Stop"');
     expect(typed).not.toContain('aria-label="Send"');
   });
+
+  it("shows the queue icon when the message will wait", () => {
+    const queued = renderToStaticMarkup(
+      createElement(ComposerAction, {
+        busy: true,
+        hasValue: true,
+        label: "Add to queue",
+        queue: true,
+        onSend: vi.fn(),
+        onStop: vi.fn(),
+      }),
+    );
+    expect(queued).toContain('aria-label="Add to queue"');
+    expect(queued).toContain("composer-send-icon");
+  });
 });
 
 describe("Composer question focus", () => {
@@ -210,6 +225,72 @@ describe("Composer question focus", () => {
     expect(onBtwCommand).toHaveBeenCalledWith(text);
     expect(onSubmit).not.toHaveBeenCalled();
     expect(textarea.value).toBe("");
+  });
+
+  it.each([
+    ["while a turn runs", true],
+    ["between turns", false],
+  ])("hands a `/queue` message over to wait %s", async (_, busy) => {
+    const onSubmit = vi.fn();
+    await renderComposer(
+      undefined,
+      vi.fn(),
+      busy,
+      0,
+      "/queue run the tests",
+      undefined,
+      onSubmit,
+    );
+    const textarea = container.querySelector("textarea")!;
+    if (busy) {
+      expect(container.textContent).toContain("Queue");
+      expect(
+        container.querySelector('[aria-label="Add to queue"]'),
+      ).not.toBeNull();
+    }
+    await act(async () =>
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          bubbles: true,
+          cancelable: true,
+        }),
+      ),
+    );
+    expect(onSubmit).toHaveBeenCalledWith(
+      "run the tests",
+      [],
+      expect.objectContaining({ intent: "default", queue: true }),
+    );
+    expect(textarea.value).toBe("");
+  });
+
+  it("sends a plain follow-up without asking it to wait", async () => {
+    const onSubmit = vi.fn();
+    await renderComposer(
+      undefined,
+      vi.fn(),
+      true,
+      0,
+      "run the tests",
+      undefined,
+      onSubmit,
+    );
+    const textarea = container.querySelector("textarea")!;
+    await act(async () =>
+      textarea.dispatchEvent(
+        new KeyboardEvent("keydown", {
+          key: "Enter",
+          bubbles: true,
+          cancelable: true,
+        }),
+      ),
+    );
+    expect(onSubmit).toHaveBeenCalledWith(
+      "run the tests",
+      [],
+      expect.not.objectContaining({ queue: true }),
+    );
   });
 
   async function typeInto(textarea: HTMLTextAreaElement, value: string) {

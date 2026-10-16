@@ -7350,6 +7350,46 @@ function Workspace({
         });
       }
 
+      const queueFollowUp = () => {
+        setSessions((prev) =>
+          prev.map((s) =>
+            s.id === sessionId
+              ? {
+                  ...s,
+                  inboxCard: rawCommand ? s.inboxCard : undefined,
+                  noteCard: rawCommand ? s.noteCard : undefined,
+                  handoffCard: rawCommand ? s.handoffCard : undefined,
+                  queuedMessages: [
+                    ...(s.queuedMessages ?? []),
+                    {
+                      id: crypto.randomUUID(),
+                      text,
+                      attachments,
+                      noteCard,
+                      handoffCard,
+                      intent,
+                    },
+                  ],
+                  queueStatus: s.queueStatus === "paused" ? "paused" : "active",
+                }
+              : s,
+          ),
+        );
+        dismissNoticesForContinuedSession(sessionId);
+        return true;
+      };
+
+      // Between turns, `/queue` still lines up behind messages already
+      // waiting (a paused queue, or a head about to go) instead of jumping them.
+      if (
+        options?.queue &&
+        !options.queuedMessageId &&
+        !current.busy &&
+        current.queuedMessages?.length
+      ) {
+        return queueFollowUp();
+      }
+
       if (current.busy && !pendingSwitch) {
         if (
           operatorCommand.matched &&
@@ -7382,36 +7422,10 @@ function Workspace({
                 ? steerable
                   ? "steer"
                   : "queue"
-                : (options?.followUpBehavior ?? loadFollowUpBehavior());
-        if (followUpBehavior === "queue") {
-          setSessions((prev) =>
-            prev.map((s) =>
-              s.id === sessionId
-                ? {
-                    ...s,
-                    inboxCard: rawCommand ? s.inboxCard : undefined,
-                    noteCard: rawCommand ? s.noteCard : undefined,
-                    handoffCard: rawCommand ? s.handoffCard : undefined,
-                    queuedMessages: [
-                      ...(s.queuedMessages ?? []),
-                      {
-                        id: crypto.randomUUID(),
-                        text,
-                        attachments,
-                        noteCard,
-                        handoffCard,
-                        intent,
-                      },
-                    ],
-                    queueStatus:
-                      s.queueStatus === "paused" ? "paused" : "active",
-                  }
-                : s,
-            ),
-          );
-          dismissNoticesForContinuedSession(sessionId);
-          return true;
-        }
+                : options?.queue
+                  ? "queue"
+                  : (options?.followUpBehavior ?? loadFollowUpBehavior());
+        if (followUpBehavior === "queue") return queueFollowUp();
         if (!steerable) {
           // Harnesses that cannot steer (fx) used to drop the message on the
           // floor here, so a follow-up sent mid-turn just vanished. Say so.

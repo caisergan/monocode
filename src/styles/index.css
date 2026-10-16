@@ -2289,6 +2289,127 @@ header[data-tauri-drag-region] button {
   }
 }
 
+/* `/queue` and its pill wear the user's accent, as the bubble a queued
+   message becomes does. Mixed toward the text color to read on either theme. */
+.queue-accent,
+.queue-pill {
+  color: color-mix(
+    in srgb,
+    var(--user-accent-color, var(--color-accent)) 72%,
+    var(--color-content)
+  );
+}
+
+.queue-pill {
+  background: color-mix(
+    in srgb,
+    var(--user-accent-color, var(--color-accent)) 14%,
+    transparent
+  );
+}
+
+.queue-pill:hover {
+  background: color-mix(
+    in srgb,
+    var(--user-accent-color, var(--color-accent)) 20%,
+    transparent
+  );
+}
+
+/* Send turning into "Add to queue" swaps its icon with a small drop. */
+.composer-send-icon {
+  animation: composer-send-icon-in 200ms cubic-bezier(0.22, 1, 0.36, 1)
+    backwards;
+}
+
+@keyframes composer-send-icon-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px);
+  }
+}
+
+/* The queue rises out of the composer, and folds back into it when empty. */
+.message-queue {
+  display: grid;
+  grid-template-rows: 1fr;
+  opacity: 1;
+  transition:
+    grid-template-rows 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 180ms ease;
+  animation: message-queue-in 260ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+.message-queue[data-open="false"] {
+  grid-template-rows: 0fr;
+  opacity: 0;
+}
+
+@keyframes message-queue-in {
+  from {
+    grid-template-rows: 0fr;
+    opacity: 0;
+  }
+}
+
+.message-queue > *,
+.message-queue-row > * {
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* A row grows in when queued behind others, and folds shut once it is sent
+   or removed, so the card's top edge glides rather than jumps. */
+.message-queue-row {
+  display: grid;
+  grid-template-rows: 1fr;
+  transition:
+    grid-template-rows 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 160ms ease;
+}
+
+.message-queue-row[data-entering] {
+  animation:
+    message-queue-row-in 260ms cubic-bezier(0.22, 1, 0.36, 1) backwards,
+    message-queue-row-flash 1400ms ease-out;
+}
+
+.message-queue-row[data-leaving] {
+  grid-template-rows: 0fr;
+  opacity: 0;
+}
+
+@keyframes message-queue-row-in {
+  from {
+    grid-template-rows: 0fr;
+    opacity: 0;
+  }
+}
+
+/* A light wash marks the row just queued, then lets it settle in. */
+@keyframes message-queue-row-flash {
+  from {
+    background: color-mix(
+      in srgb,
+      var(--user-accent-color, var(--color-accent)) 12%,
+      transparent
+    );
+  }
+  to {
+    background: transparent;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .composer-send-icon,
+  .message-queue,
+  .message-queue-row,
+  .message-queue-row[data-entering] {
+    animation: none;
+    transition: none;
+  }
+}
+
 /* Two-frame mascot loop — a hard swap plus a one-pixel hop, arcade style. */
 .mascot-active {
   animation: mascot-hop var(--mascot-beat, 460ms) infinite;

@@ -2,6 +2,7 @@ import {
   AiIdea,
   CircleDashed,
   CursorMagicSelection,
+  ListEnd,
   MessageSquare,
   Share,
   X,
@@ -11,6 +12,7 @@ import { DRAFT_COMMAND } from "../model/draftCommand";
 import { OPERATOR_COMMAND } from "../model/operatorCommand";
 import { ORCHESTRATOR_COMMAND } from "../model/orchestratorCommand";
 import { PLAN_COMMAND } from "../model/plan";
+import { QUEUE_COMMAND } from "../model/queueCommand";
 
 type ModeCommandStyle = {
   Icon: typeof AiIdea;
@@ -81,6 +83,22 @@ export const MODE_COMMAND_STYLES: Record<string, ModeCommandStyle> = {
       label: "Draft",
       description: "Save this message without starting the agent",
       iconClassName: "text-content/60",
+    },
+  },
+  // A queued message is still the user's own, so it wears their accent, as
+  // their bubbles do.
+  [QUEUE_COMMAND.name]: {
+    Icon: ListEnd,
+    className: "queue-accent",
+    pill: {
+      label: "Queue",
+      title: "Queue",
+      className: "queue-pill",
+    },
+    menu: {
+      label: "Queue",
+      description: "Send after the current turn finishes",
+      iconClassName: "queue-accent",
     },
   },
   [BTW_COMMAND.name]: {

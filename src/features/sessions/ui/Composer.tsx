@@ -5,6 +5,7 @@ import {
   CircleDashed,
   CursorMagicSelection,
   FilePlus,
+  ListEnd,
   Plus,
   Share,
   Square,
@@ -82,6 +83,7 @@ import type {
   ComposerTurnOptions,
 } from "../model/session";
 import { HARNESS_TITLE, harnessSupportsAttachments } from "../model/session";
+import { canSteerHarness } from "../../../integrations/harness/core/registry";
 import type {
   UserQuestionPrompt,
   UserQuestionReply,
@@ -140,6 +142,7 @@ import {
   COMPOSER_RUNNER_CHANGE_EVENT,
   loadComposerRunner,
   loadConfirmExpiredCacheSend,
+  loadFollowUpBehavior,
   loadModelControls,
   loadNotesEnabled,
   subscribeModelControls,
@@ -168,6 +171,7 @@ import {
   ORCHESTRATOR_COMMAND,
 } from "../model/orchestratorCommand";
 import { consumeDraftCommand, DRAFT_COMMAND } from "../model/draftCommand";
+import { consumeQueueCommand, QUEUE_COMMAND } from "../model/queueCommand";
 import {
   leadingModeCommand,
   MODE_COMMAND_INDENT,
@@ -503,6 +507,7 @@ export function Composer({
   const [operatorSelected, setOperatorSelected] = useState(false);
   const [orchestrationSelected, setOrchestrationSelected] = useState(false);
   const [draftSelected, setDraftSelected] = useState(false);
+  const [queueSelected, setQueueSelected] = useState(false);
   const [slash, setSlash] = useState<SlashToken | null>(null);
   const [skillActive, setSkillActive] = useState(0);
   const [creatingSkill, setCreatingSkill] = useState(false);
@@ -581,6 +586,7 @@ export function Composer({
             ...(hideTopBar ? [] : [ORCHESTRATOR_COMMAND]),
             PLAN_COMMAND,
             ...(canSaveDraft && onSaveDraft ? [DRAFT_COMMAND] : []),
+            QUEUE_COMMAND,
             COMPACT_COMMAND,
             ...(supportsBtwHarness(harness) ? [BTW_COMMAND] : []),
             ...skills.filter(
@@ -595,6 +601,7 @@ export function Composer({
                     skill.name !== MCP_COMMAND.name &&
                     skill.name !== ORCHESTRATOR_COMMAND.name &&
                     skill.name !== DRAFT_COMMAND.name &&
+                    skill.name !== QUEUE_COMMAND.name &&
                     skill.name !== BTW_COMMAND.name)),
             ),
           ],
@@ -671,6 +678,10 @@ export function Composer({
     orchestrationSelected || leadingMode?.name === ORCHESTRATOR_COMMAND.name;
   const draftActive = draftSelected || leadingMode?.name === DRAFT_COMMAND.name;
   const planActive = planSelected || leadingMode?.name === PLAN_COMMAND.name;
+  const queueActive =
+    !remote && (queueSelected || leadingMode?.name === QUEUE_COMMAND.name);
+  // With nothing running and nothing waiting, a queued message just sends.
+  const queueing = queueActive && (busy || queuedMessages.length > 0);
 
   /** Turning a mode off also drops its leading command from the text. */
   const clearLeadingMode = (name: string) => {
@@ -961,6 +972,7 @@ export function Composer({
     setDraft("");
     onDraftChange?.("");
     setDraftSelected(false);
+    setQueueSelected(false);
     setPlanSelected(false);
     setOrchestrationSelected(false);
     setSessionFolderSelected(false);
@@ -1409,10 +1421,18 @@ export function Composer({
       return;
     }
 
-    const command = consumePlanCommand(
+    const queueCommand = consumeQueueCommand(
       folderCommand.matched && sessionFolderSelected
         ? folderCommand.text
         : value,
+    );
+    const queued = !remote && (queueSelected || queueCommand.matched);
+    const command = consumePlanCommand(
+      queued
+        ? queueCommand.text
+        : folderCommand.matched && sessionFolderSelected
+          ? folderCommand.text
+          : value,
     );
     const orchestratorCommand =
       !remote && !hideTopBar && !command.planning
@@ -1463,6 +1483,7 @@ export function Composer({
             : orchestrationSelected || orchestratorCommand.matched
               ? "orchestrate"
               : "default",
+        ...(queued ? { queue: true } : {}),
         ...(resendEdited
           ? {
               resendEdited: true,
@@ -1500,6 +1521,7 @@ export function Composer({
     setPlanSelected(false);
     setOperatorSelected(false);
     setOrchestrationSelected(false);
+    setQueueSelected(false);
     setSessionFolderSelected(false);
     setSessionFolderOpen(false);
     setPlusOpen(false);
@@ -2118,9 +2140,14 @@ export function Composer({
                       : handoffCard
                         ? "Add context, or send to continue…"
                         : (placeholder ??
-                          (shell
-                            ? "Ask, build, / for commands, @ for references... "
-                            : "Ask, build, / for commands, @ for references... "))
+                          (busy && !remote
+                            ? loadFollowUpBehavior() === "steer" &&
+                              canSteerHarness(harness)
+                              ? "Steer now, or /queue it for after this turn…"
+                              : "Queue a follow-up for after this turn…"
+                            : shell
+                              ? "Ask, build, / for commands, @ for references... "
+                              : "Ask, build, / for commands, @ for references... "))
               }
               aria-label={inputAriaLabel}
               disabled={disabled}
@@ -2312,6 +2339,7 @@ export function Composer({
                         setPlanSelected(false);
                         setOperatorSelected(false);
                         setOrchestrationSelected(false);
+                        setQueueSelected(false);
                         setPlusOpen(false);
                         ref.current?.focus();
                       }}
@@ -2326,6 +2354,32 @@ export function Composer({
                       </span>
                       {draftActive ? (
                         <Check className="mt-0.5 size-3.5 shrink-0 text-accent" />
+                      ) : null}
+                    </button>
+                  ) : null}
+                  {!remote && (busy || queuedMessages.length > 0) ? (
+                    <button
+                      type="button"
+                      aria-pressed={queueActive}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onClick={() => {
+                        setQueueSelected(!queueActive);
+                        if (queueActive) clearLeadingMode(QUEUE_COMMAND.name);
+                        setDraftSelected(false);
+                        setPlusOpen(false);
+                        ref.current?.focus();
+                      }}
+                      className="flex w-full items-start gap-2.5 rounded-lg px-2 py-2 text-left text-content hover:bg-content/10"
+                    >
+                      <ListEnd className="queue-accent mt-0.5 size-4 shrink-0" />
+                      <span className="min-w-0 flex-1">
+                        <span className="block text-[13px]">Queue</span>
+                        <span className="block truncate whitespace-nowrap text-[11px] leading-4 text-content/45">
+                          Send after the current turn finishes
+                        </span>
+                      </span>
+                      {queueActive ? (
+                        <Check className="queue-accent mt-0.5 size-3.5 shrink-0" />
                       ) : null}
                     </button>
                   ) : null}
@@ -2368,6 +2422,16 @@ export function Composer({
                 onClear={() => {
                   setDraftSelected(false);
                   clearLeadingMode(DRAFT_COMMAND.name);
+                  ref.current?.focus();
+                }}
+              />
+            ) : null}
+            {!compact && queueActive ? (
+              <ModeCommandPill
+                name={QUEUE_COMMAND.name}
+                onClear={() => {
+                  setQueueSelected(false);
+                  clearLeadingMode(QUEUE_COMMAND.name);
                   ref.current?.focus();
                 }}
               />
@@ -2470,7 +2534,14 @@ export function Composer({
                 disabled={disabled}
                 hasValue={hasValue && !worktreeRemoved}
                 allowBusySubmit={allowBusySubmit}
-                label={draftActive ? "Save draft" : "Send"}
+                label={
+                  draftActive
+                    ? "Save draft"
+                    : queueing
+                      ? "Add to queue"
+                      : "Send"
+                }
+                queue={queueing}
                 onSend={() => submit(ref.current?.value ?? "")}
                 onStop={() => onStop?.()}
               />
@@ -2605,6 +2676,7 @@ export function ComposerAction({
   hasValue,
   allowBusySubmit = true,
   label = "Send",
+  queue = false,
   onSend,
   onStop,
 }: {
@@ -2613,9 +2685,16 @@ export function ComposerAction({
   hasValue: boolean;
   allowBusySubmit?: boolean;
   label?: string;
+  /** The message waits in the queue rather than going out now. */
+  queue?: boolean;
   onSend: () => void;
   onStop: () => void;
 }) {
+  const icon = queue ? (
+    <ListEnd key="queue" className="composer-send-icon size-3.5" />
+  ) : (
+    <ArrowUp key="send" className="size-3.5" strokeWidth={2.25} />
+  );
   if (disabled) {
     return (
       <button
@@ -2638,7 +2717,7 @@ export function ComposerAction({
         onClick={onSend}
         className="composer-send primary-action grid size-6.5 place-items-center rounded-md"
       >
-        <ArrowUp className="size-3.5" strokeWidth={2.25} />
+        {icon}
       </button>
     ) : (
       <button
@@ -2662,7 +2741,7 @@ export function ComposerAction({
       onClick={onSend}
       className="composer-send primary-action grid size-6.5 place-items-center rounded-md disabled:cursor-default"
     >
-      <ArrowUp className="size-3.5" strokeWidth={2.25} />
+      {icon}
     </button>
   );
 }
