@@ -8,7 +8,6 @@ import {
   closeSubagentSheet,
   peekSubagentSheet,
 } from "../../features/sessions/model/subagentSheets";
-import { subagentsListed } from "../../features/sessions/model/subagentListing";
 import { Sidebar } from "./Sidebar";
 
 // Keep native services out of these sidebar interaction tests.
@@ -153,20 +152,4 @@ it("folds the tree from the card's count without opening the session", async () 
   act(() => toggle.click());
   expect(tree()?.getAttribute("data-open")).toBe("true");
   expect(props.onSelectSession).not.toHaveBeenCalled();
-});
-
-it("lists the session on the Sessions tab, so the composer's dock stands aside", async () => {
-  await act(async () => render());
-  expect(subagentsListed(SESSION)).toBe(true);
-  props = { ...props, tab: "files" };
-  act(() => render());
-  await act(settle);
-  expect(subagentsListed(SESSION)).toBe(false);
-  props = { ...props, tab: "sessions" };
-  act(() => render());
-  expect(subagentsListed(SESSION)).toBe(true);
-  act(() => root.unmount());
-  await settle();
-  expect(subagentsListed(SESSION)).toBe(false);
-  root = createRoot(container);
 });

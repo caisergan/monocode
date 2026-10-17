@@ -1,13 +1,11 @@
 import {
   memo,
-  useEffect,
   useRef,
   useState,
   useSyncExternalStore,
 } from "react";
 import { ChevronDown, ChevronRight } from "../../../shared/ui/icons";
 import { Popover } from "../../../shared/ui/Popover";
-import { listSubagents } from "../model/subagentListing";
 import {
   subagentSummaryElapsedMs,
   type SubagentSummary,
@@ -29,18 +27,6 @@ import {
 /** The tree's element id, so the card's toggle can name what it controls. */
 export function subagentTreeId(sessionId: string): string {
   return `subagent-tree-${sessionId}`;
-}
-
-/**
- * Lists the session's runs in the sidebar while `listed`, so the composer's
- * dock stands aside for it. Held by the card's row rather than by the tree,
- * so the dock is already away when the first run starts.
- */
-export function useSubagentListing(sessionId: string, listed: boolean) {
-  useEffect(
-    () => (listed ? listSubagents(sessionId) : undefined),
-    [sessionId, listed],
-  );
 }
 
 /**
