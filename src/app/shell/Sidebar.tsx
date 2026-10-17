@@ -174,7 +174,6 @@ import { HarnessIcon } from "../../features/sessions/ui/HarnessIcon";
 import {
   SubagentTree,
   SubagentTreeToggle,
-  useSubagentListing,
 } from "../../features/sessions/ui/SubagentTree";
 import type { SubagentSummary } from "../../features/sessions/model/subagentRuns";
 import { LiveAgentsPreview } from "../../features/sessions/ui/LiveAgentsPreview";
@@ -1641,10 +1640,6 @@ function SidebarComponent({
     for (const session of listedSessions) motion.seen.add(session.id);
   });
 
-  // Rows on the Sessions tab list their session's runs, so the composer's
-  // dock stands aside for them. A host's runs aren't listed here.
-  const subagentsListed = tab === "sessions" && !remoteProject;
-
   const renderSessionCard = (session: SessionSummary, compact = false) => {
     const isActive = session.id === activeListedSessionId;
     const busy = listedBusySessionIds.has(session.id);
@@ -2082,7 +2077,6 @@ function SidebarComponent({
                                     session={session}
                                     cwd={cwd}
                                     motion={sessionInsertMotion}
-                                    listsSubagents={subagentsListed}
                                   >
                                     {renderSessionCard(session, true)}
                                   </SessionListItem>
@@ -2214,7 +2208,6 @@ function SidebarComponent({
                                       session={session}
                                       cwd={cwd}
                                       motion={sessionInsertMotion}
-                                      listsSubagents={subagentsListed}
                                     >
                                       {renderSessionCard(session, true)}
                                     </SessionListItem>
@@ -2255,7 +2248,6 @@ function SidebarComponent({
                         session={entry.session}
                         cwd={cwd}
                         motion={sessionInsertMotion}
-                        listsSubagents={subagentsListed}
                       >
                         {renderSessionCard(entry.session)}
                       </SessionListItem>
@@ -3250,18 +3242,14 @@ function SessionListItem({
   session,
   cwd,
   motion,
-  listsSubagents,
   children,
 }: {
   session: SessionSummary;
   cwd: string;
   motion: RefObject<SessionInsertMotion>;
-  /** Shown where its subagents can be listed beneath it. */
-  listsSubagents: boolean;
   children: ReactNode;
 }) {
   const ref = useRef<HTMLLIElement>(null);
-  useSubagentListing(session.id, listsSubagents);
   // Decided once per row: effects can replay (StrictMode, reordering), and a
   // row that already slid in must not do it again.
   const played = useRef(false);

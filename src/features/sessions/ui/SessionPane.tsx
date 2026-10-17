@@ -37,10 +37,6 @@ import {
   subscribeSubagentSheets,
   toggleSubagentSheet,
 } from "../model/subagentSheets";
-import {
-  subagentsListed,
-  subscribeSubagentListing,
-} from "../model/subagentListing";
 import { SubagentDock } from "./SubagentDock";
 import { SubagentSheet } from "./SubagentSheet";
 import {
@@ -690,9 +686,8 @@ const LocalSessionPane = memo(function LocalSessionPane({
     remoteSessionLoading ||
     (!draftBlock && (!isEmpty || inSplit || !!session.inboxAsk || !!agent));
   const composerDockMotion = useComposerDockMotion(dockComposer);
-  // The turn's delegated runs are listed under the session's card in the
-  // sidebar, or docked on the composer when the sidebar can't show them; one
-  // opens in a sheet. A Mono's chat shows its work in its own panel instead.
+  // The turn's delegated runs dock on the composer, and are listed under the
+  // session's card in the sidebar too; one opens in a sheet. A Mono's chat shows its work in its own panel instead.
   const turnSubagents = useMemo(
     () => (agent ? NO_RUNS : latestTurnSubagents(session.blocks)),
     [agent, session.blocks],
@@ -709,11 +704,6 @@ const LocalSessionPane = memo(function LocalSessionPane({
   const closeSubagent = useCallback(
     () => closeSubagentSheet(session.id),
     [session.id],
-  );
-  const subagentsInSidebar = useSyncExternalStore(
-    subscribeSubagentListing,
-    () => subagentsListed(session.id),
-    () => false,
   );
   const draftRef = useRef<string | undefined>(getComposerDraft(session.id));
   const composer = (
@@ -858,7 +848,7 @@ const LocalSessionPane = memo(function LocalSessionPane({
       onEditingLastTurnChange={setEditingLastTurn}
     >
       <SubagentDock
-        runs={subagentsInSidebar ? NO_RUNS : turnSubagents}
+        runs={turnSubagents}
         live={!!session.busy}
         selectedId={openSubagent?.id}
         onOpen={(id) => toggleSubagentSheet(session.id, id)}

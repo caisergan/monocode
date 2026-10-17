@@ -3,7 +3,6 @@ import { act, createElement, type ReactNode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { Block } from "../model/session";
-import { listSubagents } from "../model/subagentListing";
 import {
   closeSubagentSheet,
   openSubagentSheet,
@@ -36,7 +35,6 @@ vi.mock("../../orchestration/model/orchestration", async (original) => ({
 const settle = () => new Promise<void>((resolve) => queueMicrotask(resolve));
 let container: HTMLDivElement;
 let root: Root;
-const releases: (() => void)[] = [];
 
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -79,7 +77,6 @@ beforeEach(() => {
 afterEach(async () => {
   act(() => root.unmount());
   container.remove();
-  for (const release of releases.splice(0)) release();
   await settle();
   vi.unstubAllGlobals();
 });
@@ -157,28 +154,13 @@ function render(pane: SessionPaneProps) {
 const dock = () => container.querySelector("[data-subagent-dock]");
 const sheet = () => container.querySelector("[data-subagent-sheet]");
 
-it("docks the runs on the composer while the sidebar can't list them", async () => {
+it("docks the turn's runs on the composer", () => {
   render(props());
   expect(dock()).not.toBeNull();
-
-  // The sidebar lists the session: the dock folds away for its tree.
-  act(() => {
-    releases.push(listSubagents("parent"));
-  });
-  await act(() => new Promise((resolve) => setTimeout(resolve, 0)));
-  expect(dock()?.getAttribute("data-open")).toBe("false");
-  await act(() => new Promise((resolve) => setTimeout(resolve, 300)));
-  expect(dock()).toBeNull();
-});
-
-it("leaves the runs to a sidebar that already lists the session", () => {
-  releases.push(listSubagents("parent"));
-  render(props());
-  expect(dock()).toBeNull();
+  expect(dock()?.getAttribute("data-open")).toBe("true");
 });
 
 it("opens the run the sidebar chose, and closes it on leaving the session", async () => {
-  releases.push(listSubagents("parent"));
   // A sidebar row writes the run first, then brings the session forward.
   openSubagentSheet("parent", "run-b");
   render(props());
