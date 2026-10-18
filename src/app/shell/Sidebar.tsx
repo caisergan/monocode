@@ -659,11 +659,12 @@ function SidebarComponent({
   const [selectedSessionIds, setSelectedSessionIds] = useState<Set<string>>(
     () => new Set(),
   );
-  // Sessions whose subagent tree the user folded under the card. Runs come and
-  // go with each turn, so this is only remembered while the sidebar is up.
-  const [foldedSubagentIds, setFoldedSubagentIds] = useState<
-    ReadonlySet<string>
-  >(() => new Set());
+  // How the user left a session's subagent tree from the card's count: folded,
+  // or opened to stay after its turn. Runs come and go with each turn, so this
+  // is only remembered while the sidebar is up.
+  const [subagentTrees, setSubagentTrees] = useState<
+    ReadonlyMap<string, "open" | "folded">
+  >(() => new Map());
   const contextSelectionRef = useRef(false);
   const selectionAnchorRef = useRef<string | null>(null);
   const [folderMenu, setFolderMenu] = useState<{
@@ -1618,12 +1619,15 @@ function SidebarComponent({
       // A subagent row brings its session forward the way a plain click does.
       openSession: (sessionId: string) =>
         cardHandlers.current.onSessionCardSelect(sessionId, NO_MODIFIERS),
-      toggleSubagents: (sessionId: string) =>
-        setFoldedSubagentIds((current) => {
-          const next = new Set(current);
-          if (!next.delete(sessionId)) next.add(sessionId);
-          return next;
-        }),
+      // A session in the back comes forward to show its runs.
+      toggleSubagents: (sessionId: string, show: boolean, select: boolean) => {
+        setSubagentTrees((current) =>
+          new Map(current).set(sessionId, show ? "open" : "folded"),
+        );
+        if (select) {
+          cardHandlers.current.onSessionCardSelect(sessionId, NO_MODIFIERS);
+        }
+      },
     }),
     [],
   );
@@ -1645,7 +1649,11 @@ function SidebarComponent({
     const busy = listedBusySessionIds.has(session.id);
     // A host's sessions carry the host's ids, which the local runs don't use.
     const subagents = remoteProject ? undefined : subagentRuns?.get(session.id);
-    const subagentsExpanded = !foldedSubagentIds.has(session.id);
+    // Only the session in front lists its runs; the rest keep their count.
+    const subagentTree = subagentTrees.get(session.id);
+    const subagentsUnfolded = subagentTree !== "folded";
+    const subagentsShown =
+      isActive && subagentsUnfolded && (subagentTree === "open" || busy);
     return (
       <>
         {renamingSessionId === session.id && onRenameSession ? (
@@ -1669,7 +1677,7 @@ function SidebarComponent({
             linkedUpdate={linkedSessionUpdateIds.has(session.id)}
             needsApproval={listedApprovalSessionIds.has(session.id)}
             subagents={subagents}
-            subagentsExpanded={subagentsExpanded}
+            subagentsExpanded={subagentsShown}
             onToggleSubagents={cardActions.toggleSubagents}
             dropTarget={isSessionDrop("session", session.id)}
             compact={compact}
@@ -1701,7 +1709,8 @@ function SidebarComponent({
             runs={subagents ?? NO_SUBAGENTS}
             live={busy}
             active={isActive}
-            expanded={subagentsExpanded}
+            expanded={subagentsUnfolded}
+            pinned={subagentTree === "open"}
             onOpenSession={cardActions.openSession}
           />
         ) : null}
@@ -3344,9 +3353,14 @@ const SessionCard = memo(function SessionCard({
   needsApproval: boolean;
   /** Its latest turn's delegated runs, listed in the tree under the card. */
   subagents?: readonly SubagentSummary[];
-  /** The tree under the card is unfolded. */
+  /** The tree under the card is showing. */
   subagentsExpanded?: boolean;
-  onToggleSubagents?: (sessionId: string) => void;
+  /** Shows or folds the tree, selecting the session first when asked. */
+  onToggleSubagents?: (
+    sessionId: string,
+    show: boolean,
+    select: boolean,
+  ) => void;
   dropTarget?: boolean;
   compact?: boolean;
   now: number;
@@ -3379,13 +3393,6 @@ const SessionCard = memo(function SessionCard({
   const [agentsOpen, setAgentsOpen] = useState(false);
   const orchestration = session.orchestration;
   const draft = !!session.draft;
-  const workingSubagents = useMemo(
-    () =>
-      subagents
-        ?.filter((run) => run.state === "running")
-        .map((run) => run.name) ?? [],
-    [subagents],
-  );
   const orchestrationExpanded =
     !!orchestration && (isActive || isSelected || busy);
   const orchestrationDone =
@@ -3769,12 +3776,14 @@ const SessionCard = memo(function SessionCard({
                 <Archive className="size-3 shrink-0" strokeWidth={1.75} />
               </button>
             ) : null}
-            {workingSubagents.length > 0 && onToggleSubagents ? (
+            {subagents && subagents.length > 0 && onToggleSubagents ? (
               <SubagentTreeToggle
                 sessionId={session.id}
-                names={workingSubagents}
+                runs={subagents}
                 expanded={subagentsExpanded}
-                onToggle={onToggleSubagents}
+                onToggle={(id) =>
+                  onToggleSubagents(id, !subagentsExpanded, !isActive)
+                }
               />
             ) : null}
             {workItemBadge}

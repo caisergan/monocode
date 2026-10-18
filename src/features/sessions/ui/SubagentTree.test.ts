@@ -246,7 +246,7 @@ describe("subagent tree", () => {
 });
 
 describe("subagent tree toggle", () => {
-  it("counts the working runs and folds the tree, not the card", () => {
+  it("counts the turn's runs and folds the tree, not the card", () => {
     const onToggle = vi.fn();
     const onCardClick = vi.fn();
     const onCardPointerDown = vi.fn();
@@ -256,7 +256,11 @@ describe("subagent tree toggle", () => {
         { onClick: onCardClick, onPointerDown: onCardPointerDown },
         createElement(SubagentTreeToggle, {
           sessionId: "toggle",
-          names: ["Review the diff", "Run the tests"],
+          runs: [
+            run("run-a", "Review the diff", "running"),
+            run("run-b", "Run the tests", "running"),
+            run("run-c", "Map the schema", "done"),
+          ],
           expanded,
           onToggle,
         }),
@@ -265,12 +269,14 @@ describe("subagent tree toggle", () => {
     const toggle = container.querySelector<HTMLElement>(
       "[data-subagent-count]",
     )!;
-    expect(toggle.getAttribute("aria-label")).toBe("2 subagents running");
+    expect(toggle.getAttribute("aria-label")).toBe(
+      "3 subagents, 2 running",
+    );
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
     expect(toggle.getAttribute("aria-controls")).toBe(
       subagentTreeId("toggle"),
     );
-    expect(toggle.textContent).toBe("2");
+    expect(toggle.textContent).toBe("3");
 
     // Unfolded, the tree below already names them.
     act(() => {
@@ -296,5 +302,6 @@ describe("subagent tree toggle", () => {
     expect(tooltip.textContent).toContain("2 running");
     expect(tooltip.textContent).toContain("Review the diff");
     expect(tooltip.textContent).toContain("Run the tests");
+    expect(tooltip.textContent).toContain("Map the schema");
   });
 });

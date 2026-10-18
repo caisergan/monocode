@@ -124,10 +124,10 @@ it("hangs a working session's subagents beneath its card", async () => {
     expect.stringContaining("Company questions A"),
     expect.stringContaining("Level questions E"),
   ]);
-  // The card counts the ones still working.
+  // The card counts the turn's runs, finished ones too.
   expect(
     card().querySelector("[data-subagent-count]")?.getAttribute("aria-label"),
-  ).toBe("1 subagent running");
+  ).toBe("2 subagents, 1 running");
 });
 
 it("opens a run from its row without pressing on the card", async () => {
@@ -152,4 +152,55 @@ it("folds the tree from the card's count without opening the session", async () 
   act(() => toggle.click());
   expect(tree()?.getAttribute("data-open")).toBe("true");
   expect(props.onSelectSession).not.toHaveBeenCalled();
+});
+
+it("folds a session's tree once another is in front, and keeps its count", async () => {
+  props = { ...props, activeSessionId: "another-session" };
+  await act(async () => render());
+  expect(tree()?.getAttribute("data-open")).toBe("false");
+  const toggle = card().querySelector<HTMLElement>("[data-subagent-count]")!;
+  expect(toggle.textContent).toBe("2");
+  expect(toggle.getAttribute("aria-expanded")).toBe("false");
+
+  // The count brings the session forward with its runs showing.
+  act(() => toggle.click());
+  expect(props.onSelectSession).toHaveBeenCalledWith(SESSION);
+  props = { ...props, activeSessionId: SESSION };
+  act(() => render());
+  expect(tree()?.getAttribute("data-open")).toBe("true");
+});
+
+it("keeps the count after the turn, and the count opens its runs again", async () => {
+  vi.useFakeTimers();
+  props = {
+    ...props,
+    busySessionIds: new Set(),
+    subagentRuns: new Map([
+      [
+        SESSION,
+        [
+          run("run-a", "Company questions A", "done"),
+          run("run-b", "Level questions E", "done"),
+        ],
+      ],
+    ]),
+  };
+  await act(async () => render());
+  // A turn that is over shows how its runs ended for a moment, then folds.
+  await act(async () => {
+    vi.advanceTimersByTime(3_000);
+  });
+  expect(tree()?.getAttribute("data-open") ?? "false").toBe("false");
+  const toggle = card().querySelector<HTMLElement>("[data-subagent-count]")!;
+  expect(toggle.getAttribute("aria-label")).toBe("2 subagents");
+
+  act(() => toggle.click());
+  expect(tree()?.getAttribute("data-open")).toBe("true");
+  expect(toggle.getAttribute("aria-expanded")).toBe("true");
+  expect(props.onSelectSession).not.toHaveBeenCalled();
+  await act(async () => {
+    vi.advanceTimersByTime(3_000);
+  });
+  expect(tree()?.getAttribute("data-open")).toBe("true");
+  vi.useRealTimers();
 });
