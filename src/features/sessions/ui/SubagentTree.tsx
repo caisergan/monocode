@@ -31,9 +31,10 @@ export function subagentTreeId(sessionId: string): string {
 
 /**
  * A session's delegated runs, hanging off its card in the sidebar the way
- * files hang off a folder. It shows while the session works and a moment
- * after, as the dock did, and stays while one of its runs is open in front.
- * A row opens that run's sheet, bringing its session forward when it is not.
+ * files hang off a folder. Only the session in front unfolds it: it shows
+ * while the session works and a moment after, as the dock does, and stays
+ * while one of its runs is open or the user opened it from the card's count.
+ * A row opens that run's sheet.
  */
 export const SubagentTree = memo(function SubagentTree({
   sessionId,
@@ -42,6 +43,7 @@ export const SubagentTree = memo(function SubagentTree({
   live,
   active,
   expanded,
+  pinned = false,
   onOpenSession,
 }: {
   sessionId: string;
@@ -53,6 +55,8 @@ export const SubagentTree = memo(function SubagentTree({
   active: boolean;
   /** Not folded away with the card's toggle. */
   expanded: boolean;
+  /** Opened from the card's count, so it stays after the turn is over. */
+  pinned?: boolean;
   onOpenSession: (sessionId: string) => void;
 }) {
   const openId = useSyncExternalStore(
@@ -62,12 +66,12 @@ export const SubagentTree = memo(function SubagentTree({
   );
   const selectedId =
     active && runs.some((run) => run.id === openId) ? openId : null;
-  const shown = useLingeringRuns(runs, live || selectedId != null);
+  const shown = useLingeringRuns(runs, live || pinned || selectedId != null);
   const now = useSecondClock(
     shown.runs.some((run) => run.state === "running"),
   );
   if (!shown.rendered) return null;
-  const open = shown.open && expanded;
+  const open = shown.open && expanded && active;
 
   return (
     <div
@@ -163,25 +167,27 @@ function SubagentTreeRow({
 }
 
 /**
- * How many of the session's runs are working, on its card, and the switch
- * that folds the tree beneath it. The face gives way to a chevron under the
- * pointer, and while the tree is folded, hovering names who is working.
+ * How many runs the session's latest turn delegated, on its card, and the
+ * switch that unfolds the tree beneath it. The face hops while any of them
+ * works and gives way to a chevron under the pointer; while the tree is
+ * folded or the session is in the back, hovering lists the runs.
  */
 export function SubagentTreeToggle({
   sessionId,
-  names,
+  runs,
   expanded,
   onToggle,
 }: {
   sessionId: string;
-  /** Names of the runs still working. */
-  names: readonly string[];
+  runs: readonly SubagentSummary[];
   expanded: boolean;
   onToggle: (sessionId: string) => void;
 }) {
   const ref = useRef<HTMLButtonElement>(null);
   const [hovered, setHovered] = useState(false);
-  const count = names.length;
+  const count = runs.length;
+  const working = runs.filter((run) => run.state === "running").length;
+  const face = runs.find((run) => run.state === "running") ?? runs[0];
   const Chevron = expanded ? ChevronDown : ChevronRight;
   return (
     <button
@@ -190,7 +196,9 @@ export function SubagentTreeToggle({
       data-no-drag
       data-tauri-drag-region="false"
       data-subagent-count
-      aria-label={`${count} ${count === 1 ? "subagent" : "subagents"} running`}
+      aria-label={`${count} ${count === 1 ? "subagent" : "subagents"}${
+        working > 0 ? `, ${working} running` : ""
+      }`}
       aria-expanded={expanded}
       aria-controls={subagentTreeId(sessionId)}
       // The card takes the pointer on press for dragging; keep it off this.
@@ -202,12 +210,14 @@ export function SubagentTreeToggle({
       }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
-      className="group/subagents subagent-chip flex h-5 shrink-0 items-center gap-1 rounded-md px-1 text-[11px] tabular-nums text-content/60 outline-none hover:bg-content/10 hover:text-content focus-visible:ring-1 focus-visible:ring-accent/50"
+      className={`group/subagents subagent-chip flex h-5 shrink-0 items-center gap-1 rounded-md px-1 text-[11px] tabular-nums outline-none hover:bg-content/10 hover:text-content focus-visible:ring-1 focus-visible:ring-accent/50 ${
+        working > 0 ? "text-content/60" : "text-content/40"
+      }`}
     >
       <span className="grid size-3 shrink-0 place-items-center">
         <SubagentFace
-          name={names[0]}
-          state="running"
+          name={face.name}
+          state={working > 0 ? "running" : "done"}
           className="size-3 group-hover/subagents:hidden group-focus-visible/subagents:hidden"
         />
         <Chevron
@@ -234,19 +244,30 @@ export function SubagentTreeToggle({
               Subagents
             </span>
             <span className="shrink-0 text-[10px] tabular-nums text-content/45">
-              {count} running
+              {working > 0 ? `${working} running` : `${count} finished`}
             </span>
           </div>
           <div className="mt-1.5 flex flex-col gap-0.5">
-            {names.map((name, index) => (
+            {runs.map((run) => (
               <div
-                key={`${index}:${name}`}
+                key={run.id}
                 className="flex min-w-0 items-center gap-1.5 rounded-md px-1 py-1"
               >
-                <SubagentFace name={name} state="running" />
-                <span className="min-w-0 flex-1 truncate text-[11px] text-content/75">
-                  {name}
+                <SubagentFace name={run.name} state={run.state} />
+                <span
+                  className={`min-w-0 flex-1 truncate text-[11px] ${
+                    run.state === "failed"
+                      ? "text-red-400"
+                      : run.state === "running"
+                        ? "text-content/75"
+                        : "text-content/50"
+                  }`}
+                >
+                  {run.name}
                 </span>
+                {run.state === "running" ? null : (
+                  <SubagentRunMark state={run.state} />
+                )}
               </div>
             ))}
           </div>
