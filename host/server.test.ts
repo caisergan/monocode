@@ -322,6 +322,17 @@ describe("remote host API", () => {
       supportedProviders: ["codex", "cursor"],
     })).value.result.providers).toEqual(["codex", "cursor"]);
   });
+  it("reports the commit a packaged host was built from", async () => {
+    const s = await setup();
+    expect((await s.call("environment.describe")).value.result.build)
+      .toBeUndefined();
+    vi.stubEnv("MONOCODE_HOST_COMMIT", "1d1a7e27");
+    cleanups.push(async () => {
+      vi.unstubAllEnvs();
+    });
+    expect((await s.call("environment.describe")).value.result.build)
+      .toEqual({ commit: "1d1a7e27" });
+  });
   it("re-probes models after the provider CLI is updated", async () => {
     const s = await setup();
     cleanups.push(async () => {

@@ -1292,3 +1292,57 @@ it("ignores a late create response after its tab has switched conversations", as
   expect(commands.map((command) => command.type)).toEqual(["create"]);
   expect(container.textContent).not.toContain("Pending first message");
 });
+
+it("shows a Claude host session's context, tokens and expired prompt cache", async () => {
+  providers = ["claude"];
+  catalog = {
+    models: {
+      claude: [
+        { id: "claude:opus", harness: "claude", name: "Opus", nativeId: "opus", settings: [] },
+      ],
+    },
+    errors: {},
+  };
+  host = {
+    projectId: "project",
+    revision: 1,
+    status: "idle",
+    updatedAt: 0,
+    session: {
+      id: "host-session",
+      cwd: "/home/me/repo",
+      harness: "claude",
+      model: "claude:opus",
+      modelSettings: {},
+      runtimeMode: "supervised",
+      title: "Existing conversation",
+      context: { used: 75_638, window: 1_000_000 },
+      blocks: [
+        {
+          id: "first",
+          role: "user",
+          text: "Earlier work",
+          // The host stamps the turn; its cache lapsed an hour later.
+          startedAt: Date.now() - 2 * 3_600_000,
+          durationMs: 35_802,
+          turnMetrics: {
+            inputTokens: 6,
+            outputTokens: 2_902,
+            cacheReadTokens: 194_920,
+            cacheWriteTokens: 11_106,
+            cacheTtlSeconds: 3_600,
+          },
+        },
+        { id: "reply", role: "assistant", text: "Done" },
+      ],
+    },
+  };
+  rememberRemoteSession("shell", "host-session");
+  await render();
+  const labels = [...container.querySelectorAll("[aria-label]")].map(
+    (element) => element.getAttribute("aria-label"),
+  );
+  expect(labels).toContain("8% context used, 76K / 1M tokens");
+  expect(labels.some((label) => label?.startsWith("Session tokens:"))).toBe(true);
+  expect(labels.some((label) => label?.startsWith("Prompt cache expired."))).toBe(true);
+});

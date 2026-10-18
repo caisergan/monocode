@@ -16,6 +16,7 @@ mod fs;
 mod gitlab;
 mod harness;
 mod harness_updates;
+mod host_source;
 mod inbox_media;
 mod jira;
 mod linear;
@@ -278,6 +279,7 @@ pub fn run() {
             remote::remote_ssh_poll,
             remote::remote_ssh_answer,
             remote::remote_ssh_cancel,
+            remote::remote_host_source_head,
             control::control_enable,
             control::control_disable,
             control::control_reply,

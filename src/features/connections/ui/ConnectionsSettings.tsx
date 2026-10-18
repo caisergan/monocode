@@ -19,6 +19,9 @@ const input =
   "w-full rounded-lg border border-content/15 bg-content/3 px-3 py-2 text-[13px] outline-none focus:border-content/35";
 const button =
   "rounded-lg bg-selection px-3 py-2 text-[13px] font-medium hover:bg-selection-hover disabled:opacity-40";
+/** Matches `host_source::BRANCH` in the desktop backend. */
+const HOST_SOURCE_BRANCH = "dev";
+const SOURCE_HEAD_TTL = 5 * 60_000;
 
 export function ConnectionsSettings() {
   const { machines, loaded } = useRemoteMachines();
@@ -44,6 +47,9 @@ export function ConnectionsSettings() {
   const currentJob = useRef<string | undefined>(undefined);
   const submitting = useRef(false);
   const progress = useRef<HTMLDivElement>(null);
+  const sourceHead = useRef<{ commit?: string; checkedAt: number }>({
+    checkedAt: 0,
+  });
   useEffect(() => {
     alive.current = true;
     return () => {
@@ -120,6 +126,17 @@ export function ConnectionsSettings() {
     let disposed = false;
     let timer: ReturnType<typeof setTimeout>;
     const check = async () => {
+      // "Update Host" builds the host from this branch's tip on this computer.
+      const latest =
+        !busy &&
+        machines.some((machine) => machine.ssh) &&
+        Date.now() - sourceHead.current.checkedAt > SOURCE_HEAD_TTL
+          ? invoke<string>("remote_host_source_head").then(
+              (commit) =>
+                (sourceHead.current = { commit, checkedAt: Date.now() }),
+              () => (sourceHead.current.checkedAt = Date.now()),
+            )
+          : undefined;
       if (!busy)
         await Promise.all(
           machines.map(async (machine) => {
@@ -132,18 +149,27 @@ export function ConnectionsSettings() {
               );
               if (host.environmentId !== machine.environmentId)
                 throw new Error("Host identity changed");
+              await latest;
+              const head = machine.ssh ? sourceHead.current.commit : undefined;
+              const built = host.build?.commit;
               if (!host.providers.length)
                 label = "Connected · install a supported provider on the host";
+              else if (built && built === head)
+                label = `Connected · host at ${HOST_SOURCE_BRANCH} ${built.slice(0, 7)}`;
               const workspace =
                 !host.capabilities?.includes("workspace.run") ||
                 !host.capabilities?.includes("git.worktreeCreate");
-              const update =
+              const missing =
                 workspace ||
                 !host.capabilities?.includes("agentSessions.import");
-              if (update)
+              const behind = !!head && built !== head;
+              const update = missing || behind;
+              if (missing)
                 label = workspace
                   ? "Connected · host update needed for Explorer and Changes"
                   : "Connected · host update needed to import terminal sessions";
+              else if (behind)
+                label = `Connected · host update available (${HOST_SOURCE_BRANCH} ${head.slice(0, 7)})`;
               if (!disposed)
                 setNeedsUpdate((current) => ({
                   ...current,
@@ -297,7 +323,7 @@ export function ConnectionsSettings() {
                       <button
                         className={button}
                         disabled={busy}
-                        title="Downloads the matching host package and restarts the host; active agent turns will be interrupted"
+                        title={`Builds MonoCode Host from the ${HOST_SOURCE_BRANCH} branch on this computer and restarts the host; active agent turns will be interrupted`}
                         onClick={() => void begin(machine, true)}
                       >
                         Update Host

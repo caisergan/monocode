@@ -319,6 +319,10 @@ export function createHostServer(
               steerProviders: providers.filter((provider) =>
                 engine.canSteer(provider),
               ),
+              // Set by host/build.mjs; absent in hosts built elsewhere.
+              ...(process.env.MONOCODE_HOST_COMMIT
+                ? { build: { commit: process.env.MONOCODE_HOST_COMMIT } }
+                : {}),
             };
             break;
           case "projects.list":

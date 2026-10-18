@@ -1,5 +1,6 @@
 //! Remote host connections. The renderer receives machine metadata, never the
 //! saved bearer credential. Workspace requests never fall back to local calls.
+use crate::host_source;
 use crate::remote_ssh::{self, Job, JobView, SshTarget, Tunnel, Tunnels};
 use std::collections::HashMap;
 use std::io::{Read, Write};
@@ -437,6 +438,38 @@ fn supported_remote_method(method: &str) -> bool {
     )
 }
 
+/// Builds the host from the fork's source branch for this machine, uploads
+/// it and returns the script that installs it.
+fn upload_source_build(
+    data: &Path,
+    target: &SshTarget,
+    job: &Arc<Job>,
+    askpass: &crate::ssh_askpass::Askpass,
+) -> Result<String, String> {
+    let probe = remote_ssh::run_script(
+        target,
+        remote_ssh::HostPlatform::Unix,
+        host_source::MACHINE_PROBE.into(),
+        job,
+        askpass,
+    )?;
+    let package = host_source::build(data, &host_source::parse_machine(&probe)?, job)?;
+    job.message("Uploading MonoCode Host to the machine…");
+    remote_ssh::upload_package(target, &package.file, package.bytes, job, askpass)?;
+    Ok(remote_ssh::uploaded_package_script(
+        target.remote_port,
+        &package.version,
+        &package.file,
+        &package.sha256,
+        package.reuse_node.as_deref(),
+    ))
+}
+
+#[tauri::command(async)]
+pub fn remote_host_source_head() -> Result<String, String> {
+    host_source::latest_commit()
+}
+
 fn start_ssh_job(
     app: AppHandle,
     target: SshTarget,
@@ -467,14 +500,15 @@ fn start_ssh_job(
             let mut machine = if let Some(mut existing) = existing {
                 if upgrade {
                     let platform = remote_ssh::detect_platform(&target, &job, &askpass)?;
+                    let script = if platform == remote_ssh::HostPlatform::Unix {
+                        let data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+                        upload_source_build(&data, &target, &job, &askpass)?
+                    } else {
+                        // Packages for Windows hosts need PowerShell to build.
+                        remote_ssh::upgrade_script(platform, target.remote_port)
+                    };
                     job.message("Updating MonoCode Host on the machine…");
-                    let output = remote_ssh::run_script(
-                        &target,
-                        platform,
-                        remote_ssh::upgrade_script(platform, target.remote_port),
-                        &job,
-                        &askpass,
-                    )?;
+                    let output = remote_ssh::run_script(&target, platform, script, &job, &askpass)?;
                     let info: Value = serde_json::from_str(output.lines().last().unwrap_or(""))
                         .map_err(|_| "Host update returned an invalid response")?;
                     target.remote_port = info
@@ -693,6 +727,28 @@ pub fn remote_ssh_cancel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Updates a real SSH machine's host from the source branch, as "Update
+    /// Host" does. It restarts that host: MONOCODE_E2E_SSH=<target> to run.
+    #[test]
+    #[ignore = "restarts the host on MONOCODE_E2E_SSH"]
+    fn updates_a_real_host_from_the_source_branch() {
+        let target = SshTarget {
+            target: std::env::var("MONOCODE_E2E_SSH").expect("MONOCODE_E2E_SSH"),
+            port: None,
+            remote_port: 3774,
+        };
+        let data = std::env::var("MONOCODE_E2E_DATA").expect("MONOCODE_E2E_DATA");
+        let job = Job::new();
+        let askpass = job.askpass().unwrap();
+        let platform = remote_ssh::detect_platform(&target, &job, &askpass).unwrap();
+        assert_eq!(platform, remote_ssh::HostPlatform::Unix);
+        let started = std::time::Instant::now();
+        let script = upload_source_build(Path::new(&data), &target, &job, &askpass).unwrap();
+        eprintln!("built and uploaded in {:?}", started.elapsed());
+        let output = remote_ssh::run_script(&target, platform, script, &job, &askpass).unwrap();
+        eprintln!("installed: {}", output.lines().last().unwrap_or(""));
+    }
     #[test]
     fn a_slow_host_does_not_look_like_a_dead_tunnel() {
         use std::{net::TcpListener, thread, time::Duration};

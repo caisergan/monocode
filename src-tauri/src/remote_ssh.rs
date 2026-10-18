@@ -329,7 +329,7 @@ fn run_script_with_command(
 
 fn run_remote_command(
     target: &SshTarget,
-    script: String,
+    script: impl Into<Vec<u8>>,
     job: &Arc<Job>,
     askpass: &Askpass,
     mut command: Command,
@@ -346,7 +346,8 @@ fn run_remote_command(
     let stdout = capture(child.stdout.take().unwrap());
     let stderr = capture(child.stderr.take().unwrap());
     let mut stdin = child.stdin.take().unwrap();
-    let writer = std::thread::spawn(move || stdin.write_all(script.as_bytes()));
+    let input: Vec<u8> = script.into();
+    let writer = std::thread::spawn(move || stdin.write_all(&input));
     let deadline = Instant::now() + Duration::from_secs(300);
     let result = loop {
         if job.cancelled.load(Ordering::Relaxed) || Instant::now() >= deadline {
@@ -422,6 +423,57 @@ pub fn upgrade_script(platform: HostPlatform, port: u16) -> String {
             "$env:MONOCODE_HOST_FORCE_UPGRADE = '1'\n$env:MONOCODE_HOST_PORT = '{port}'\n{script}"
         ),
     }
+}
+
+const UPLOADS: &str = ".monocode-host/uploads";
+
+/// Streams a host package into `~/.monocode-host/uploads` on a Unix host.
+pub fn upload_package(
+    target: &SshTarget,
+    file: &str,
+    bytes: Vec<u8>,
+    job: &Arc<Job>,
+    askpass: &Askpass,
+) -> Result<(), String> {
+    run_remote_command(
+        target,
+        bytes,
+        job,
+        askpass,
+        command(target, true),
+        &["sh", "-c", &upload_command(file)],
+    )
+    .map(|_| ())
+}
+
+fn upload_command(file: &str) -> String {
+    shell_quote(&format!(
+        "umask 077 && mkdir -p {UPLOADS} && cat > {UPLOADS}/{}",
+        shell_quote(file)
+    ))
+}
+
+/// Installs a package sent by [`upload_package`] and restarts the host on
+/// `port`. The bootstrap moves the upload into place, so nothing is left behind.
+pub fn uploaded_package_script(
+    port: u16,
+    version: &str,
+    file: &str,
+    sha256: &str,
+    node: Option<&str>,
+) -> String {
+    let script = include_str!("remote_bootstrap.sh")
+        .replace("\r\n", "\n")
+        .replace("@@VERSION@@", &shell_quote(version))
+        .replace("@@RELEASE@@", "''");
+    let node = node.map_or(String::new(), |node| {
+        format!("MONOCODE_HOST_NODE={}\n", shell_quote(node))
+    });
+    format!(
+        "MONOCODE_HOST_FORCE_UPGRADE=1\nMONOCODE_HOST_PORT={port}\nMONOCODE_HOST_ARCHIVE=\"$HOME/{UPLOADS}/\"{}\nMONOCODE_HOST_ARCHIVE_SHA256={}\n{node}{script}",
+        shell_quote(file),
+        shell_quote(sha256),
+    )
 }
 
 pub fn pairing_script(platform: HostPlatform, name: &str) -> String {
@@ -816,6 +868,27 @@ mod tests {
         assert!(upgrade_script(HostPlatform::Windows, 3774)
             .starts_with("$env:MONOCODE_HOST_FORCE_UPGRADE = '1'"));
     }
+    #[test]
+    fn uploaded_packages_install_from_the_upload_with_their_checksum() {
+        let file = "monocode-host-linux-x64.tar.gz";
+        let script = uploaded_package_script(3774, "0.9.0", file, "ab12", None);
+        assert!(script.starts_with("MONOCODE_HOST_FORCE_UPGRADE=1\nMONOCODE_HOST_PORT=3774\n"));
+        assert!(!script.contains("MONOCODE_HOST_NODE="));
+        assert!(script.contains(
+            "MONOCODE_HOST_ARCHIVE=\"$HOME/.monocode-host/uploads/\"'monocode-host-linux-x64.tar.gz'\n"
+        ));
+        assert!(script.contains("MONOCODE_HOST_ARCHIVE_SHA256='ab12'\n"));
+        assert!(script.contains("VERSION='0.9.0'\nRELEASE=''\n"));
+        assert!(!script.contains('\r'));
+        let script =
+            uploaded_package_script(3774, "0.9.0", file, "ab12", Some("/home/a b/bin/node"));
+        assert!(script.contains("MONOCODE_HOST_NODE='/home/a b/bin/node'\n"));
+        assert_eq!(
+            upload_command("monocode-host-linux-x64.tar.gz"),
+            r#"'umask 077 && mkdir -p .monocode-host/uploads && cat > .monocode-host/uploads/'\''monocode-host-linux-x64.tar.gz'\'''"#
+        );
+    }
+
     #[test]
     fn remote_platform_probe_handles_cmd_powershell_and_unix() {
         assert_eq!(

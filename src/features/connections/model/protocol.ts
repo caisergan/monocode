@@ -26,6 +26,8 @@ export type HostDescriptor = {
   /** Providers whose running turn takes another message (`sessions.steer`). */
   steerProviders?: RemoteProvider[];
   platform?: "win32" | "darwin" | "linux";
+  /** The commit the host was built from, `+dirty` with local changes. */
+  build?: { commit: string };
 };
 export type HostProject = { id: string; cwd: string; name: string };
 export type HostDirectory = {
