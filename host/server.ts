@@ -311,8 +311,12 @@ export function createHostServer(
                 "attachments.read",
                 "sessions.draft",
                 "sessions.plan",
+                "sessions.steer",
                 "agentSessions.import",
               ],
+              steerProviders: providers.filter((provider) =>
+                engine.canSteer(provider),
+              ),
             };
             break;
           case "projects.list":

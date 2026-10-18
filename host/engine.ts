@@ -173,6 +173,24 @@ export function parseCommand(input: unknown): HostCommand {
   const runId = text(v.runId, "run ID");
   if (v.type === "cancel")
     return { type: "cancel", commandId, sessionId, runId };
+  if (v.type === "steer") {
+    const attachments = parseRemoteAttachments(v.attachments);
+    if (
+      typeof v.text !== "string" ||
+      v.text.length > 256_000 ||
+      v.text.includes("\0") ||
+      (!v.text.trim() && attachments.length === 0)
+    )
+      throw new Error("Invalid prompt");
+    return {
+      type: "steer",
+      commandId,
+      sessionId,
+      runId,
+      text: v.text,
+      ...(attachments.length ? { attachments } : {}),
+    };
+  }
   if (!Number.isSafeInteger(v.requestId) || Number(v.requestId) < 0)
     throw new Error("Invalid request ID");
   const requestId = Number(v.requestId);
@@ -241,6 +259,35 @@ export function parseCommand(input: unknown): HostCommand {
     }
   }
   throw new Error("Unsupported command");
+}
+
+/** The model a user message was written to, for its transcript label. */
+function turnModel(
+  session: Session,
+): NonNullable<Session["blocks"][number]["turnModel"]> {
+  const model = resolveModel(session.harness, session.model);
+  return {
+    harness: session.harness,
+    id: session.model,
+    name:
+      model.id === session.model
+        ? model.name
+        : session.model.replace(/^[^:]+:/, ""),
+  };
+}
+
+/** Inlines images a provider can see; other files go by path. */
+function providerAttachments(
+  attachments: Session["blocks"][number]["attachments"] = [],
+): Session["blocks"][number]["attachments"] {
+  return attachments.map((file) =>
+    isVisionImage(file.mimeType) && file.path && file.size <= 20 * 1024 * 1024
+      ? {
+          ...file,
+          data: readFileSync(file.path).toString("base64"),
+        }
+      : file,
+  );
 }
 
 export class HostEngine {
@@ -317,6 +364,11 @@ export class HostEngine {
     } finally {
       this.switchingProjects.delete(projectId);
     }
+  }
+
+  /** Whether a running turn of this provider can take another message. */
+  canSteer(id: RemoteProvider): boolean {
+    return !!this.providers[id]?.steer;
   }
 
   private provider(id: string): HostProvider {
@@ -625,10 +677,6 @@ export class HostEngine {
               value.session.harness,
               HARNESS_LABEL[value.session.harness],
             );
-          const model = resolveModel(
-            value.session.harness,
-            value.session.model,
-          );
           value = {
             ...value,
             status: "running",
@@ -666,14 +714,7 @@ export class HostEngine {
                   text: command.type === "compact" ? "/compact" : command.text,
                   ...(attachments.length ? { attachments } : {}),
                   startedAt: Date.now(),
-                  turnModel: {
-                    harness: value.session.harness,
-                    id: value.session.model,
-                    name:
-                      model.id === value.session.model
-                        ? model.name
-                        : value.session.model.replace(/^[^:]+:/, ""),
-                  },
+                  turnModel: turnModel(value.session),
                 },
               ],
             },
@@ -705,6 +746,56 @@ export class HostEngine {
               void provider
                 .cancel(command.sessionId)
                 .catch(() => provider.stop(command.sessionId));
+            };
+          } else if (command.type === "steer") {
+            const steer = provider.steer;
+            if (!steer)
+              throw new Error(
+                `${HARNESS_LABEL[value.session.harness]} cannot take a message mid-turn`,
+              );
+            const attachments = resolveAttachments(
+              this.store,
+              command.attachments ?? [],
+            );
+            value = {
+              ...value,
+              session: {
+                ...value.session,
+                blocks: [
+                  ...value.session.blocks,
+                  {
+                    id: command.commandId,
+                    role: "user",
+                    text: command.text,
+                    ...(attachments.length ? { attachments } : {}),
+                    sentAt: Date.now(),
+                    turnModel: turnModel(value.session),
+                  },
+                ],
+              },
+            };
+            const { id, cwd, model, modelSettings } = value.session;
+            effect = () => {
+              void Promise.resolve()
+                .then(() =>
+                  steer({
+                    sessionId: id,
+                    cwd,
+                    model,
+                    modelSettings,
+                    text: command.text,
+                    attachments: providerAttachments(attachments),
+                  }),
+                )
+                .catch((reason) =>
+                  this.event(id, command.runId, {
+                    type: "session.error",
+                    message:
+                      reason instanceof Error
+                        ? reason.message
+                        : `${HARNESS_LABEL[value.session.harness]} could not take the message`,
+                  }),
+                );
             };
           } else if (command.type === "approve") {
             const pending = value.session.blocks.some(
@@ -861,16 +952,7 @@ export class HostEngine {
               await provider.send({
                 ...input,
                 text: prompt,
-                attachments: attachments?.map((file) =>
-                  isVisionImage(file.mimeType) &&
-                  file.path &&
-                  file.size <= 20 * 1024 * 1024
-                    ? {
-                        ...file,
-                        data: readFileSync(file.path).toString("base64"),
-                      }
-                    : file,
-                ),
+                attachments: providerAttachments(attachments),
               });
           }
         } catch (reason) {

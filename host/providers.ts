@@ -10,6 +10,7 @@ import * as hermes from "../src/integrations/harness/providers/hermes/hermes";
 import * as antigravity from "../src/integrations/harness/providers/antigravity/antigravity";
 import type {
   SendTurnInput,
+  SteerTurnInput,
   CompactContextInput,
   ApprovalDecision,
 } from "../src/integrations/harness/core/types";
@@ -36,6 +37,8 @@ import { respondQuestion as respondPiQuestion } from "../src/integrations/harnes
 export interface HostProvider {
   send(input: SendTurnInput): Promise<void>;
   compact?(input: CompactContextInput): Promise<void>;
+  /** Hands a message to the running turn. Absent when the agent cannot take one. */
+  steer?(input: SteerTurnInput): Promise<void>;
   cancel(id: string): Promise<void>;
   stop(id: string): Promise<void>;
   bind(id: string, providerId: string, cwd: string): void;
@@ -53,6 +56,7 @@ export const hostProviders: Record<RemoteProvider, HostProvider> = {
   codex: {
     send: codex.sendCodexTurn,
     compact: codex.compactCodexContext,
+    steer: codex.steerCodexTurn,
     cancel: codex.cancelCodexTurn,
     stop: codex.forgetCodexSession,
     bind: codex.bindCodexSession,
@@ -64,6 +68,7 @@ export const hostProviders: Record<RemoteProvider, HostProvider> = {
   claude: {
     send: claude.sendClaudeTurn,
     compact: claude.compactClaudeContext,
+    steer: claude.steerClaudeTurn,
     cancel: claude.cancelClaudeTurn,
     stop: claude.forgetClaudeSession,
     bind: claude.bindClaudeSession,
@@ -74,6 +79,7 @@ export const hostProviders: Record<RemoteProvider, HostProvider> = {
   },
   cursor: {
     send: cursor.sendCursorTurn,
+    steer: cursor.steerCursorTurn,
     cancel: cursor.cancelCursorTurn,
     stop: cursor.forgetCursorSession,
     bind: cursor.bindCursorSession,
@@ -94,6 +100,7 @@ export const hostProviders: Record<RemoteProvider, HostProvider> = {
   opencode: {
     send: opencode.sendOpenCodeTurn,
     compact: opencode.compactOpenCodeContext,
+    steer: opencode.steerOpenCodeTurn,
     cancel: opencode.cancelOpenCodeTurn,
     stop: opencode.forgetOpenCodeSession,
     bind: opencode.bindOpenCodeSession,
@@ -104,6 +111,7 @@ export const hostProviders: Record<RemoteProvider, HostProvider> = {
   pi: {
     send: pi.sendPiTurn,
     compact: pi.compactPiContext,
+    steer: pi.steerPiTurn,
     cancel: pi.cancelPiTurn,
     stop: pi.forgetPiSession,
     bind: pi.bindPiSession,
@@ -115,6 +123,7 @@ export const hostProviders: Record<RemoteProvider, HostProvider> = {
   omp: {
     send: omp.sendOmpTurn,
     compact: omp.compactOmpContext,
+    steer: omp.steerOmpTurn,
     cancel: omp.cancelOmpTurn,
     stop: omp.forgetOmpSession,
     bind: omp.bindOmpSession,
@@ -133,6 +142,7 @@ export const hostProviders: Record<RemoteProvider, HostProvider> = {
   },
   hermes: {
     send: hermes.sendHermesTurn,
+    steer: hermes.steerHermesTurn,
     cancel: hermes.cancelHermesTurn,
     stop: hermes.forgetHermesSession,
     bind: hermes.bindHermesSession,
