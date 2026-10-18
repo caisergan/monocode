@@ -23,6 +23,8 @@ export type HostDescriptor = {
   name: string;
   providers: RemoteProvider[];
   capabilities: string[];
+  /** Providers whose running turn takes another message (`sessions.steer`). */
+  steerProviders?: RemoteProvider[];
   platform?: "win32" | "darwin" | "linux";
 };
 export type HostProject = { id: string; cwd: string; name: string };
@@ -187,6 +189,15 @@ export type HostCommand =
       draftBlockId: string;
     }
   | { type: "cancel"; commandId: string; sessionId: string; runId: string }
+  /** A message for the running turn, which the agent reads now. */
+  | {
+      type: "steer";
+      commandId: string;
+      sessionId: string;
+      runId: string;
+      text: string;
+      attachments?: RemoteAttachment[];
+    }
   | {
       type: "approve";
       commandId: string;

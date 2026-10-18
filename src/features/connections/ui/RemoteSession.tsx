@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { SessionPaneProps } from "../../sessions/ui/SessionPane";
+import { HARNESS_LABEL } from "../../sessions/model/session";
 import type {
   Attachment,
   Block,
   ComposerTurnOptions,
   HarnessId,
+  MessageQueueStatus,
+  QueuedMessage,
   RuntimeMode,
   Session,
   WorkspaceMode,
@@ -18,6 +21,7 @@ import {
   type ModelSource,
 } from "../../sessions/ui/modelSource";
 import { notifyGitChanged } from "../../../platform/tauri/fs";
+import { loadFollowUpBehavior } from "../../settings/model/settings";
 import type { Worktree } from "../../source-control/model/worktrees";
 import { useProjectBranchesState } from "../../source-control/hooks/useProjectBranches";
 import { registerRemoteSessionActions } from "../model/remoteSessionActions";
@@ -61,11 +65,15 @@ import {
 
 export type RemoteSessionOverrides = Partial<SessionPaneProps> & {
   remoteSession: boolean;
-  remoteFeatures: { attachments: boolean; plan: boolean; draft: boolean };
+  remoteFeatures: {
+    attachments: boolean;
+    plan: boolean;
+    draft: boolean;
+    steer: boolean;
+  };
   remoteSessionLoading: boolean;
   remoteSessionStarted: boolean;
   allowedModelHarnesses: readonly HarnessId[];
-  allowBusySubmit: boolean;
 };
 
 type Configuration = {
@@ -87,7 +95,11 @@ type OptimisticTurn = {
   turnModel: NonNullable<Block["turnModel"]>;
 };
 
+type RemoteQueue = { messages: QueuedMessage[]; status?: MessageQueueStatus };
+
 const noop = () => {};
+/** Messages waiting for a remote turn to end, kept while their tab remounts. */
+const remoteQueues = new Map<string, RemoteQueue>();
 const cachedSessionSnapshots = new Map<string, HostSession>();
 const cachedDescriptors = new Map<string, HostDescriptor>();
 const cachedCatalogs = new Map<string, HostModelCatalog>();
@@ -324,12 +336,34 @@ function ConnectedRemoteSession({
     !hasHostBlock(pending.commandId);
   const busy =
     !!hostSession?.busy || unseenActive || (startingActive && !starting?.draft) || pendingSendActive;
-  // The host takes no message while a turn runs, which can last as long as the
-  // background work Claude left going. Say so instead of ignoring the send.
-  const [heldBack, setHeldBack] = useState(false);
+  // A message typed during a turn goes to the agent at once when the host and
+  // provider can take it, and otherwise waits here until the turn ends.
+  const steerable =
+    !!hostSession &&
+    !!descriptor?.capabilities.includes("sessions.steer") &&
+    !!descriptor.steerProviders?.includes(hostSession.harness);
+  const [queue, setQueue] = useState<RemoteQueue>(
+    () => remoteQueues.get(shell.id) ?? { messages: [] },
+  );
+  const updateQueue = (change: (current: RemoteQueue) => RemoteQueue) =>
+    setQueue((current) => {
+      const next = change(current);
+      if (next.messages.length) remoteQueues.set(shell.id, next);
+      else remoteQueues.delete(shell.id);
+      return next.messages.length ? next : { messages: [] };
+    });
+  const [editingQueued, setEditingQueued] = useState<string>();
+  // Waiting messages belong to their conversation, not to the tab.
+  const queuedFor = useRef(activeSessionId);
   useEffect(() => {
-    if (!busy) setHeldBack(false);
-  }, [busy]);
+    if (
+      queuedFor.current &&
+      activeSessionId &&
+      queuedFor.current !== activeSessionId
+    )
+      updateQueue(() => ({ messages: [] }));
+    if (activeSessionId) queuedFor.current = activeSessionId;
+  }, [activeSessionId]);
   // An accepted turn stays on screen until a sync shows the host's copy, so
   // the transcript never drops it for a moment in between.
   useEffect(() => {
@@ -847,6 +881,107 @@ function ConnectedRemoteSession({
           ...(planBlockId ? { planBlockId } : {}),
         };
 
+  const followUp = (
+    text: string,
+    attachments: Attachment[],
+    options?: ComposerTurnOptions,
+  ): boolean => {
+    const intent =
+      options?.intent === "plan" || options?.intent === "build"
+        ? options.intent
+        : "default";
+    const steer =
+      steerable &&
+      intent === "default" &&
+      !options?.queue &&
+      // Background work may run for a long time (a dev server, a long job),
+      // so a message never waits behind it, as in a local session.
+      (!!hostSession?.backgroundTasks?.length ||
+        loadFollowUpBehavior() === "steer");
+    if (
+      steer &&
+      online &&
+      !sending &&
+      !preparingRef.current &&
+      !pending &&
+      snapshot?.runId
+    )
+      return steerTurn(optimisticTurn(text, attachments, "default"));
+    updateQueue((current) => ({
+      ...current,
+      messages: [
+        ...current.messages,
+        {
+          id: crypto.randomUUID(),
+          text,
+          attachments,
+          ...(intent !== "default" ? { intent } : {}),
+        },
+      ],
+    }));
+    return true;
+  };
+
+  // A message the running turn did not take returns to the front of the
+  // queue, paused, so it neither goes twice nor slips out unseen.
+  const holdUnsent = (turn: OptimisticTurn, message: string) => {
+    updateQueue((current) => ({
+      status: "paused",
+      messages: [
+        {
+          id: turn.commandId,
+          text: turn.text,
+          attachments: turn.attachments,
+          error: message,
+        },
+        ...current.messages.filter((entry) => entry.id !== turn.commandId),
+      ],
+    }));
+  };
+
+  const steerTurn = (turn: OptimisticTurn): boolean => {
+    if (!hostSession || !snapshot?.runId) return false;
+    const id = hostSession.id;
+    const runId = snapshot.runId;
+    const version = bindingVersion.current;
+    preparingRef.current = true;
+    setStarting(turn);
+    void (async () => {
+      const refs = await uploadRemoteAttachments(machine.id, turn.attachments);
+      if (!alive.current || version !== bindingVersion.current) return null;
+      return run({
+        type: "steer",
+        commandId: turn.commandId,
+        sessionId: id,
+        runId,
+        text: turn.text,
+        ...(refs.length ? { attachments: refs } : {}),
+      });
+    })()
+      .then((receipt) => {
+        if (receipt !== undefined) return;
+        clearPendingRemoteCommand(
+          project.key,
+          machine.environmentId,
+          turn.commandId,
+        );
+        setPending(
+          pendingRemoteCommand(project.key, machine.environmentId, id, shell.id),
+        );
+        setStarting(undefined);
+        holdUnsent(turn, "The running turn did not take this message.");
+      })
+      .catch((reason) => {
+        if (!alive.current || version !== bindingVersion.current) return;
+        setStarting(undefined);
+        holdUnsent(turn, String(reason).replace(/^Error: /, ""));
+      })
+      .finally(() => {
+        preparingRef.current = false;
+      });
+    return true;
+  };
+
   const submit = (
     text: string,
     attachments: Attachment[] = [],
@@ -854,8 +989,13 @@ function ConnectedRemoteSession({
     asDraft = false,
     planBlockId?: string,
   ): boolean => {
-    if (busy && !asDraft && (text.trim() || attachments.length))
-      setHeldBack(true);
+    if (
+      (busy || (options?.queue && queue.messages.length)) &&
+      !asDraft &&
+      !planBlockId &&
+      (text.trim() || attachments.length)
+    )
+      return followUp(text, attachments, options);
     if (
       !online ||
       sending ||
@@ -911,6 +1051,81 @@ function ConnectedRemoteSession({
     return true;
   };
 
+
+  // Steer from the queue: the running turn takes the message now, or, between
+  // turns, it simply goes next.
+  const steerQueued = (messageId: string) => {
+    const message = queue.messages.find((entry) => entry.id === messageId);
+    if (!message) return;
+    const refuse = (error: string) =>
+      updateQueue((current) => ({
+        ...current,
+        messages: current.messages.map((entry) =>
+          entry.id === messageId ? { ...entry, error } : entry,
+        ),
+      }));
+    if (!busy) {
+      updateQueue((current) => ({
+        status: undefined,
+        messages: [
+          message,
+          ...current.messages.filter((entry) => entry.id !== messageId),
+        ],
+      }));
+      return;
+    }
+    if (!steerable)
+      return refuse(
+        `${HARNESS_LABEL[configuration.harness]} on ${machine.name} cannot take a message mid-turn.`,
+      );
+    if (message.intent === "plan" || message.intent === "build")
+      return refuse("A plan request waits for the running turn to end.");
+    if (
+      !online ||
+      sending ||
+      preparingRef.current ||
+      pending ||
+      !snapshot?.runId
+    )
+      return refuse("Wait for the host to confirm the last request.");
+    updateQueue((current) => ({
+      ...current,
+      messages: current.messages.filter((entry) => entry.id !== messageId),
+    }));
+    steerTurn(optimisticTurn(message.text, message.attachments, "default"));
+  };
+
+  // Between turns, the queue sends its first message as a new turn.
+  useEffect(() => {
+    const head = queue.messages[0];
+    if (
+      !head ||
+      queue.status === "paused" ||
+      editingQueued === head.id ||
+      !hostSession ||
+      busy ||
+      starting ||
+      removingDraft ||
+      !online ||
+      pending ||
+      sending ||
+      changes ||
+      preparingRef.current
+    )
+      return;
+    if (
+      submit(
+        head.text,
+        head.attachments,
+        head.intent ? { intent: head.intent } : undefined,
+      )
+    )
+      updateQueue((current) => ({
+        ...current,
+        messages: current.messages.filter((entry) => entry.id !== head.id),
+      }));
+    else updateQueue((current) => ({ ...current, status: "paused" }));
+  });
 
   const modelSource = useMemo<ModelSource>(() => {
     const models = (harness: HarnessId) =>
@@ -1027,6 +1242,9 @@ function ConnectedRemoteSession({
     runtimeMode: configuration.mode,
     busy,
     blocks: unconfirmed ? [...blocks, unconfirmed] : blocks,
+    queuedMessages: queue.messages.length ? queue.messages : undefined,
+    queueStatus: queue.status,
+    editingQueuedMessageId: editingQueued,
   };
 
   const catalogProblem = catalog?.errors[configuration.harness] ?? catalogError;
@@ -1077,11 +1295,6 @@ function ConnectedRemoteSession({
               text: error,
               action: { label: "Dismiss", run: () => setError("") },
             }
-          : heldBack
-            ? {
-                text: `The turn on ${machine.name} is still running. Your message is kept here; send it when the turn ends, or stop it first.`,
-                action: { label: "Dismiss", run: () => setHeldBack(false) },
-              }
           : catalogProblem
             ? {
                 text: `Couldn’t load models from ${machine.name}.`,
@@ -1196,10 +1409,10 @@ function ConnectedRemoteSession({
       attachments: !!descriptor?.capabilities.includes("attachments.upload"),
       plan: !!descriptor?.capabilities.includes("sessions.plan"),
       draft: !!descriptor?.capabilities.includes("sessions.draft"),
+      steer: steerable,
     },
     remoteSessionLoading: !!sessionId && !hostSession && !session.blocks.length,
     remoteSessionStarted: !!sessionId,
-    allowBusySubmit: false,
     allowedModelHarnesses: hostSession
       ? [hostSession.harness]
       : providers.length
@@ -1260,11 +1473,22 @@ function ConnectedRemoteSession({
       return true;
     },
     onPlaceSessionInFolder: noop,
-    onDeleteQueuedMessage: noop,
-    onEditQueuedMessage: noop,
-    onQueuedMessageEditingChange: noop,
-    onSteerQueuedMessage: noop,
-    onResumeQueue: noop,
+    onDeleteQueuedMessage: (_, messageId) =>
+      updateQueue((current) => ({
+        ...current,
+        messages: current.messages.filter((entry) => entry.id !== messageId),
+      })),
+    onEditQueuedMessage: (_, messageId, text) =>
+      updateQueue((current) => ({
+        ...current,
+        messages: current.messages.map((entry) =>
+          entry.id === messageId ? { ...entry, text, error: undefined } : entry,
+        ),
+      })),
+    onQueuedMessageEditingChange: (_, messageId) => setEditingQueued(messageId),
+    onSteerQueuedMessage: (_, messageId) => steerQueued(messageId),
+    onResumeQueue: () =>
+      updateQueue((current) => ({ ...current, status: undefined })),
     onUsageLimitResume: noop,
     onUsageLimitResumeAtReset: noop,
     onUsageLimitDismiss: noop,

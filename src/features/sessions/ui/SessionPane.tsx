@@ -286,13 +286,16 @@ export type SessionPaneProps = {
 type Props = SessionPaneProps & {
   /** The session runtime is on another machine. */
   remoteSession?: boolean;
-  remoteFeatures?: { attachments: boolean; plan: boolean; draft: boolean };
+  remoteFeatures?: {
+    attachments: boolean;
+    plan: boolean;
+    draft: boolean;
+    steer?: boolean;
+  };
   /** An opened host conversation whose transcript has not arrived yet. */
   remoteSessionLoading?: boolean;
   remoteSessionStarted?: boolean;
   allowedModelHarnesses?: readonly HarnessId[];
-  /** Whether a message typed during a running turn can go out. */
-  allowBusySubmit?: boolean;
 };
 
 export const SessionPane = memo(function SessionPane(props: SessionPaneProps) {
@@ -339,7 +342,6 @@ const LocalSessionPane = memo(function LocalSessionPane({
   remoteSessionLoading = false,
   remoteSessionStarted = false,
   allowedModelHarnesses,
-  allowBusySubmit,
   session,
   workspaceSwitchingSessionId,
   reviewUndoLocked = false,
@@ -716,7 +718,6 @@ const LocalSessionPane = memo(function LocalSessionPane({
       remoteSession={remoteSession}
       remoteFeatures={remoteFeatures}
       allowedModelHarnesses={allowedModelHarnesses}
-      allowBusySubmit={allowBusySubmit}
       enabled={visible}
       focused={focused && composerFocused && !btw.open}
       focusToken={composerFocusToken}

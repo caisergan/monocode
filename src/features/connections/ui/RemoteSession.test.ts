@@ -122,6 +122,9 @@ let currentBranch: string;
 let createdBranch: string | undefined;
 let createdWorktree: string | undefined;
 let deletedSessions: string[];
+let capabilities: string[];
+let steerProviders: HostDescriptor["providers"] | undefined;
+let rejectSteer: string | undefined;
 
 beforeEach(() => {
   vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
@@ -137,6 +140,9 @@ beforeEach(() => {
   createdBranch = undefined;
   createdWorktree = undefined;
   deletedSessions = [];
+  capabilities = ["attachments.upload", "sessions.plan", "sessions.draft"];
+  steerProviders = undefined;
+  rejectSteer = undefined;
   catalog = { models: { codex: [gpt] }, errors: {} };
   providers = ["codex"];
   projectKey = rememberRemoteProject("env", {
@@ -163,7 +169,8 @@ beforeEach(() => {
         environmentId: "env",
         name: "home",
         providers,
-        capabilities: ["attachments.upload", "sessions.plan", "sessions.draft"],
+        capabilities,
+        ...(steerProviders ? { steerProviders } : {}),
       };
     if (method === "models.list") {
       if (catalog instanceof Error) throw catalog.message;
@@ -243,6 +250,8 @@ beforeEach(() => {
       return { offset: (params as { size: number }).size };
     if (method === "commands.dispatch") {
       if (dispatchDelay) await dispatchDelay;
+      if (params.type === "steer" && rejectSteer)
+        throw new Error(`Host rejected request: ${rejectSteer}`);
       return dispatch(params);
     }
     if (method === "sessions.delete") {
@@ -325,6 +334,18 @@ function dispatch(command: HostCommand) {
             text: command.text,
             draft: true,
           },
+        ],
+      },
+    };
+  } else if (host && command.type === "steer") {
+    host = {
+      ...host,
+      revision: host.revision + 1,
+      session: {
+        ...host.session,
+        blocks: [
+          ...host.session.blocks,
+          { id: command.commandId, role: "user", text: command.text },
         ],
       },
     };
@@ -1029,7 +1050,7 @@ it("holds a settings change during a running turn and applies it afterwards", as
   );
 });
 
-it("keeps a message typed during a running turn and says why it did not go", async () => {
+async function startRunningTurn() {
   await render();
   await send("First");
   host = {
@@ -1042,25 +1063,8 @@ it("keeps a message typed during a running turn and says why it did not go", asy
   await vi.waitFor(() => expect(byLabel("Stop")).not.toBeNull(), {
     timeout: 4_000,
   });
-  const textarea = container.querySelector("textarea")!;
-  expect(textarea.placeholder).toBe("Wait for this turn to finish, or stop it…");
-
-  await type("Second");
-  // Typing does not swap Stop for a Send the host would refuse.
-  expect(byLabel("Stop")).not.toBeNull();
-  expect(byLabel("Send")).toBeNull();
-  await act(async () => {
-    textarea.dispatchEvent(
-      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
-    );
-  });
-  await settle();
-  expect(commands.filter((command) => command.type === "send")).toHaveLength(1);
-  expect(textarea.value).toBe("Second");
-  expect(container.querySelector('[role="status"]')?.textContent).toContain(
-    "The turn on Home server is still running.",
-  );
-
+}
+async function finishTurn() {
   host = {
     ...host!,
     revision: host!.revision + 1,
@@ -1068,13 +1072,82 @@ it("keeps a message typed during a running turn and says why it did not go", asy
     runId: undefined,
     session: { ...host!.session, busy: false },
   };
+}
+const sends = () => commands.filter((command) => command.type === "send");
+const queuedRows = () =>
+  [...container.querySelectorAll('button[aria-label="Remove queued message"]')];
+
+it("hands a message typed during a running turn to the host's agent", async () => {
+  capabilities.push("sessions.steer");
+  steerProviders = ["codex", "claude"];
+  await startRunningTurn();
+  expect(container.querySelector("textarea")!.placeholder).toBe(
+    "Steer now, or /queue it for after this turn…",
+  );
+  await send("Also check the logs");
+  expect(commands.at(-1)).toMatchObject({
+    type: "steer",
+    runId: "run",
+    sessionId: "host-session",
+    text: "Also check the logs",
+  });
+  expect(sends()).toHaveLength(1);
+  expect(transcriptItems("Also check the logs")).toHaveLength(1);
+  expect(queuedRows()).toHaveLength(0);
+});
+
+it("queues a message for an older host and sends it when the turn ends", async () => {
+  await startRunningTurn();
+  expect(container.querySelector("textarea")!.placeholder).toBe(
+    "Queue a follow-up for after this turn…",
+  );
+  await send("Second");
+  expect(commands.some((command) => command.type === "steer")).toBe(false);
+  expect(sends()).toHaveLength(1);
+  expect(queuedRows()).toHaveLength(1);
+  expect(container.querySelector("textarea")!.value).toBe("");
+
+  await finishTurn();
+  await vi.waitFor(() => expect(sends()).toHaveLength(2), { timeout: 4_000 });
+  expect(sends()[1]).toMatchObject({ text: "Second" });
+  // The row slides out before it leaves the DOM.
+  await vi.waitFor(() => expect(queuedRows()).toHaveLength(0));
+});
+
+it("keeps a /queue message for after the turn even when the agent could take it", async () => {
+  capabilities.push("sessions.steer");
+  steerProviders = ["codex", "claude"];
+  await startRunningTurn();
+  await type("/queue After this");
+  await act(async () => byLabel("Add to queue")!.click());
+  await settle();
+  expect(commands.some((command) => command.type === "steer")).toBe(false);
+  expect(queuedRows()).toHaveLength(1);
+
+  await finishTurn();
+  await vi.waitFor(() => expect(sends()).toHaveLength(2), { timeout: 4_000 });
+  expect(sends()[1]).toMatchObject({ text: "After this" });
+});
+
+it("puts a message the running turn refused back in a paused queue", async () => {
+  capabilities.push("sessions.steer");
+  steerProviders = ["codex", "claude"];
+  rejectSteer = "This request belongs to a finished or replaced turn";
+  await startRunningTurn();
+  await send("Too late");
+  await settle();
+  expect(queuedRows()).toHaveLength(1);
+  expect(container.textContent).toContain("did not take this message");
+
+  // Paused: the turn ending does not send it behind the user's back.
+  await finishTurn();
   await vi.waitFor(() => expect(byLabel("Send")).not.toBeNull(), {
     timeout: 4_000,
   });
-  expect(container.querySelector('[role="status"]')).toBeNull();
-  await act(async () => byLabel("Send")!.click());
   await settle();
-  expect(commands.at(-1)).toMatchObject({ type: "send", text: "Second" });
+  expect(sends()).toHaveLength(1);
+  await act(async () => byLabel("Remove queued message")!.click());
+  await vi.waitFor(() => expect(queuedRows()).toHaveLength(0));
 });
 
 it.each([false, true])("retries a lost create response without duplicating the first turn (remount: %s)", async (remount) => {
