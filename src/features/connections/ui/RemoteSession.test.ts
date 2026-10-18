@@ -1029,6 +1029,54 @@ it("holds a settings change during a running turn and applies it afterwards", as
   );
 });
 
+it("keeps a message typed during a running turn and says why it did not go", async () => {
+  await render();
+  await send("First");
+  host = {
+    ...host!,
+    revision: host!.revision + 1,
+    status: "running",
+    runId: "run",
+    session: { ...host!.session, busy: true },
+  };
+  await vi.waitFor(() => expect(byLabel("Stop")).not.toBeNull(), {
+    timeout: 4_000,
+  });
+  const textarea = container.querySelector("textarea")!;
+  expect(textarea.placeholder).toBe("Wait for this turn to finish, or stop it…");
+
+  await type("Second");
+  // Typing does not swap Stop for a Send the host would refuse.
+  expect(byLabel("Stop")).not.toBeNull();
+  expect(byLabel("Send")).toBeNull();
+  await act(async () => {
+    textarea.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Enter", bubbles: true }),
+    );
+  });
+  await settle();
+  expect(commands.filter((command) => command.type === "send")).toHaveLength(1);
+  expect(textarea.value).toBe("Second");
+  expect(container.querySelector('[role="status"]')?.textContent).toContain(
+    "The turn on Home server is still running.",
+  );
+
+  host = {
+    ...host!,
+    revision: host!.revision + 1,
+    status: "idle",
+    runId: undefined,
+    session: { ...host!.session, busy: false },
+  };
+  await vi.waitFor(() => expect(byLabel("Send")).not.toBeNull(), {
+    timeout: 4_000,
+  });
+  expect(container.querySelector('[role="status"]')).toBeNull();
+  await act(async () => byLabel("Send")!.click());
+  await settle();
+  expect(commands.at(-1)).toMatchObject({ type: "send", text: "Second" });
+});
+
 it.each([false, true])("retries a lost create response without duplicating the first turn (remount: %s)", async (remount) => {
   const original = vi.mocked(invoke).getMockImplementation()!;
   let accepted: ReturnType<typeof dispatch> | undefined;

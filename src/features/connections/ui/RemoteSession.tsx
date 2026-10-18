@@ -65,6 +65,7 @@ export type RemoteSessionOverrides = Partial<SessionPaneProps> & {
   remoteSessionLoading: boolean;
   remoteSessionStarted: boolean;
   allowedModelHarnesses: readonly HarnessId[];
+  allowBusySubmit: boolean;
 };
 
 type Configuration = {
@@ -323,6 +324,12 @@ function ConnectedRemoteSession({
     !hasHostBlock(pending.commandId);
   const busy =
     !!hostSession?.busy || unseenActive || (startingActive && !starting?.draft) || pendingSendActive;
+  // The host takes no message while a turn runs, which can last as long as the
+  // background work Claude left going. Say so instead of ignoring the send.
+  const [heldBack, setHeldBack] = useState(false);
+  useEffect(() => {
+    if (!busy) setHeldBack(false);
+  }, [busy]);
   // An accepted turn stays on screen until a sync shows the host's copy, so
   // the transcript never drops it for a moment in between.
   useEffect(() => {
@@ -847,6 +854,8 @@ function ConnectedRemoteSession({
     asDraft = false,
     planBlockId?: string,
   ): boolean => {
+    if (busy && !asDraft && (text.trim() || attachments.length))
+      setHeldBack(true);
     if (
       !online ||
       sending ||
@@ -1068,6 +1077,11 @@ function ConnectedRemoteSession({
               text: error,
               action: { label: "Dismiss", run: () => setError("") },
             }
+          : heldBack
+            ? {
+                text: `The turn on ${machine.name} is still running. Your message is kept here; send it when the turn ends, or stop it first.`,
+                action: { label: "Dismiss", run: () => setHeldBack(false) },
+              }
           : catalogProblem
             ? {
                 text: `Couldn’t load models from ${machine.name}.`,
@@ -1185,6 +1199,7 @@ function ConnectedRemoteSession({
     },
     remoteSessionLoading: !!sessionId && !hostSession && !session.blocks.length,
     remoteSessionStarted: !!sessionId,
+    allowBusySubmit: false,
     allowedModelHarnesses: hostSession
       ? [hostSession.harness]
       : providers.length

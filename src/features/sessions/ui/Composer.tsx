@@ -2163,14 +2163,16 @@ export function Composer({
                       : handoffCard
                         ? "Add context, or send to continue…"
                         : (placeholder ??
-                          (busy && !remote
-                            ? loadFollowUpBehavior() === "steer" &&
-                              canSteerHarness(harness)
-                              ? "Steer now, or /queue it for after this turn…"
-                              : "Queue a follow-up for after this turn…"
-                            : shell
-                              ? "Ask, build, / for commands, @ for references... "
-                              : "Ask, build, / for commands, @ for references... "))
+                          (busy && !allowBusySubmit
+                            ? "Wait for this turn to finish, or stop it…"
+                            : busy && !remote
+                              ? loadFollowUpBehavior() === "steer" &&
+                                canSteerHarness(harness)
+                                ? "Steer now, or /queue it for after this turn…"
+                                : "Queue a follow-up for after this turn…"
+                              : shell
+                                ? "Ask, build, / for commands, @ for references... "
+                                : "Ask, build, / for commands, @ for references... "))
               }
               aria-label={inputAriaLabel}
               disabled={disabled}
