@@ -243,7 +243,13 @@ type Props = {
   hideTopBar?: boolean;
   /** Keeps local file mentions, skills, and app modes off for host sessions. */
   remoteSession?: boolean;
-  remoteFeatures?: { attachments: boolean; plan: boolean; draft: boolean };
+  remoteFeatures?: {
+    attachments: boolean;
+    plan: boolean;
+    draft: boolean;
+    /** The host's agent takes a message during a running turn. */
+    steer?: boolean;
+  };
   context?: ContextUsage;
   /** Running input/output totals, shown beside the context ring. */
   tokenTotals?: SessionTokenTotals;
@@ -580,7 +586,11 @@ export function Composer({
   const slashItems = useMemo(
     () =>
       remote
-        ? [...(remoteFeatures?.plan ? [PLAN_COMMAND] : []), COMPACT_COMMAND]
+        ? [
+            ...(remoteFeatures?.plan ? [PLAN_COMMAND] : []),
+            QUEUE_COMMAND,
+            COMPACT_COMMAND,
+          ]
         : [
             SESSION_FOLDER_COMMAND,
             MCP_COMMAND,
@@ -680,8 +690,7 @@ export function Composer({
     orchestrationSelected || leadingMode?.name === ORCHESTRATOR_COMMAND.name;
   const draftActive = draftSelected || leadingMode?.name === DRAFT_COMMAND.name;
   const planActive = planSelected || leadingMode?.name === PLAN_COMMAND.name;
-  const queueActive =
-    !remote && (queueSelected || leadingMode?.name === QUEUE_COMMAND.name);
+  const queueActive = queueSelected || leadingMode?.name === QUEUE_COMMAND.name;
   // With nothing running and nothing waiting, a queued message just sends.
   const queueing = queueActive && (busy || queuedMessages.length > 0);
 
@@ -1447,7 +1456,7 @@ export function Composer({
         ? folderCommand.text
         : value,
     );
-    const queued = !remote && (queueSelected || queueCommand.matched);
+    const queued = queueSelected || queueCommand.matched;
     const command = consumePlanCommand(
       queued
         ? queueCommand.text
@@ -2163,14 +2172,18 @@ export function Composer({
                       : handoffCard
                         ? "Add context, or send to continue…"
                         : (placeholder ??
-                          (busy && !remote
-                            ? loadFollowUpBehavior() === "steer" &&
-                              canSteerHarness(harness)
-                              ? "Steer now, or /queue it for after this turn…"
-                              : "Queue a follow-up for after this turn…"
-                            : shell
-                              ? "Ask, build, / for commands, @ for references... "
-                              : "Ask, build, / for commands, @ for references... "))
+                          (busy && !allowBusySubmit
+                            ? "Wait for this turn to finish, or stop it…"
+                            : busy
+                              ? loadFollowUpBehavior() === "steer" &&
+                                (remote
+                                  ? !!remoteFeatures?.steer
+                                  : canSteerHarness(harness))
+                                ? "Steer now, or /queue it for after this turn…"
+                                : "Queue a follow-up for after this turn…"
+                              : shell
+                                ? "Ask, build, / for commands, @ for references... "
+                                : "Ask, build, / for commands, @ for references... "))
               }
               aria-label={inputAriaLabel}
               disabled={disabled}
@@ -2380,7 +2393,7 @@ export function Composer({
                       ) : null}
                     </button>
                   ) : null}
-                  {!remote && (busy || queuedMessages.length > 0) ? (
+                  {busy || queuedMessages.length > 0 ? (
                     <button
                       type="button"
                       aria-pressed={queueActive}

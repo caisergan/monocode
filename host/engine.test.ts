@@ -737,6 +737,83 @@ describe("headless session ownership", () => {
     expect(provider.approve).toHaveBeenCalledWith(id, 7, "allow");
   });
 
+  it("hands a message to the running turn and keeps it in the transcript", async () => {
+    const { engine, store, turns, provider, id } = setup("claude");
+    provider.steer = vi.fn(async () => {});
+    engine.command({ type: "send", commandId: "send", sessionId: id, text: "Work" });
+    await vi.waitFor(() => expect(turns).toHaveLength(1));
+    const runId = store.session(id).runId!;
+    const steer = {
+      type: "steer",
+      commandId: "steer-1",
+      sessionId: id,
+      runId,
+      text: "Also check the logs",
+    };
+    expect(() => engine.command({ ...steer, runId: "stale" })).toThrow(
+      "finished or replaced",
+    );
+    engine.command(steer);
+    // A retried request returns its receipt without a second delivery.
+    engine.command(steer);
+    await vi.waitFor(() => expect(provider.steer).toHaveBeenCalledTimes(1));
+    expect(provider.steer).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: id, text: "Also check the logs" }),
+    );
+    const saved = store.session(id);
+    expect(saved.status).toBe("running");
+    expect(saved.session.blocks.at(-1)).toMatchObject({
+      id: "steer-1",
+      role: "user",
+      text: "Also check the logs",
+    });
+    turns[0].finish();
+    await vi.waitFor(() => expect(store.session(id).status).toBe("idle"));
+    expect(() =>
+      engine.command({ ...steer, commandId: "steer-2" }),
+    ).toThrow("finished or replaced");
+  });
+
+  it("reports a message the running turn could not take", async () => {
+    const { engine, store, turns, provider, id } = setup("claude");
+    provider.steer = vi.fn(async () => {
+      throw new Error("No active turn to steer");
+    });
+    engine.command({ type: "send", commandId: "send", sessionId: id, text: "Work" });
+    await vi.waitFor(() => expect(turns).toHaveLength(1));
+    engine.command({
+      type: "steer",
+      commandId: "steer",
+      sessionId: id,
+      runId: store.session(id).runId!,
+      text: "Too early",
+    });
+    await vi.waitFor(() => {
+      expect(
+        store.session(id).session.blocks.some((block) =>
+          block.text?.includes("No active turn to steer"),
+        ),
+      ).toBe(true);
+    });
+    turns[0].finish();
+  });
+
+  it("refuses a mid-turn message for an agent that cannot take one", async () => {
+    const { engine, store, turns, id } = setup();
+    engine.command({ type: "send", commandId: "send", sessionId: id, text: "Work" });
+    await vi.waitFor(() => expect(turns).toHaveLength(1));
+    expect(() =>
+      engine.command({
+        type: "steer",
+        commandId: "steer",
+        sessionId: id,
+        runId: store.session(id).runId!,
+        text: "More",
+      }),
+    ).toThrow("cannot take a message mid-turn");
+    turns[0].finish();
+  });
+
   it("stores pending questions and rejects a second device's stale answer", async () => {
     const { engine, store, turns, provider, id } = setup();
     engine.command({
