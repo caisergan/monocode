@@ -26,7 +26,11 @@ if [ ! -x "$ENTRY" ] || [ "$FORCE_UPGRADE" = 1 ]; then
       echo 'Install curl or wget on this host and reconnect.' >&2; exit 1
     fi
   }
-  if ! download "$RELEASE/$FILE" "$TMP/$FILE" || ! download "$RELEASE/$FILE.sha256" "$TMP/checksum"; then
+  # A package built on the desktop is uploaded instead of downloaded.
+  if [ -n "${MONOCODE_HOST_ARCHIVE:-}" ]; then
+    mv "$MONOCODE_HOST_ARCHIVE" "$TMP/$FILE" || { echo 'The uploaded MonoCode Host package is missing.' >&2; exit 1; }
+    printf '%s\n' "${MONOCODE_HOST_ARCHIVE_SHA256:-}" > "$TMP/checksum"
+  elif ! download "$RELEASE/$FILE" "$TMP/$FILE" || ! download "$RELEASE/$FILE.sha256" "$TMP/checksum"; then
     echo "The MonoCode Host package for version $VERSION is unavailable. Install a MonoCode release that includes host packages." >&2; exit 1
   fi
   EXPECTED=$(awk 'NR == 1 {print $1}' "$TMP/checksum")
@@ -42,6 +46,10 @@ if [ ! -x "$ENTRY" ] || [ "$FORCE_UPGRADE" = 1 ]; then
   [ "$EXPECTED" = "$ACTUAL" ] || { echo 'MonoCode Host package checksum mismatch.' >&2; exit 1; }
   mkdir "$TMP/unpacked"
   tar -xzf "$TMP/$FILE" -C "$TMP/unpacked"
+  # An upload without Node reuses the one the running host has.
+  if [ -n "${MONOCODE_HOST_NODE:-}" ] && [ ! -e "$TMP/unpacked/bin/node" ]; then
+    mkdir -p "$TMP/unpacked/bin" && cp "$MONOCODE_HOST_NODE" "$TMP/unpacked/bin/node"
+  fi
   [ "$("$TMP/unpacked/monocode-host" --version)" = "$VERSION" ] || { echo 'MonoCode Host version mismatch.' >&2; exit 1; }
   DEST="$BASE/runtime/$VERSION-$OS-$ARCH-$(basename "$TMP")"
   # Concurrent installations never replace a directory used by a running host.
@@ -66,4 +74,11 @@ if [ "$EXISTED" = 1 ] && [ "$FORCE_UPGRADE" = 1 ]; then
   "$ENTRY" service uninstall >/dev/null
 fi
 "$ENTRY" service install --port "$HOST_PORT" >/dev/null
+if [ "$FORCE_UPGRADE" = 1 ]; then
+  # Earlier runtimes are unused once the new host has started.
+  CURRENT=$(cat "$BASE/runtime-path")
+  for OLD in "$BASE"/runtime/*; do
+    [ "$OLD" = "$CURRENT" ] || rm -rf "$OLD"
+  done
+fi
 "$ENTRY" connection-info

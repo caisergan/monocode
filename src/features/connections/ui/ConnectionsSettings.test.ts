@@ -203,6 +203,94 @@ it("offers a host update for a machine that can't import terminal sessions", asy
   expect(button("Update Host")).toBeDefined();
 });
 
+it("offers a host update when the source branch has moved past the host's build", async () => {
+  machines = [machine];
+  let built = "a".repeat(40);
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command === "remote_machines") return [...machines];
+    if (command === "remote_host_source_head") return "b".repeat(40);
+    if (command === "remote_request")
+      return {
+        environmentId: "env",
+        providers: ["claude"],
+        capabilities: [
+          "workspace.run",
+          "git.worktreeCreate",
+          "agentSessions.import",
+        ],
+        build: { commit: built },
+      };
+    if (command === "remote_ssh_reconnect") return "setup";
+    if (command === "remote_ssh_poll") return { ...state };
+    throw new Error(`Unexpected command ${command}`);
+  });
+  await render();
+  expect(container.textContent).toContain(
+    "Connected · host update available (dev bbbbbbb)",
+  );
+  await act(async () => button("Update Host").click());
+  expect(invoke).toHaveBeenCalledWith("remote_ssh_reconnect", {
+    machineId: machine.id,
+    upgrade: true,
+  });
+
+  built = "b".repeat(40);
+  state = { ...state, done: true, machine };
+  await act(async () => vi.advanceTimersByTimeAsync(10_500));
+  expect(container.textContent).toContain("Connected · host at dev bbbbbbb");
+  expect(button("Update Host")).toBeUndefined();
+  // The branch head is cached between status checks.
+  expect(
+    vi
+      .mocked(invoke)
+      .mock.calls.filter(([command]) => command === "remote_host_source_head"),
+  ).toHaveLength(1);
+});
+
+it("treats a host without build information as behind the source branch", async () => {
+  machines = [machine];
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command === "remote_machines") return [...machines];
+    if (command === "remote_host_source_head") return "b".repeat(40);
+    if (command === "remote_request")
+      return {
+        environmentId: "env",
+        providers: ["claude"],
+        capabilities: [
+          "workspace.run",
+          "git.worktreeCreate",
+          "agentSessions.import",
+        ],
+      };
+    throw new Error(`Unexpected command ${command}`);
+  });
+  await render();
+  expect(container.textContent).toContain("host update available");
+  expect(button("Update Host")).toBeDefined();
+});
+
+it("keeps an up-to-date status when the source branch can't be checked", async () => {
+  machines = [machine];
+  vi.mocked(invoke).mockImplementation(async (command) => {
+    if (command === "remote_machines") return [...machines];
+    if (command === "remote_host_source_head") throw new Error("offline");
+    if (command === "remote_request")
+      return {
+        environmentId: "env",
+        providers: ["claude"],
+        capabilities: [
+          "workspace.run",
+          "git.worktreeCreate",
+          "agentSessions.import",
+        ],
+      };
+    throw new Error(`Unexpected command ${command}`);
+  });
+  await render();
+  expect(container.textContent).toContain("Connected");
+  expect(button("Update Host")).toBeUndefined();
+});
+
 it("advertises every supported provider when checking a host", async () => {
   machines = [machine];
   await render();
