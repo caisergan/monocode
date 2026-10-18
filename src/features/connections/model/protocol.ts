@@ -82,6 +82,19 @@ export type HostSessionSummary = Omit<
   draft?: boolean;
 };
 
+/** The recap of the chat a new session continues. The host adds it to the
+ * agent's prompt and keeps it on the user message, which shows it as a card. */
+export type RemoteHandoff = {
+  from: RemoteProvider;
+  brief: string;
+  /** Title of the chat the recap was read from. */
+  source?: string;
+  sourceId?: string;
+  files?: number;
+};
+/** Hosts without it drop `handoff` from a send, so it must be checked first. */
+export const HOST_HANDOFF_CAPABILITY = "sessions.handoff";
+
 export type RemoteAttachment = {
   id: string;
   name: string;
@@ -174,6 +187,7 @@ export type HostCommand =
       intent?: "default" | "plan" | "build";
       draftBlockId?: string;
       planBlockId?: string;
+      handoff?: RemoteHandoff;
     }
   | {
       type: "draft";

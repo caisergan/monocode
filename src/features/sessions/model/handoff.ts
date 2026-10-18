@@ -5,6 +5,7 @@ import { displayPath } from "../../../shared/lib/paths";
 import { sameProviderAccountId } from "../../providers/model/providerAccounts";
 import {
   HARNESS_TITLE,
+  formatSessionTitle,
   type Block,
   type HarnessId,
   type HandoffMeta,
@@ -14,6 +15,14 @@ import {
 } from "./session";
 
 export const HANDOFF_TITLE = "Handoff";
+
+/** A continued chat keeps its source's title; an untitled source gives "Handoff". */
+export function continuationTitle(harness: HarnessId, source?: string): string {
+  return formatSessionTitle(
+    harness,
+    !source || source === "New session" ? HANDOFF_TITLE : source,
+  );
+}
 
 /** Composer chip: recap is injected on send so the user can add context first. */
 export type HandoffComposerCard = {

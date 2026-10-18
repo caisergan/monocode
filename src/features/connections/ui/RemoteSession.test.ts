@@ -11,7 +11,11 @@ import type { Block, Session } from "../../sessions/model/session";
 import type { AgentModel } from "../../sessions/model/models";
 import { rememberRemoteProject } from "../model/remoteProjects";
 import { preloadRemoteSession } from "./RemoteSession";
-import { rememberRemoteSession, remoteSessionFor } from "../model/connections";
+import {
+  rememberRemotePendingWorktree,
+  rememberRemoteSession,
+  remoteSessionFor,
+} from "../model/connections";
 import "../model/remoteCommands";
 import type {
   HostCommand,
@@ -33,6 +37,7 @@ vi.mock("../../sessions/ui/AgentTranscript", () => ({
     onRemoveDraft,
     onOpenFile,
     onOpenDiff,
+    onOpenSession,
   }: {
     blocks: Block[];
     busy: boolean;
@@ -40,10 +45,21 @@ vi.mock("../../sessions/ui/AgentTranscript", () => ({
     onRemoveDraft?: (block: Block) => void;
     onOpenFile?: (path: string) => void;
     onOpenDiff?: (path: string) => void;
+    onOpenSession?: (sessionId: string) => void;
   }) =>
     createElement(
       "ol",
       { "aria-label": "Transcript", "data-busy": busy },
+      blocks.map((block) => {
+        const sourceId = block.secondOpinion?.sourceId;
+        return sourceId
+          ? createElement("button", {
+              key: `${block.id}-source`,
+              "aria-label": `Open continued chat ${block.secondOpinion?.source}`,
+              onClick: () => onOpenSession?.(sourceId),
+            })
+          : null;
+      }),
       createElement("button", { "aria-label": "Open transcript file", onClick: () => onOpenFile?.("src/app.ts") }),
       createElement("button", { "aria-label": "Open transcript diff", onClick: () => onOpenDiff?.("src/app.ts") }),
       blocks.map((block) =>
@@ -315,7 +331,22 @@ function dispatch(command: HostCommand) {
           ...host.session.blocks.filter(
             (block) => block.id !== command.draftBlockId,
           ),
-          { id: command.commandId, role: "user", text: command.text },
+          {
+            id: command.commandId,
+            role: "user",
+            text: command.text,
+            ...(command.handoff
+              ? {
+                  secondOpinion: {
+                    kind: "handoff" as const,
+                    from: command.handoff.from,
+                    to: host.session.harness,
+                    source: command.handoff.source,
+                    sourceId: command.handoff.sourceId,
+                  },
+                }
+              : {}),
+          },
           { id: `${command.commandId}-reply`, role: "assistant", text: "Done" },
         ],
       },
@@ -601,6 +632,72 @@ it("creates the host session with the chosen settings on the first message", asy
   });
   expect(remoteSessionFor("shell")).toBe("host-session");
   expect(container.textContent).toContain("Fix the tests");
+});
+
+const continued = (): Session => ({
+  ...shell(),
+  harness: "codex",
+  model: "codex:gpt-test",
+  modelSettings: { reasoningEffort: "medium" },
+  title: "codex · Remote work",
+  handoffCard: {
+    from: "codex",
+    to: "codex",
+    brief: "## First request\nFix the host",
+    source: "Remote work",
+    sourceId: "source-session",
+    files: 2,
+  },
+});
+
+it("sends a continued chat's recap with its first message, in the source's worktree", async () => {
+  capabilities.push("sessions.handoff");
+  rememberRemotePendingWorktree("shell", "/home/me/repo-worktrees/dev");
+  const onHandoffCardDismiss = vi.fn();
+  await render(continued(), { onHandoffCardDismiss });
+  expect(container.textContent).toContain("Remote work");
+  await act(async () => byLabel("Send")!.click());
+  await settle();
+  expect(commands.map((command) => command.type)).toEqual(["create", "send"]);
+  expect(commands[0]).toMatchObject({
+    harness: "codex",
+    model: "codex:gpt-test",
+    worktreeCwd: "/home/me/repo-worktrees/dev",
+  });
+  expect(commands[1]).toMatchObject({
+    sessionId: "host-session",
+    text: "",
+    handoff: {
+      from: "codex",
+      brief: "## First request\nFix the host",
+      source: "Remote work",
+      sourceId: "source-session",
+      files: 2,
+    },
+  });
+  expect(onHandoffCardDismiss).toHaveBeenCalledWith("shell");
+});
+
+it("keeps the recap on screen instead of sending it to a host that would drop it", async () => {
+  await render(continued());
+  await type("Carry on");
+  await act(async () => byLabel("Send")!.click());
+  await settle();
+  expect(commands).toEqual([]);
+  expect(container.textContent).toContain(
+    "The host on Home server is too old to send this chat’s recap.",
+  );
+  expect(container.textContent).toContain("Remote work");
+});
+
+it("opens the chat a continued chat came from on the same host", async () => {
+  capabilities.push("sessions.handoff");
+  const onSelectRemoteSession = vi.fn();
+  await render(continued(), { onSelectRemoteSession });
+  await act(async () => byLabel("Send")!.click());
+  await settle();
+  await act(async () => byLabel("Open continued chat Remote work")!.click());
+  expect(onSelectRemoteSession).toHaveBeenCalledWith(projectKey, "source-session");
 });
 
 it("keeps a new session on its selected remote provider", async () => {

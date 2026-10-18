@@ -27,8 +27,15 @@ import {
   type HostCommand,
   type HostSession,
   type CommandReceipt,
+  type RemoteHandoff,
   type RemoteProvider,
 } from "../src/features/connections/model/protocol";
+import {
+  continuationTitle,
+  handoffTurnCard,
+  wrapHandoffPrompt,
+} from "../src/features/sessions/model/handoff";
+import { CONTINUE_PROMPT } from "../src/features/sessions/model/inFlight";
 import type { HostProvider } from "./providers";
 import { HostStore } from "./store";
 import { parseRemoteAttachments, resolveAttachments } from "./attachments";
@@ -72,6 +79,38 @@ function modelSettings(value: unknown): Record<string, string> {
   )
     throw new Error("Invalid model settings");
   return Object.fromEntries(entries) as Record<string, string>;
+}
+
+function parseHandoff(value: unknown): RemoteHandoff {
+  if (!value || typeof value !== "object" || Array.isArray(value))
+    throw new Error("Invalid handoff");
+  const v = value as Record<string, unknown>;
+  if (!isRemoteProvider(v.from)) throw new Error("Invalid handoff provider");
+  if (
+    typeof v.brief !== "string" ||
+    v.brief.length > 64_000 ||
+    v.brief.includes("\0")
+  )
+    throw new Error("Invalid handoff");
+  if (
+    v.files !== undefined &&
+    (typeof v.files !== "number" ||
+      !Number.isInteger(v.files) ||
+      v.files < 0 ||
+      v.files > 100_000)
+  )
+    throw new Error("Invalid handoff");
+  return {
+    from: v.from,
+    brief: v.brief,
+    ...(v.source !== undefined
+      ? { source: text(v.source, "handoff source", 500) }
+      : {}),
+    ...(v.sourceId !== undefined
+      ? { sourceId: text(v.sourceId, "handoff source ID") }
+      : {}),
+    ...(v.files ? { files: v.files as number } : {}),
+  };
 }
 
 export function parseCommand(input: unknown): HostCommand {
@@ -126,12 +165,17 @@ export function parseCommand(input: unknown): HostCommand {
   if (v.type === "compact") return { type: "compact", commandId, sessionId };
   if (v.type === "send" || v.type === "draft") {
     const attachments = parseRemoteAttachments(v.attachments);
+    if (v.handoff !== undefined && v.type !== "send")
+      throw new Error("Invalid handoff");
+    const handoff =
+      v.handoff !== undefined ? parseHandoff(v.handoff) : undefined;
     if (
       typeof v.text !== "string" ||
       v.text.length > 256_000 ||
       v.text.includes("\0") ||
       (!v.text.trim() &&
         attachments.length === 0 &&
+        !handoff &&
         !(v.type === "send" && v.draftBlockId !== undefined))
     )
       throw new Error("Invalid prompt");
@@ -161,6 +205,7 @@ export function parseCommand(input: unknown): HostCommand {
       ...(v.type === "send" && v.planBlockId !== undefined
         ? { planBlockId: text(v.planBlockId, "plan block ID") }
         : {}),
+      ...(handoff ? { handoff } : {}),
     };
   }
   if (v.type === "removeDraft")
@@ -670,6 +715,8 @@ export class HostEngine {
           const firstTurn =
             command.type === "send" &&
             !value.session.blocks.some((block) => !block.draft);
+          const handoff =
+            command.type === "send" ? command.handoff : undefined;
           const placeholderTitle =
             value.session.title === "New remote session" ||
             canReplaceSessionTitle(
@@ -687,11 +734,13 @@ export class HostEngine {
               pendingQuestion: undefined,
               title:
                 firstTurn && placeholderTitle
-                  ? titleFromPrompt(
-                      command.text,
-                      value.session.harness,
-                      attachments,
-                    )
+                  ? handoff
+                    ? continuationTitle(value.session.harness, handoff.source)
+                    : titleFromPrompt(
+                        command.text,
+                        value.session.harness,
+                        attachments,
+                      )
                   : value.session.title,
               blocks: [
                 ...value.session.blocks
@@ -713,6 +762,14 @@ export class HostEngine {
                   role: "user",
                   text: command.type === "compact" ? "/compact" : command.text,
                   ...(attachments.length ? { attachments } : {}),
+                  ...(handoff
+                    ? {
+                        secondOpinion: handoffTurnCard({
+                          ...handoff,
+                          to: value.session.harness,
+                        }),
+                      }
+                    : {}),
                   startedAt: Date.now(),
                   turnModel: turnModel(value.session),
                 },
@@ -722,15 +779,24 @@ export class HostEngine {
           effect = (saved) => {
             this.run(
               saved,
-              command.type === "compact" ? null : command.text,
+              command.type === "compact"
+                ? null
+                : handoff
+                  ? wrapHandoffPrompt(
+                      handoff.brief,
+                      handoff.from,
+                      command.text.trim() || CONTINUE_PROMPT,
+                    )
+                  : command.text,
               command.type === "send" ? command.intent : undefined,
               attachments,
             );
             if (firstTurn && command.type === "send") {
+              // A continued chat keeps its source's title, as it does locally.
               this.generateFirstTurnNames(
                 saved,
-                command.text,
-                placeholderTitle,
+                command.text.trim() || handoff?.source || CONTINUE_PROMPT,
+                placeholderTitle && !handoff,
               );
             }
           };
