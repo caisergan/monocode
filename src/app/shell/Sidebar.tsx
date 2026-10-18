@@ -293,6 +293,10 @@ type Props = {
   onToggleSessionSurface?: (sessionId: string) => void;
   /** Opens a fresh chat seeded with this session's recap. */
   onContinueInNewSession?: (sessionId: string) => void;
+  onContinueRemoteSessionInNewSession?: (
+    project: string,
+    sessionId: string,
+  ) => void;
   onArchiveSession?: (sessionId: string, archived: boolean) => void;
   onArchiveSessions?: (
     sessionIds: readonly string[],
@@ -412,6 +416,7 @@ function SidebarComponent({
   onRenameSession: onRenameLocalSession,
   onToggleSessionSurface: onToggleLocalSessionSurface,
   onContinueInNewSession: onContinueLocalSessionInNewSession,
+  onContinueRemoteSessionInNewSession,
   onArchiveSession: onArchiveLocalSession,
   onArchiveSessions: onArchiveLocalSessions,
   onPinSession: onPinLocalSession,
@@ -551,9 +556,10 @@ function SidebarComponent({
   const onToggleSessionSurface = remoteProject
     ? undefined
     : onToggleLocalSessionSurface;
-  // The recap is read from the transcript, which only this computer holds.
   const onContinueInNewSession = remoteProject
-    ? undefined
+    ? onContinueRemoteSessionInNewSession &&
+      ((sessionId: string) =>
+        onContinueRemoteSessionInNewSession(cwd, sessionId))
     : onContinueLocalSessionInNewSession;
   const onRenameSession = remoteProject
     ? (sessionId: string, title: string) => { void remoteChange(sessionId, { title }); }

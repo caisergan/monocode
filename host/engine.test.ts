@@ -6,6 +6,7 @@ import type { SendTurnInput } from "../src/integrations/harness/core/types";
 import type { HostProvider } from "./providers";
 import { HostEngine, parseCommand } from "./engine";
 import { HostStore } from "./store";
+import { formatSessionTitle } from "../src/features/sessions/model/session";
 import { readAttachmentChunk, writeAttachmentChunk } from "./attachments";
 
 const cleanups: Array<() => Promise<void> | void> = [];
@@ -253,6 +254,65 @@ describe("headless session ownership", () => {
     turns[0].finish();
     await vi.waitFor(() => expect(store.session(id).status).toBe("idle"));
     expect(store.session(id).session.title).toBe("codex · My own title");
+  });
+
+  it("continues a chat from its recap, keeping the card and the source's title", async () => {
+    const { engine, store, provider, turns, id } = setup("claude");
+    provider.generateTitle = vi.fn(async () => null);
+    engine.command({
+      type: "send",
+      commandId: "continue-turn",
+      sessionId: id,
+      text: "",
+      handoff: {
+        from: "claude",
+        brief: "## First request\nAdd remote handoffs",
+        source: "Remote handoffs",
+        sourceId: "source-session",
+        files: 2,
+      },
+    });
+    await vi.waitFor(() => expect(turns).toHaveLength(1));
+    expect(turns[0].input.text).toContain("Continue from where you left off.");
+    expect(turns[0].input.text).toContain(
+      "<handoff>\n## First request\nAdd remote handoffs\n</handoff>",
+    );
+    const { session } = store.session(id);
+    expect(session.title).toBe(formatSessionTitle("claude", "Remote handoffs"));
+    expect(session.blocks.at(-1)).toMatchObject({
+      role: "user",
+      text: "",
+      secondOpinion: {
+        kind: "handoff",
+        from: "claude",
+        to: "claude",
+        source: "Remote handoffs",
+        sourceId: "source-session",
+        files: 2,
+      },
+    });
+    expect(provider.generateTitle).not.toHaveBeenCalled();
+    turns[0].finish();
+    await vi.waitFor(() => expect(store.session(id).status).toBe("idle"));
+  });
+
+  it("puts the user's own words ahead of the recap", async () => {
+    const { engine, store, turns, id } = setup();
+    engine.command({
+      type: "send",
+      commandId: "continue-with-text",
+      sessionId: id,
+      text: "Now add tests",
+      handoff: { from: "codex", brief: "Recap", source: "New session" },
+    });
+    await vi.waitFor(() => expect(turns).toHaveLength(1));
+    expect(turns[0].input.text).toMatch(/^You are continuing[^]*\n\nNow add tests\n/);
+    expect(store.session(id).session.title).toBe(
+      formatSessionTitle("codex", "Handoff"),
+    );
+    expect(store.session(id).session.blocks.at(-1)?.text).toBe("Now add tests");
+    turns[0].finish();
+    await vi.waitFor(() => expect(store.session(id).status).toBe("idle"));
   });
 
   it("uses one creation timestamp and advances only updatedAt on later commands", () => {
@@ -889,6 +949,22 @@ describe("headless session ownership", () => {
   it("validates untrusted commands before execution", () => {
     expect(() =>
       parseCommand({ type: "send", commandId: "x", sessionId: "y", text: "" }),
+    ).toThrow();
+    const handoff = { from: "codex", brief: "Recap" };
+    expect(
+      parseCommand({ type: "send", commandId: "x", sessionId: "y", text: "", handoff }),
+    ).toMatchObject({ handoff });
+    for (const invalid of [
+      { from: "shell", brief: "Recap" },
+      { from: "codex", brief: 42 },
+      { from: "codex", brief: "Recap", files: -1 },
+      { from: "codex", brief: "Recap", sourceId: "" },
+    ])
+      expect(() =>
+        parseCommand({ type: "send", commandId: "x", sessionId: "y", text: "", handoff: invalid }),
+      ).toThrow();
+    expect(() =>
+      parseCommand({ type: "draft", commandId: "x", sessionId: "y", text: "Hi", handoff }),
     ).toThrow();
     expect(() =>
       parseCommand({

@@ -10,6 +10,7 @@ import type {
   WorkspaceMode,
   PlanBuildTarget,
 } from "../../sessions/model/session";
+import { handoffTurnCard } from "../../sessions/model/handoff";
 import { uploadRemoteAttachments } from "../model/remoteAttachments";
 import { temporaryWorktreeBranchName } from "../../source-control/model/worktrees";
 import type { AgentModel } from "../../sessions/model/models";
@@ -45,6 +46,7 @@ import {
   sameModelSettings,
 } from "../model/remoteModels";
 import {
+  HOST_HANDOFF_CAPABILITY,
   isRemoteProvider,
   REMOTE_PROVIDERS,
   requireHostDescriptor,
@@ -55,6 +57,7 @@ import {
   type HostSession,
   type HostWorktree,
   type RemoteAttachment,
+  type RemoteHandoff,
   type RemoteMachine,
   type RemoteProvider,
 } from "../model/protocol";
@@ -82,6 +85,7 @@ type OptimisticTurn = {
   draft?: boolean;
   draftBlockId?: string;
   planBlockId?: string;
+  handoff?: RemoteHandoff;
   startedAt: number;
   turnModel: NonNullable<Block["turnModel"]>;
 };
@@ -121,6 +125,8 @@ export function RemoteSession({
   onOpenFile,
   onOpenDiff,
   onOpenPlan,
+  onOpenSession,
+  onHandoffSent,
   render,
 }: {
   /** The tab's local session, which provides its ID and new-session defaults. */
@@ -130,6 +136,10 @@ export function RemoteSession({
   onOpenFile: SessionPaneProps["onOpenFile"];
   onOpenDiff: SessionPaneProps["onOpenDiff"];
   onOpenPlan: SessionPaneProps["onOpenPlan"];
+  /** Opens another conversation on the same host, by its host ID. */
+  onOpenSession?: (sessionId: string) => void;
+  /** The host accepted the first message, with the recap of a continued chat. */
+  onHandoffSent?: () => void;
   render: (overrides: RemoteSessionOverrides) => ReactNode;
 }) {
   const project = remoteProjectFor(shell.cwd);
@@ -169,6 +179,8 @@ export function RemoteSession({
       onOpenFile={onOpenFile}
       onOpenDiff={onOpenDiff}
       onOpenPlan={onOpenPlan}
+      onOpenSession={onOpenSession}
+      onHandoffSent={onHandoffSent}
       machine={machine}
       project={project}
       render={render}
@@ -183,6 +195,8 @@ function ConnectedRemoteSession({
   onOpenFile,
   onOpenDiff,
   onOpenPlan,
+  onOpenSession,
+  onHandoffSent,
   machine,
   project,
   render,
@@ -193,6 +207,8 @@ function ConnectedRemoteSession({
   onOpenFile: SessionPaneProps["onOpenFile"];
   onOpenDiff: SessionPaneProps["onOpenDiff"];
   onOpenPlan: SessionPaneProps["onOpenPlan"];
+  onOpenSession?: (sessionId: string) => void;
+  onHandoffSent?: () => void;
   machine: RemoteMachine;
   project: RemoteProject;
   render: (overrides: RemoteSessionOverrides) => ReactNode;
@@ -259,6 +275,7 @@ function ConnectedRemoteSession({
       | "turnModel"
       | "attachments"
       | "draftBlockId"
+      | "handoff"
     > & {
       sessionId: string;
     }
@@ -556,6 +573,7 @@ function ConnectedRemoteSession({
               turnModel: optimistic?.turnModel ?? selectedTurnModel(),
               draftBlockId:
                 command.type === "send" ? command.draftBlockId : undefined,
+              handoff: command.type === "send" ? command.handoff : undefined,
             },
       );
     // Keep the original ID across disconnects and app restarts. An ambiguous
@@ -580,6 +598,7 @@ function ConnectedRemoteSession({
         machine.environmentId,
         command.commandId,
       );
+      if (command.type === "send" && command.handoff) onHandoffSent?.();
       if (!alive.current || version !== bindingVersion.current) return receipt;
       if (command.type === "draft") {
         // Accepted drafts are actionable before the next snapshot arrives.
@@ -738,6 +757,7 @@ function ConnectedRemoteSession({
             turn.intent,
             turn.draftBlockId,
             turn.planBlockId,
+            turn.handoff,
           ),
       turn,
     );
@@ -784,7 +804,7 @@ function ConnectedRemoteSession({
       }
       const followup: Exclude<HostCommand, { type: "create" }> = turn.draft
         ? { type: "draft", commandId: turn.commandId, sessionId: "", text: turn.text, attachments: uploaded }
-        : message("", turn.text, turn.commandId, uploaded, turn.intent, turn.draftBlockId, turn.planBlockId);
+        : message("", turn.text, turn.commandId, uploaded, turn.intent, turn.draftBlockId, turn.planBlockId, turn.handoff);
       const receipt = await run({
         type: "create",
         commandId: crypto.randomUUID(),
@@ -823,10 +843,12 @@ function ConnectedRemoteSession({
     intent: "default" | "plan" | "build" = "default",
     draftBlockId?: string,
     planBlockId?: string,
+    handoff?: RemoteHandoff,
   ): Extract<HostCommand, { type: "send" | "compact" }> =>
     text.trim().toLowerCase() === "/compact" &&
     !attachments.length &&
     !draftBlockId &&
+    !handoff &&
     intent === "default"
       ? { type: "compact", commandId, sessionId: id }
       : {
@@ -838,6 +860,7 @@ function ConnectedRemoteSession({
           intent,
           ...(draftBlockId ? { draftBlockId } : {}),
           ...(planBlockId ? { planBlockId } : {}),
+          ...(handoff ? { handoff } : {}),
         };
 
   const submit = (
@@ -847,27 +870,55 @@ function ConnectedRemoteSession({
     asDraft = false,
     planBlockId?: string,
   ): boolean => {
+    // A continued chat's recap goes out with its first message.
+    const card = sessionId ? undefined : shell.handoffCard;
     if (
       !online ||
       sending ||
       preparingRef.current ||
       pending ||
       busy ||
-      (!text.trim() && !attachments.length)
+      (asDraft && card) ||
+      (!text.trim() && !attachments.length && !card)
     )
       return false;
+    if (card) {
+      // An older host would drop the recap and send only the typed text.
+      if (
+        !descriptor?.capabilities.includes(HOST_HANDOFF_CAPABILITY) ||
+        !isRemoteProvider(card.from)
+      ) {
+        setError(
+          `The host on ${machine.name} is too old to send this chat’s recap. Install a host built from this version of MonoCode.`,
+        );
+        return false;
+      }
+    }
     const intent =
       options?.intent === "plan" || options?.intent === "build"
         ? options.intent
         : "default";
-    const turn = optimisticTurn(
-      text,
-      attachments,
-      intent,
-      asDraft,
-      options?.draftBlockId,
-      planBlockId,
-    );
+    const turn: OptimisticTurn = {
+      ...optimisticTurn(
+        text,
+        attachments,
+        intent,
+        asDraft,
+        options?.draftBlockId,
+        planBlockId,
+      ),
+      ...(card
+        ? {
+            handoff: {
+              from: card.from as RemoteProvider,
+              brief: card.brief,
+              ...(card.source ? { source: card.source } : {}),
+              ...(card.sourceId ? { sourceId: card.sourceId } : {}),
+              ...(card.files ? { files: card.files } : {}),
+            },
+          }
+        : {}),
+    };
     preparingRef.current = true;
     setStarting(turn);
     if (!hostSession) {
@@ -971,6 +1022,16 @@ function ConnectedRemoteSession({
   const blocks: Block[] = (hostSession?.blocks ?? []).filter(
     (block) => !leavingDrafts.has(block.id),
   );
+  // A continued chat's first message shows its source chat until the host's copy arrives.
+  const continued = (handoff?: RemoteHandoff) =>
+    handoff
+      ? {
+          secondOpinion: handoffTurnCard({
+            ...handoff,
+            to: configuration.harness,
+          }),
+        }
+      : {};
   const unconfirmed: Block | undefined =
     unseenActive && unseenSend
       ? {
@@ -980,12 +1041,14 @@ function ConnectedRemoteSession({
           attachments: unseenSend.attachments,
           startedAt: unseenSend.startedAt,
           turnModel: unseenSend.turnModel,
+          ...continued(unseenSend.handoff),
         }
       : pendingSendActive && pending
         ? {
             id: pending.commandId,
             role: "user",
             text: pending.type === "send" ? pending.text : "/compact",
+            ...continued(pending.type === "send" ? pending.handoff : undefined),
           }
         : startingActive && starting
           ? {
@@ -996,6 +1059,7 @@ function ConnectedRemoteSession({
               draft: starting.draft,
               startedAt: starting.startedAt,
               turnModel: starting.turnModel,
+              ...continued(starting.handoff),
             }
           : undefined;
   const session: Session = {
@@ -1018,6 +1082,8 @@ function ConnectedRemoteSession({
     runtimeMode: configuration.mode,
     busy,
     blocks: unconfirmed ? [...blocks, unconfirmed] : blocks,
+    // Once sent, the recap is part of the first message instead.
+    handoffCard: sessionId || starting ? undefined : shell.handoffCard,
   };
 
   const catalogProblem = catalog?.errors[configuration.harness] ?? catalogError;
@@ -1254,6 +1320,8 @@ function ConnectedRemoteSession({
     onUsageLimitResumeAtReset: noop,
     onUsageLimitDismiss: noop,
     onOpenPlan: (_, blockId) => onOpenPlan(shell.id, blockId),
+    // The chat a continued chat came from is on the same host.
+    onOpenSession,
     onBuildPlan: (_, blockId, target) => buildPlan(blockId, target),
     onSecondOpinion: undefined,
     onHandoff: undefined,

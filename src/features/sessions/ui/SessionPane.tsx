@@ -273,6 +273,8 @@ export type SessionPaneProps = {
   onOpenSessionAsChat?: (sessionId: string) => void;
   /** Opens another chat, e.g. the one a continued chat was read from. */
   onOpenSession?: (sessionId: string) => void;
+  /** Opens a conversation on another machine by its host ID. */
+  onSelectRemoteSession?: (project: string, sessionId: string) => void;
   /** Runs a session in the agent's own CLI instead of MonoCode's chat. */
   onOpenSessionInTerminal?: (sessionId: string) => void;
   /** The session's CLI ended, so its transcript is complete. */
@@ -305,6 +307,13 @@ export const SessionPane = memo(function SessionPane(props: SessionPaneProps) {
         onOpenFile={props.onOpenFile}
         onOpenDiff={props.onOpenDiff}
         onOpenPlan={props.onOpenPlan}
+        onOpenSession={
+          props.onSelectRemoteSession
+            ? (sessionId) =>
+                props.onSelectRemoteSession?.(props.session.cwd, sessionId)
+            : undefined
+        }
+        onHandoffSent={() => props.onHandoffCardDismiss?.(props.session.id)}
         render={(remote) => <LocalSessionPane {...props} {...remote} />}
       />
     );

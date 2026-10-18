@@ -8,6 +8,7 @@ import { execFile } from "node:child_process";
 import { realpath, stat } from "node:fs/promises";
 import { promisify } from "node:util";
 import {
+  HOST_HANDOFF_CAPABILITY,
   HOST_PROTOCOL_VERSION,
   type HostModelCatalog,
   type RemoteProvider,
@@ -311,6 +312,7 @@ export function createHostServer(
                 "attachments.read",
                 "sessions.draft",
                 "sessions.plan",
+                HOST_HANDOFF_CAPABILITY,
                 "agentSessions.import",
               ],
             };

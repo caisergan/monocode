@@ -345,7 +345,7 @@ import {
   chooseHandoffBrief,
   completeHandoff,
   consumeHandoff,
-  HANDOFF_TITLE,
+  continuationTitle,
   handoffTurnCard,
   isPreparingHandoff,
   pendingHandoff,
@@ -360,6 +360,10 @@ import {
 } from "../features/sessions/model/handoff";
 import { requestOutgoingHandoff } from "../features/sessions/model/handoffTurn";
 import { buildContinuationBrief } from "../features/sessions/model/continuation";
+import {
+  readRemoteContinuationSource,
+  type RemoteContinuationSource,
+} from "../features/connections/model/remoteContinuation";
 import {
   planProviderAccountSwitch,
   sessionOnProviderAccount,
@@ -10179,10 +10183,7 @@ function Workspace({
           resolveModel(harness, model),
           modelSettings,
         ),
-        title: formatSessionTitle(
-          harness,
-          display === "New session" ? HANDOFF_TITLE : display,
-        ),
+        title: continuationTitle(harness, display),
         handoffCard: buildHandoffComposerCard({
           from,
           to: harness,
@@ -10194,6 +10195,25 @@ function Workspace({
       openSessionBeside(sourceId, session, source.cwd, true);
     },
     [openSessionBeside],
+  );
+
+  /** Opens a continued chat the way "+" opens a fresh one. */
+  const openContinuedSession = useCallback(
+    (session: Session, cwd: string) => {
+      setSearchViewOpen(false);
+      setInboxViewOpen(false);
+      setNotesViewOpen(false);
+      setAutomationsViewOpen(false);
+      const tab = newTab(session.id);
+      const next = [...sessionsRef.current, session];
+      sessionsRef.current = next;
+      setSessions(next);
+      appendTab(tab, cwd);
+      setActiveTabId(tab.id);
+      setProjectTerminalFocused(false);
+      setComposerFocused(true);
+    },
+    [appendTab],
   );
 
   /** Opens a fresh chat the way "+" does, with the session's recap waiting in
@@ -10219,10 +10239,7 @@ function Workspace({
         worktreeCwd: source.worktreeCwd,
         branch: source.branch,
         modelSettings: source.modelSettings,
-        title: formatSessionTitle(
-          harness,
-          display === "New session" ? HANDOFF_TITLE : display,
-        ),
+        title: continuationTitle(harness, display),
         handoffCard: buildHandoffComposerCard({
           from: harness,
           to: harness,
@@ -10233,20 +10250,51 @@ function Workspace({
           sourceId: source.id,
         }),
       };
-      setSearchViewOpen(false);
-      setInboxViewOpen(false);
-      setNotesViewOpen(false);
-      setAutomationsViewOpen(false);
-      const tab = newTab(session.id);
-      const next = [...sessionsRef.current, session];
-      sessionsRef.current = next;
-      setSessions(next);
-      appendTab(tab, source.cwd);
-      setActiveTabId(tab.id);
-      setProjectTerminalFocused(false);
-      setComposerFocused(true);
+      openContinuedSession(session, source.cwd);
     },
-    [appendTab, loadStoredSession],
+    [loadStoredSession, openContinuedSession],
+  );
+
+  /** The same for a chat on another machine: its recap is read from the
+   * host's copy, and the new chat starts on that host. */
+  const onContinueRemoteSessionInNewSession = useCallback(
+    async (project: string, remoteSessionId: string) => {
+      let source: RemoteContinuationSource;
+      try {
+        source = await readRemoteContinuationSource(project, remoteSessionId);
+      } catch (reason) {
+        void message(String(reason).replace(/^Error: /, ""), {
+          title: "MonoCode",
+          kind: "error",
+        });
+        return;
+      }
+      const { session: hostChat, worktree } = source;
+      const { harness } = hostChat;
+      const { brief, changedFiles } = buildContinuationBrief(
+        hostChat,
+        hostChat.cwd,
+      );
+      const display = sessionDisplayTitle(hostChat.title, harness);
+      const session = {
+        ...newSession(harness, project, hostChat.model, hostChat.runtimeMode),
+        modelSettings: hostChat.modelSettings,
+        title: continuationTitle(harness, display),
+        handoffCard: buildHandoffComposerCard({
+          from: harness,
+          to: harness,
+          brief,
+          userRequest: "",
+          files: changedFiles,
+          source: display,
+          sourceId: remoteSessionId,
+        }),
+      };
+      // The new tab starts in the worktree the source chat ran in.
+      if (worktree) rememberRemotePendingWorktree(session.id, worktree);
+      openContinuedSession(session, project);
+    },
+    [openContinuedSession],
   );
 
   const autoContinueKey = sessions
@@ -13041,6 +13089,7 @@ function Workspace({
     onOpenSessionAsChat,
     onOpenSessionInTerminal,
     onOpenSession: onOpenInboxSession,
+    onSelectRemoteSession,
     onTerminalExit,
   };
 
@@ -13248,6 +13297,9 @@ function Workspace({
               onRenameSession={onRenameHistorySession}
               onToggleSessionSurface={onToggleHistorySessionSurface}
               onContinueInNewSession={onContinueInNewSession}
+              onContinueRemoteSessionInNewSession={
+                onContinueRemoteSessionInNewSession
+              }
               onArchiveSession={onArchiveHistorySession}
               onArchiveSessions={onArchiveHistorySessions}
               onPinSession={onPinHistorySession}
