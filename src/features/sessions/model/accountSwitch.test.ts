@@ -58,6 +58,12 @@ describe("planProviderAccountSwitch", () => {
     ).toEqual({ kind: "new" });
   });
 
+  it("opens a new conversation for a provider whose transcript cannot move", () => {
+    expect(
+      planProviderAccountSwitch(conversation({ harness: "devin" }), true),
+    ).toEqual({ kind: "new" });
+  });
+
   it("assigns a conversation that never reached the provider", () => {
     expect(
       planProviderAccountSwitch(

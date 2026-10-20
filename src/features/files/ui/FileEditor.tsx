@@ -41,6 +41,7 @@ import {
   MarkdownViewShell,
   useMarkdownMode,
 } from "../../sessions/ui/MarkdownModeToggle";
+import { loadFileViewMode, saveFileViewMode } from "../model/fileViewMode";
 import { useColorScheme } from "../../../shared/hooks/useColorScheme";
 import { useLockOverscroll } from "../../../shared/hooks/useLockOverscroll";
 import { isLightScheme } from "../../settings/model/appearance";
@@ -158,7 +159,7 @@ export function FileEditor({
   // HTML opens as source too, so a page's scripts run only once asked.
   const [mode, setMode] = useMarkdownMode(
     showDiff ? `review:${path}` : path,
-    showDiff || html ? "source" : "preview",
+    showDiff || html ? "source" : loadFileViewMode(),
   );
   const [diskVersion, setDiskVersion] = useState(0);
   const sourceNavigationToken = useRef<number | undefined>(undefined);
@@ -473,7 +474,11 @@ export function FileEditor({
       {markdown || svg || html ? (
         <MarkdownViewShell
           mode={mode}
-          onModeChange={setMode}
+          onModeChange={(next) => {
+            setMode(next);
+            // HTML always opens as source, so its choice is not remembered.
+            if (!showDiff && !html) saveFileViewMode(next);
+          }}
           actions={
             html && mode === "preview" ? (
               <HtmlPreviewActions
@@ -497,6 +502,7 @@ export function FileEditor({
                   metadataLabel="Properties"
                   cwd={cwd}
                   onOpenFile={onOpenFile}
+                  documentPath={path}
                 />
               </FilePreviewSearch>
             ) : html ? (

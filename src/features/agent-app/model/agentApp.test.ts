@@ -150,11 +150,21 @@ describe("agent app commands", () => {
         }, host);
         const launch = vi.mocked(host.start).mock.calls.at(-1)![0];
         expect(launch.sidebarHidden).toBe(
-          showStartedSessionsInSidebar === false ? true : undefined,
+          showStartedSessionsInSidebar === true ? undefined : true,
         );
       }
     },
   );
+
+  it("keeps sessions a regular /operator thread starts in the sidebar", async () => {
+    const { source, host } = fixture();
+    await handleAgentApp(source, "operator-launch", "sessions.start", {
+      prompt: "Write an article",
+      notifyOnComplete: false,
+    }, host);
+    const launch = vi.mocked(host.start).mock.calls.at(-1)![0];
+    expect(launch.sidebarHidden).toBeUndefined();
+  });
 
   it("uses the owning Mono's preference when a habit starts a session", async () => {
     const { source, host } = fixture();
@@ -172,6 +182,45 @@ describe("agent app commands", () => {
       expect.objectContaining({ sidebarHidden: true }),
       "app-lead-habit-launch",
     );
+  });
+
+  it("files a Mono's sessions into a folder named after it", async () => {
+    const { source, host } = fixture();
+    host.isMono = () => true;
+    host.monoOf = () => ({
+      id: "mono",
+      projects: [source.cwd],
+      showStartedSessionsInSidebar: true,
+      folder: { name: "Captain Jack", color: "#5b8def" },
+    });
+    for (const request of ["first", "second"])
+      await handleAgentApp(source, request, "sessions.start", {
+        prompt: "Review the project",
+        notifyOnComplete: false,
+      }, host);
+    expect(loadSessionFolders(source.cwd)).toEqual([
+      expect.objectContaining({
+        name: "Captain Jack",
+        customColor: "#5b8def",
+        sessionIds: ["app-lead-first", "app-lead-second"],
+      }),
+    ]);
+  });
+
+  it("leaves a hidden Mono session out of its folder", async () => {
+    const { source, host } = fixture();
+    host.isMono = () => true;
+    host.monoOf = () => ({
+      id: "mono",
+      projects: [source.cwd],
+      showStartedSessionsInSidebar: false,
+      folder: { name: "Captain Jack", color: "#5b8def" },
+    });
+    await handleAgentApp(source, "hidden", "sessions.start", {
+      prompt: "Review the project",
+      notifyOnComplete: false,
+    }, host);
+    expect(loadSessionFolders(source.cwd)).toEqual([]);
   });
 
   describe.each([
@@ -1347,6 +1396,34 @@ describe("agent app commands", () => {
         host,
       ),
     ).resolves.toMatchObject({ body: note.body });
+  });
+
+  it("saves an html visual with its kind and posts it to the reply", async () => {
+    const { source, host } = fixture();
+    host.isMono = () => true;
+    host.artifact = vi.fn(async () => null);
+    host.saveArtifact = vi.fn(async (artifact) => ({
+      ...artifact,
+      createdAt: 1,
+      updatedAt: 1,
+    }));
+    host.postArtifact = vi.fn();
+    await expect(
+      handleAgentApp(
+        source,
+        "visual",
+        "artifacts.write",
+        { kind: "html", title: "Build times", body: "<div>chart</div>" },
+        host,
+      ),
+    ).resolves.toMatchObject({ kind: "html", title: "Build times" });
+    expect(host.saveArtifact).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "html", body: "<div>chart</div>" }),
+    );
+    expect(host.postArtifact).toHaveBeenCalledWith(
+      source.id,
+      expect.objectContaining({ kind: "html" }),
+    );
   });
 
   it("rejects unsupported artifact kinds before saving or posting a card", async () => {

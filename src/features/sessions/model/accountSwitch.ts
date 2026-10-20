@@ -20,6 +20,10 @@ export function planProviderAccountSwitch(
   if (!continueOnSwitch || session.busy || isTerminalSession(session)) {
     return { kind: "new" };
   }
+  // Only Claude and Codex transcripts can be carried to another account.
+  if (session.harness !== "claude" && session.harness !== "codex") {
+    return { kind: "new" };
+  }
   // No provider thread yet, so the agent holds no history to lose.
   if (!session.providerSessionId) return { kind: "assign" };
   return {
