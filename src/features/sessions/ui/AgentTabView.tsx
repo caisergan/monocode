@@ -1,5 +1,12 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { AgentTranscript } from "./AgentTranscript";
+import { useSessionSnapshot } from "../model/sessionStateStore";
 import { TranscriptFind } from "./TranscriptFind";
 import {
   clearTranscriptJump,
@@ -17,7 +24,10 @@ import {
 import { createNote, noteTitle } from "../../notes";
 import { projectName } from "../../../shared/lib/paths";
 import { GitBranch } from "../../../shared/ui/icons";
-import { loadNotesEnabled, subscribeNotesEnabled } from "../../settings/model/settings";
+import {
+  loadNotesEnabled,
+  subscribeNotesEnabled,
+} from "../../settings/model/settings";
 
 /**
  * One orchestration worker, watched from its lead's workspace.
@@ -29,7 +39,7 @@ import { loadNotesEnabled, subscribeNotesEnabled } from "../../settings/model/se
  */
 export function AgentTabView({
   title,
-  session,
+  session: initialSession,
   visible,
   focused = visible,
   onOpenFile,
@@ -40,6 +50,7 @@ export function AgentTabView({
   focused?: boolean;
   onOpenFile?: (path: string) => void;
 }) {
+  const session = useSessionSnapshot(initialSession, visible);
   const navigateBlockRef = useRef<
     ((blockId: string | null, query?: string) => boolean) | null
   >(null);
@@ -116,7 +127,7 @@ export function AgentTabView({
   const model = findModel(session.model)?.name ?? session.model;
   return (
     <div data-agent-tab className="flex h-full min-h-0 flex-col">
-      <div className="@container relative min-h-0 flex-1">
+      <div className="relative min-h-0 flex-1">
         <AgentTranscript
           blocks={session.blocks}
           busy={session.busy}

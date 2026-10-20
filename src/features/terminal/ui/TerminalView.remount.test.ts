@@ -28,6 +28,7 @@ vi.mock("@xterm/xterm", () => ({
       onBufferChange: () => ({ dispose() {} }),
     };
     open() {}
+    loadAddon() {}
     focus() {}
     dispose() {}
     writeln() {}

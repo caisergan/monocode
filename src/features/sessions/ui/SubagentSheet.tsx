@@ -437,7 +437,8 @@ function ActivityView({
     const element = scroller.current;
     if (element && pinned.current) element.scrollTop = element.scrollHeight;
   }, [steps, run.tool?.detail]);
-  const empty = !steps?.length && !run.tool?.detail;
+  const empty =
+    !steps?.length && !run.tool?.detail && !run.tool?.detailOmitted;
   return (
     <div
       ref={scroller}

@@ -37,7 +37,7 @@ vi.mock("../../sessions/ui/AgentTranscript", () => ({
     onRemoveDraft,
     onOpenFile,
     onOpenDiff,
-    onOpenSession,
+    onOpenChat,
   }: {
     blocks: Block[];
     busy: boolean;
@@ -45,7 +45,7 @@ vi.mock("../../sessions/ui/AgentTranscript", () => ({
     onRemoveDraft?: (block: Block) => void;
     onOpenFile?: (path: string) => void;
     onOpenDiff?: (path: string) => void;
-    onOpenSession?: (sessionId: string) => void;
+    onOpenChat?: (sessionId: string) => void;
   }) =>
     createElement(
       "ol",
@@ -56,7 +56,7 @@ vi.mock("../../sessions/ui/AgentTranscript", () => ({
           ? createElement("button", {
               key: `${block.id}-source`,
               "aria-label": `Open continued chat ${block.secondOpinion?.source}`,
-              onClick: () => onOpenSession?.(sourceId),
+              onClick: () => onOpenChat?.(sourceId),
             })
           : null;
       }),

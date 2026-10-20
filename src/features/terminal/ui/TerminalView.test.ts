@@ -3,6 +3,13 @@
 import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { WebLinksAddon } from "@xterm/addon-web-links";
+import type { ILink, ITerminalOptions } from "@xterm/xterm";
+import { openUrl } from "@tauri-apps/plugin-opener";
+
+vi.mock("@tauri-apps/plugin-opener", () => ({
+  openUrl: vi.fn(async () => {}),
+}));
 
 const pty = vi.hoisted(() => ({
   spawnPty: vi.fn(),
@@ -17,7 +24,10 @@ const pty = vi.hoisted(() => ({
   unsubscribe: vi.fn(),
   lines: [] as string[],
 }));
-const xterm = vi.hoisted(() => ({ options: [] as { fontFamily?: string }[] }));
+const xterm = vi.hoisted(() => ({
+  options: [] as ITerminalOptions[],
+  loadAddon: vi.fn(),
+}));
 
 vi.mock("../../../platform/tauri/pty", () => ({
   spawnPty: pty.spawnPty,
@@ -33,7 +43,7 @@ vi.mock("../../../platform/tauri/pty", () => ({
 vi.mock("@xterm/xterm/css/xterm.css", () => ({}));
 vi.mock("@xterm/xterm", () => ({
   Terminal: class {
-    constructor(options: { fontFamily?: string }) {
+    constructor(options: ITerminalOptions) {
       xterm.options.push(options);
     }
     cols = 80;
@@ -46,6 +56,8 @@ vi.mock("@xterm/xterm", () => ({
     };
     parser = { registerOscHandler: () => ({ dispose() {} }) };
     open() {}
+    /** Accept addon registration without activating addons in the terminal mock. */
+    loadAddon = xterm.loadAddon;
     onData() {
       return { dispose() {} };
     }
@@ -120,6 +132,8 @@ beforeEach(() => {
   pty.lines.length = 0;
   pty.exitHandler = undefined;
   xterm.options.length = 0;
+  xterm.loadAddon.mockClear();
+  vi.mocked(openUrl).mockClear();
   for (const fn of [
     pty.spawnPty,
     pty.killPty,
@@ -271,4 +285,65 @@ it("uses the terminal-specific font stack", async () => {
   } finally {
     document.documentElement.style.removeProperty("--font-terminal");
   }
+});
+
+const urls = [
+  "http://example.com",
+  "https://example.com/path",
+  "HTTPS://example.com",
+];
+const blocked = [
+  "file:///tmp/test",
+  "javascript:alert(1)",
+  "mailto:test@example.com",
+  "ftp://example.com",
+];
+
+it("detects plain HTTP(S) URLs and opens them through the addon callback", async () => {
+  const { Terminal } =
+    await vi.importActual<typeof import("@xterm/xterm")>("@xterm/xterm");
+  const terminal = new Terminal({ cols: 200, rows: 1 });
+  const registerLinkProvider = vi.spyOn(terminal, "registerLinkProvider");
+  let addon: WebLinksAddon | undefined;
+  try {
+    await render({ id: "plain-links", cwd: "/tmp" });
+    expect(xterm.loadAddon).toHaveBeenCalledTimes(1);
+    addon = xterm.loadAddon.mock.calls[0][0] as WebLinksAddon;
+    addon.activate(terminal);
+    await new Promise<void>((resolve) => {
+      terminal.write([...urls, ...blocked].join(" "), resolve);
+    });
+    const provider = registerLinkProvider.mock.calls[0][0];
+    const links = await new Promise<ILink[] | undefined>((resolve) => {
+      provider.provideLinks(1, resolve);
+    });
+    expect(links?.map((link) => link.text)).toEqual(urls);
+    for (const link of links!) {
+      link.activate(new MouseEvent("click"), link.text);
+    }
+    expect(vi.mocked(openUrl).mock.calls).toEqual(urls.map((url) => [url]));
+    vi.mocked(openUrl).mockClear();
+    // Exercise the callback's guard even if a provider dispatches another scheme.
+    for (const uri of blocked) {
+      links![0].activate(new MouseEvent("click"), uri);
+    }
+    expect(openUrl).not.toHaveBeenCalled();
+  } finally {
+    addon?.dispose();
+    terminal.dispose();
+  }
+});
+
+it("opens only HTTP(S) URLs dispatched by the OSC 8 link handler", async () => {
+  await render({ id: "osc-links", cwd: "/tmp" });
+  const handler = xterm.options[0].linkHandler!;
+  for (const uri of urls) {
+    handler.activate(new MouseEvent("click"), uri, undefined);
+  }
+  expect(vi.mocked(openUrl).mock.calls).toEqual(urls.map((url) => [url]));
+  vi.mocked(openUrl).mockClear();
+  for (const uri of blocked) {
+    handler.activate(new MouseEvent("click"), uri, undefined);
+  }
+  expect(openUrl).not.toHaveBeenCalled();
 });

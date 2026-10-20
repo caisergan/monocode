@@ -28,6 +28,7 @@ import {
   type FloatingMonoView,
 } from "../model/floatingMono";
 import { MonoComposer } from "./MonoComposer";
+import { MonoStatusDot } from "./MonoRailMascot";
 import { MonoStatus } from "./MonoStatus";
 import { MONO_PAGE_TURNS } from "../../sessions/data/sessionStore";
 
@@ -334,7 +335,7 @@ function MonoRail({
               aria-current={selected ? "true" : undefined}
               onClick={() => onSwitch(mono.id)}
               className={`grid size-8 place-items-center rounded-lg transition-opacity ${
-                selected ? "" : "opacity-70 hover:opacity-100"
+                selected ? "" : "opacity-40 hover:opacity-100 focus-visible:opacity-100"
               }`}
             >
               <PixelMascot
@@ -343,6 +344,11 @@ function MonoRail({
                 className="pointer-events-none size-7"
               />
             </button>
+            <MonoStatusDot
+              status={mono.status}
+              color={mono.color}
+              className="pointer-events-none top-0.5 right-2.5 size-2"
+            />
           </div>
         );
       })}
@@ -441,7 +447,7 @@ function FloatingConversation({
           onOpenArtifact={onOpenArtifact}
           onOpenDiff={() => void action({ kind: "reveal" })}
           onShowWork={() => void action({ kind: "reveal" })}
-          onShowSessions={() => void action({ kind: "reveal" })}
+          onOpenSession={() => void action({ kind: "reveal" })}
         />
       </div>
       {session.pendingQuestion ? (
@@ -608,7 +614,7 @@ function ArtifactSheet({
             <X className="size-4" />
           </button>
         </header>
-        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-6 pt-2 pb-8">
+        <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 pt-1 pb-5">
           {!loaded ? (
             <p role="status" className="text-[13px] text-content/50">
               Loading document…
@@ -619,12 +625,6 @@ function ArtifactSheet({
             </p>
           ) : (
             <article data-artifact-reader={artifact.id}>
-              <h1 className="mb-1 text-[20px] leading-snug font-medium text-content">
-                {artifact.title}
-              </h1>
-              <p className="mb-5 text-[11px] text-content/45">
-                Updated {new Date(artifact.updatedAt).toLocaleString()}
-              </p>
               <ArtifactContent
                 artifact={artifact}
                 onOpenFile={(path) => void action({ kind: "openFile", path })}

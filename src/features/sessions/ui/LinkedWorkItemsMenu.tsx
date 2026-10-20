@@ -81,10 +81,13 @@ export function LinkedWorkItemsBadge({
   menuOpen,
   onOpen,
   onToggleMenu,
+  compact = false,
 }: {
   /** Every link, newest first. */
   items: readonly LinkedWorkItem[];
   menuOpen: boolean;
+  /** Dense rows show the link's icon without its number. */
+  compact?: boolean;
   /** Opens a link beside the session; without it links open on GitHub. */
   onOpen?: (item: LinkedWorkItem) => void;
   onToggleMenu?: (anchor: HTMLElement) => void;
@@ -118,7 +121,7 @@ export function LinkedWorkItemsBadge({
         className="flex shrink-0 cursor-pointer items-center gap-0.5 rounded px-0.5 text-[11px] tabular-nums text-accent hover:underline"
       >
         <KindIcon item={first} className="size-3" />
-        <span>#{first.number}</span>
+        {compact ? null : <span>#{first.number}</span>}
       </button>
     );
   }
@@ -156,7 +159,7 @@ export function LinkedWorkItemsBadge({
     >
       <span className="flex items-center gap-0.5">
         <KindIcon item={first} className="size-3" />
-        <span>#{first.number}</span>
+        {compact ? null : <span>#{first.number}</span>}
       </span>
       <span className="rounded-[4px] bg-accent/15 px-1 text-[10px] font-medium leading-[14px]">
         +{more}

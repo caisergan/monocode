@@ -1,7 +1,7 @@
 import { leafIds, type WorkspaceTab } from "../../workspace/model/layout";
 import { isTerminalSession, type Session } from "../../sessions/model/session";
 import { pathKey } from "../../../shared/lib/paths";
-import { sameProjectPath } from "./recents";
+import { isRemoteProjectPath, sameProjectPath } from "./recents";
 
 export type ProjectReturnMemory = ReadonlyMap<string, string>;
 
@@ -22,7 +22,15 @@ export type ProjectReturnDecision =
 
 export function isBlankSession(session: Session | undefined): boolean {
   // A terminal session owns a running agent even before its first prompt.
-  if (!session || session.busy || isTerminalSession(session)) return false;
+  // Remote transcripts may not have loaded yet, and a shell can hold an
+  // unfinished create or composer text. Local blocks cannot prove it is blank.
+  if (
+    !session ||
+    session.busy ||
+    isTerminalSession(session) ||
+    isRemoteProjectPath(session.cwd)
+  )
+    return false;
   return !session.blocks.some((block) => block.role === "user");
 }
 
