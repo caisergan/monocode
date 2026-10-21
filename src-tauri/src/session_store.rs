@@ -284,6 +284,9 @@ pub fn session_upsert(
     session: SessionUpsert,
 ) -> Result<SessionSummary, String> {
     validate_upsert(&session)?;
+    // Warm the cached branch lookup first: its git calls would otherwise run
+    // under the store lock and hold up every other session command.
+    crate::fs::git_info_for(&git_checkout(&session));
     let conn = store.conn.lock().map_err(|_| "Session store is locked")?;
     let summary = upsert_session(&conn, &session).map_err(|e| e.to_string())?;
     Ok(summary)
@@ -313,6 +316,8 @@ pub fn session_list_by_project(
     if cwd.trim().is_empty() {
         return Err("cwd is required".into());
     }
+    // Outside the lock, as in `session_upsert`.
+    crate::fs::git_info_for(&crate::fs::expand_home(&cwd));
     let conn = store.conn.lock().map_err(|_| "Session store is locked")?;
     list_by_project(&conn, &cwd).map_err(|e| e.to_string())
 }
@@ -1268,6 +1273,16 @@ fn orchestration_summary(conn: &Connection, id: &str) -> rusqlite::Result<Option
     ))
 }
 
+fn git_checkout(session: &SessionUpsert) -> PathBuf {
+    crate::fs::expand_home(
+        session
+            .worktree_cwd
+            .as_deref()
+            .filter(|cwd| !cwd.is_empty())
+            .unwrap_or(&session.cwd),
+    )
+}
+
 pub(crate) fn upsert_session(
     conn: &Connection,
     session: &SessionUpsert,
@@ -1332,13 +1347,7 @@ pub(crate) fn upsert_session(
         .as_ref()
         .map(|value| value.trim())
         .filter(|value| !value.is_empty());
-    let git = crate::fs::git_info_for(&crate::fs::expand_home(
-        session
-            .worktree_cwd
-            .as_deref()
-            .filter(|cwd| !cwd.is_empty())
-            .unwrap_or(&session.cwd),
-    ));
+    let git = crate::fs::git_info_for(&git_checkout(session));
     let branch = if session.worktree_removed {
         None
     } else {
