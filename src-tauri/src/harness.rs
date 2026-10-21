@@ -3061,6 +3061,17 @@ fn which_in_path(path: &str, name: &str) -> Option<PathBuf> {
     })
 }
 
+/// `Command::new(name)` plus a PATH override sends std's spawn through
+/// fork+exec, so the child can search the new PATH. Forking this process takes
+/// every allocator lock and copies thousands of mappings, stalling the UI
+/// thread for about 10 ms a call. An absolute program keeps `posix_spawn`; a
+/// name the PATH lacks stays bare and fails or forks exactly as before.
+pub(crate) fn program_in_path(name: &str, path: &str) -> PathBuf {
+    which_in_path(path, name)
+        .filter(|found| found.is_absolute())
+        .unwrap_or_else(|| PathBuf::from(name))
+}
+
 fn first_binary(candidates: Vec<PathBuf>) -> Option<PathBuf> {
     candidates.into_iter().find_map(existing_binary)
 }
