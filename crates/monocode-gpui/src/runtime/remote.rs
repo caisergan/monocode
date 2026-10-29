@@ -650,6 +650,10 @@ pub(crate) fn run_with_client(
         let mut last_revision = None;
         let mut control_commands = Vec::<Value>::new();
         let mut stopping_run = None::<String>;
+        // Messages handed to the running turn, and the ones it refused.
+        let mut steered = Vec::<String>::new();
+        let mut steer_errors = Vec::<(String, String)>::new();
+        let mut steering = Vec::<(String, Value)>::new();
         loop {
             // Cancel is explicit Stop. Dropping the desktop receiver simply
             // ends observation, leaving the host process and run untouched.
@@ -662,7 +666,11 @@ pub(crate) fn run_with_client(
             let current_approvals = approvals(&snapshot);
             let current_question = question(&snapshot);
             let mut next = update(if running { "Working…" } else { "Ready" }, !running);
+            // A running remote turn takes queued messages from here on.
+            next.turn_ready = running;
             next.start = latest_rows.len();
+            next.follow_up_delivered = std::mem::take(&mut steered);
+            next.follow_up_errors = std::mem::take(&mut steer_errors);
             if revision != last_revision {
                 let mut projected = snapshot.clone();
                 monocode_core::remote::attachments::qualify_snapshot(
@@ -757,8 +765,29 @@ pub(crate) fn run_with_client(
                         next["reply"] = reply(question, answers);
                     }
                     Decision::KeepOpen => continue,
-                    Decision::Steer(_) => {
-                        return Err("Steering is not supported by this remote host".into());
+                    Decision::Steer(message) => {
+                        // sessions.steer: the host records the message in the
+                        // transcript and the agent reads it now.
+                        let mut steer = command("steer", Some(&id));
+                        steer["runId"] = snapshot["runId"].clone();
+                        steer["text"] = json!(message.text);
+                        match prepare_for_session(
+                            &client,
+                            &machine.id,
+                            &binding.project.environment_id,
+                            &message.attachments,
+                            steer["commandId"].as_str().unwrap_or_default(),
+                        ) {
+                            Ok((references, uploads)) => {
+                                if !references.is_empty() {
+                                    steer["attachments"] = json!(references);
+                                }
+                                binding.uploads.extend(uploads);
+                                steering.push((message.id.clone(), steer));
+                            }
+                            Err(error) => steer_errors.push((message.id.clone(), error)),
+                        }
+                        continue;
                     }
                 }
                 control_commands.push(next);
@@ -767,6 +796,22 @@ pub(crate) fn run_with_client(
                 binding.outbox.push(command);
                 journal(&store, &binding)?;
                 dispatch_outbox(&client, &machine.id, &store, &mut binding)?;
+            }
+            for (message, steer) in steering.drain(..) {
+                upload_pending(&client, &machine.id, &store, &mut binding)?;
+                binding.outbox.push(steer);
+                journal(&store, &binding)?;
+                // A turn that refuses the message (it just ended, or the agent
+                // cannot take one) returns it to a paused queue.
+                match dispatch_outbox(&client, &machine.id, &store, &mut binding) {
+                    Ok(()) => steered.push(message),
+                    Err(error) => {
+                        binding.outbox.retain(|queued| queued["type"] != "steer");
+                        binding.rejected = None;
+                        journal(&store, &binding)?;
+                        steer_errors.push((message, error));
+                    }
+                }
             }
             known = Some(snapshot);
             for _ in 0..15 {

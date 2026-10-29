@@ -1018,7 +1018,6 @@ impl Conversation {
     ) -> Option<(&'static str, &'static str)> {
         // Stop and provider switches send the message as the next turn.
         if self.settings.mono.is_some()
-            || self.is_remote()
             || self.stopping
             || self.settings.pending_provider_switch.is_some()
             || !self.sends_as_follow_up()

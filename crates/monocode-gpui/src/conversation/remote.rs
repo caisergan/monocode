@@ -13,6 +13,8 @@ pub(super) struct State {
     rejected: Option<Value>,
     snapshot: Option<Value>,
     pub(super) capabilities: std::collections::HashSet<String>,
+    /// Providers whose running turn takes another message (`sessions.steer`).
+    pub(super) steer_providers: std::collections::HashSet<String>,
 }
 impl State {
     fn legacy_recovery_error(&self) -> Option<&str> {
@@ -23,6 +25,20 @@ impl State {
 impl Conversation {
     pub(super) fn is_remote(&self) -> bool {
         self.summary.cwd.starts_with("remote://")
+    }
+    /// Whether the running turn takes a message now. A remote one does when its
+    /// host lists the provider under `steerProviders`; otherwise the message
+    /// waits in the queue until the turn ends.
+    pub(super) fn turn_takes_steer(&self) -> bool {
+        if self.is_remote() {
+            self.remote_state.capabilities.contains("sessions.steer")
+                && self
+                    .remote_state
+                    .steer_providers
+                    .contains(&self.summary.provider)
+        } else {
+            Kind::from_id(&self.summary.provider).can_steer()
+        }
     }
     pub(crate) fn remote_connection_error(&mut self, error: &str, cx: &mut Context<Self>) {
         if self.is_remote() && !self.busy {
@@ -153,6 +169,12 @@ impl Conversation {
                                 .flatten()
                                 .filter_map(|v| v.as_str().map(str::to_owned))
                                 .collect();
+                            this.remote_state.steer_providers = descriptor["steerProviders"]
+                                .as_array()
+                                .into_iter()
+                                .flatten()
+                                .filter_map(|v| v.as_str().map(str::to_owned))
+                                .collect();
                         }
                         if settings.revision > this.settings.revision
                             || (initial && settings.revision >= this.settings.revision)
@@ -234,8 +256,8 @@ impl Conversation {
             Some(self.remote_state.legacy_recovery_error().unwrap_or(
                 "A remote command needs confirmation. Choose Retry before sending another message.",
             ))
-        } else if self.busy || self.stopping {
-            Some("Wait for this remote turn to finish before sending another message.")
+        } else if self.stopping {
+            Some("Wait for this remote turn to stop before sending another message.")
         } else {
             None
         };

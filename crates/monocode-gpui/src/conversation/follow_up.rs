@@ -109,8 +109,7 @@ impl Conversation {
         // Once the agent has answered and only background work is left, which
         // may never end (a dev server), queuing would park the message behind
         // it, so hand it to the agent now.
-        (prefers_steer != invert || !self.background.tasks.is_empty())
-            && Kind::from_id(&self.summary.provider).can_steer()
+        (prefers_steer != invert || !self.background.tasks.is_empty()) && self.turn_takes_steer()
     }
     /// `invert` flips the follow-up preference for this message (Cmd+Enter).
     pub(super) fn enqueue_follow_up_inverted(
@@ -351,7 +350,7 @@ impl Conversation {
                 return;
             }
             if !message.steer
-                || !Kind::from_id(&self.summary.provider).can_steer()
+                || !self.turn_takes_steer()
                 || !message.can_steer()
                 || !self.follow_ups.ready
                 || (!requested
