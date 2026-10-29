@@ -8109,6 +8109,7 @@ impl Render for Shell {
             self.review_focused = false;
             window.focus(&view.read(cx).input.focus_handle(cx), cx);
         }
+        crate::monos::html::hide_all();
         if let Some(m) = &self.monos {
             m.read(cx).hide_html(cx);
             m.update(cx, |m, cx| m.bind_window(window, cx));

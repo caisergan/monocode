@@ -8,7 +8,7 @@ mod files;
 mod filters;
 mod floating;
 mod host;
-mod html;
+pub(crate) mod html;
 mod memory_ui;
 mod notifications;
 mod overview;

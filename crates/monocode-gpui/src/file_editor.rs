@@ -161,6 +161,9 @@ pub(crate) struct FileEditor {
     media_events: Option<Subscription>,
     /// Each edit renders a fresh sprite; the one it replaces is given back.
     svg_preview: Option<Arc<RenderImage>>,
+    /// An HTML file's Preview: its text in the sandboxed document view, and
+    /// the text it was made from.
+    html_preview: Option<(SharedString, Entity<crate::monos::html::Html>)>,
     svg_failed: bool,
     svg_render: Option<Task<()>>,
     unsupported: Option<String>,
@@ -304,6 +307,7 @@ impl FileEditor {
             media: None,
             media_events: None,
             svg_preview: None,
+            html_preview: None,
             svg_failed: false,
             svg_render: None,
             unsupported: None,
@@ -417,7 +421,10 @@ impl FileEditor {
                             input.reload_file(text, !first && !force, cx);
                         });
                         this.dirty = false;
-                        if first && !this.show_diff && (this.is_markdown() || this.is_svg()) {
+                        if first
+                            && !this.show_diff
+                            && (this.is_markdown() || this.is_svg() || this.is_html())
+                        {
                             this.preview = cx
                                 .try_global::<crate::settings::Preferences>()
                                 .is_none_or(|prefs| prefs.file_view_mode != "source");
@@ -802,6 +809,12 @@ impl FileEditor {
         })
         .detach();
     }
+    fn is_html(&self) -> bool {
+        PathBuf::from(&self.path)
+            .extension()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| matches!(s.to_ascii_lowercase().as_str(), "html" | "htm" | "xhtml"))
+    }
     fn is_svg(&self) -> bool {
         PathBuf::from(&self.path)
             .extension()
@@ -826,6 +839,19 @@ impl FileEditor {
                     cx.notify();
                 });
             }));
+        }
+        if self.preview && self.is_html() {
+            // The page runs in an opaque sandbox with no file access, so it
+            // can't read the project; relative assets don't load.
+            let text = self.input.read(cx).content.clone();
+            if self
+                .html_preview
+                .as_ref()
+                .is_none_or(|(source, _)| *source != text)
+            {
+                let view = cx.new(|_| crate::monos::html::Html::new(text.to_string()));
+                self.html_preview = Some((text, view));
+            }
         }
         if self.preview && self.is_markdown() {
             let text = self.input.read(cx).content.clone();
@@ -991,7 +1017,7 @@ impl gpui::Render for FileEditor {
                 .items_center()
                 .gap_1p5()
                 .when(!self.preview, |d| d.child(self.word_wrap_control(cx)))
-                .when(self.is_markdown() || self.is_svg(), |d| {
+                .when(self.is_markdown() || self.is_svg() || self.is_html(), |d| {
                     d.child(self.view_mode_control(cx))
                 })
                 .into_any_element()
@@ -1043,7 +1069,12 @@ impl gpui::Render for FileEditor {
                 )
                 .into_any_element()
         } else if ready {
-            if self.preview {
+            if self.preview && self.is_html() {
+                self.html_preview
+                    .as_ref()
+                    .map(|(_, view)| view.clone().into_any_element())
+                    .unwrap_or_else(|| div().into_any_element())
+            } else if self.preview {
                 self.markdown
                     .clone()
                     .map(|m| m.into_any_element())
@@ -1377,6 +1408,40 @@ mod tests {
         );
     }
 
+    #[gpui::test]
+    fn html_files_preview_their_text_in_the_sandboxed_document_view(cx: &mut TestAppContext) {
+        let path =
+            std::env::temp_dir().join(format!("monocode-html-preview-{}.html", std::process::id()));
+        std::fs::write(&path, "<h1>Report</h1>").unwrap();
+        let file = path.to_string_lossy().into_owned();
+        let window = cx.update(|cx| {
+            cx.set_global(crate::settings::Preferences {
+                file_view_mode: "preview".into(),
+                ..Default::default()
+            });
+            input::bind(cx);
+            bind(cx);
+            cx.open_window(WindowOptions::default(), |_, cx| {
+                let git = cx.new(|cx| ProjectGit::new("/tmp".into(), cx));
+                cx.new(|cx| FileEditor::new(file, git, cx))
+            })
+            .unwrap()
+        });
+        let cx = &mut VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        window
+            .update(cx, |e, w, cx| {
+                assert!(e.is_html() && e.preview);
+                assert_eq!(
+                    e.html_preview.as_ref().unwrap().0.as_ref(),
+                    "<h1>Report</h1>"
+                );
+                e.toggle_preview(w, cx);
+                assert!(!e.preview);
+            })
+            .unwrap();
+        let _ = std::fs::remove_file(path);
+    }
     #[gpui::test]
     fn remembered_preview_mode_keeps_focus_and_find_switches_to_source(cx: &mut TestAppContext) {
         for (extension, source_mode) in [("md", false), ("svg", false), ("md", true), ("svg", true)]
