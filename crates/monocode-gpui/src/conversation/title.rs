@@ -320,4 +320,55 @@ mod tests {
         let saved = saved.into_iter().find(|s| s.id == id).unwrap();
         assert_eq!(saved.work_item.unwrap().links().len(), 2);
     }
+    #[gpui::test]
+    fn a_saved_unlinked_session_links_its_created_pr_when_it_loads(cx: &mut gpui::TestAppContext) {
+        use monocode_core::{tool::ToolCall, transcript::Row};
+        let store = Arc::new(std::sync::Mutex::new(
+            monocode_core::store::Store::open(Path::new(":memory:")).unwrap(),
+        ));
+        let mut call = ToolCall::new("toolu_1", "Bash");
+        call.input = serde_json::json!({"command": "gh pr create --fill"}).to_string();
+        call.output = "https://github.com/caisergan/Search/pull/48\n".into();
+        call.state = monocode_core::tool::ToolState::Completed;
+        let rows = [
+            Row {
+                role: "user".into(),
+                text: "Fix the crash".into(),
+                first: true,
+                sent_at: None,
+            },
+            Row {
+                role: "tool".into(),
+                text: serde_json::to_string(&call).unwrap(),
+                first: true,
+                sent_at: None,
+            },
+        ];
+        let summary = {
+            let mut store = locked(&store).unwrap();
+            let summary = store.create("claude", "/tmp").unwrap();
+            store.write_rows(summary.id, 0, &rows).unwrap();
+            summary
+        };
+        let id = summary.id;
+        let view = cx.new(|cx| Conversation::new(summary, store.clone(), cx));
+        view.update(cx, |v, cx| v.load(cx));
+        cx.run_until_parked();
+        let linked = view
+            .read_with(cx, |v, _| v.summary.work_item.clone())
+            .unwrap();
+        assert_eq!(
+            (linked.repo.as_str(), linked.number),
+            ("caisergan/Search", 48)
+        );
+        let saved = locked(&store).unwrap().sessions().unwrap();
+        assert!(
+            saved
+                .iter()
+                .find(|s| s.id == id)
+                .unwrap()
+                .work_item
+                .is_some()
+        );
+    }
 }

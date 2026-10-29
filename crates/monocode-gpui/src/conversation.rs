@@ -814,6 +814,11 @@ impl Conversation {
                         });
                         this.status = "Ready".into();
                         this.loaded = true;
+                        // A session saved before PRs were linked at turn end
+                        // links the ones its agent opened when it loads.
+                        if this.summary.work_item.is_none() {
+                            this.link_created_pull_requests(cx);
+                        }
                         if let Some((row, query)) = this.pending_search.take() {
                             this.reveal_search(row, query, cx);
                         }
