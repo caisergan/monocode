@@ -18,6 +18,7 @@ mod prompt_cache;
 mod remote;
 pub(crate) mod remote_plans;
 mod response_menu;
+mod subagent_dock;
 #[cfg(test)]
 mod submission_tests;
 mod title;
@@ -210,6 +211,8 @@ pub(crate) struct Conversation {
     tokens_hovered: bool,
     /// A continued chat's card shows the recap that goes out with its first message.
     handoff_context_open: bool,
+    /// The subagent dock lists each running subagent.
+    subagents_open: bool,
     prompt_cache: PromptCacheWarning,
     menu: Option<OpenMenu>,
     add_anchor: AnchorSlot,
@@ -657,6 +660,7 @@ impl Conversation {
             context_hovered: false,
             tokens_hovered: false,
             handoff_context_open: false,
+            subagents_open: false,
             prompt_cache: PromptCacheWarning::default(),
             menu: None,
             add_anchor: AnchorSlot::default(),
@@ -2820,6 +2824,7 @@ impl Conversation {
             .children(self.orchestration_card(cx))
             .children(if self.is_remote() { None } else { self.usage_notice(false, cx) })
             .child(self.background_shelf(window, cx))
+            .children(self.subagent_dock(cx))
             .child(self.message_queue(window, cx))
             .children(if self.is_remote() { None } else { self.auth_notice(cx) })
             .when(self.settings.worktree_removed,|d|d.child(div().mb_2().p_3().rounded_lg().border_1().border_color(content(0.1)).flex().items_center().gap_3().text_size(px(12.)).child(div().flex_1().child("Worktree deleted. Select a branch or worktree to continue this conversation.")).child(tool_pill("reattach-worktree","Select worktree").child("Select worktree").on_click(cx.listener(|this,_,window,cx|this.open_git(GitMode::Worktree,window,cx))))))

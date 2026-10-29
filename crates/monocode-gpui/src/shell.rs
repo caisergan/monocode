@@ -5949,7 +5949,9 @@ impl Shell {
             mark.update(cx, |mark, cx| mark.set_size(side, cx));
         }
         let work_item = self.work_item_badge(id, compact, cx);
+        let subagents = self.subagent_badge(id, cx);
         let has_badges = work_item.is_some()
+            || subagents.is_some()
             || mode.is_some()
             || self.automation_state.session_automations.contains_key(&id);
         let session = self.session_metadata(id, cx);
@@ -6075,6 +6077,7 @@ impl Shell {
             .items_center()
             .gap_1()
             .flex_shrink_0()
+            .children(subagents)
             .children(work_item)
             .when(
                 self.automation_state.session_automations.contains_key(&id),

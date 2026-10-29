@@ -2,7 +2,8 @@
 //! sessions, across every project.
 use super::*;
 
-const LIVE_AGENT_MIN: usize = 2;
+/// LiveAgentsPreview shows for a single chat in flight, too.
+const LIVE_AGENT_MIN: usize = 1;
 const LIVE_AGENT_CAP: usize = 4;
 // Tailwind amber-400 and emerald-400.
 const AMBER: u32 = 0xfbbf24;
@@ -150,7 +151,10 @@ impl Shell {
                 .id("live-agents")
                 .debug_selector(|| "sidebar-activity-card".into())
                 .role(Role::Group)
-                .aria_label(format!("{count} working agents"))
+                .aria_label(format!(
+                    "{count} working agent{}",
+                    if count == 1 { "" } else { "s" }
+                ))
                 .flex_shrink_0()
                 .px_2()
                 .when(self.workspace.boxy_layout(), |d| d.pb_2())

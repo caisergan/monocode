@@ -1151,6 +1151,32 @@ impl Shell {
         )
     }
 
+    /// SessionCard's running subagent count, while its turn has any.
+    pub(super) fn subagent_badge(&self, id: i64, cx: &App) -> Option<AnyElement> {
+        let view = self.sessions.get(&id)?.read(cx);
+        if !view.busy {
+            return None;
+        }
+        let running = view.running_subagents(cx).len();
+        (running > 0).then(|| {
+            div()
+                .id(("subagents", id as usize))
+                .role(Role::Status)
+                .aria_label(format!(
+                    "{running} subagent{} running",
+                    if running == 1 { "" } else { "s" }
+                ))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .gap(px(2.))
+                .text_size(px(11.))
+                .text_color(content(0.5))
+                .child(icon("bot", 12.).text_color(content(0.5)))
+                .child(running.to_string())
+                .into_any()
+        })
+    }
     /// SessionCard's linked issues and PRs, newest first, each opening on GitHub.
     pub(super) fn work_item_menu_items(&self, id: i64, cx: &App) -> Vec<MenuItem> {
         let links = self
