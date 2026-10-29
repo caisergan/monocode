@@ -80,11 +80,9 @@ fn rows(cwd: &str, state: Option<&Snapshot>, query: &str) -> Vec<Row> {
                 detail: pretty_path(&t.path),
             }),
     );
-    let needle = query.trim().to_lowercase();
+    // worktreeMatches: every word of the query, in any of the row's text.
     rows.retain(|r| {
-        format!("{}\n{}\n{}", r.label, r.detail, r.path)
-            .to_lowercase()
-            .contains(&needle)
+        monocode_core::git::words_match(&format!("{}\n{}\n{}", r.label, r.detail, r.path), query)
     });
     rows
 }
@@ -620,6 +618,11 @@ mod tests {
             1
         );
         assert!(rows("/repo/project", Some(&state), "new-copy").is_empty());
+        assert_eq!(
+            rows("/repo/project", Some(&state), "detached 1234").len(),
+            1
+        );
+        assert!(rows("/repo/project", Some(&state), "detached feature").is_empty());
     }
     #[gpui::test]
     fn cached_worktrees_show_before_metadata_and_membership_never_loads_full_settings(
