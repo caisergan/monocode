@@ -13,6 +13,8 @@ pub(super) struct ImportSheet {
     /// The project the sheet opened for; None lists every folder.
     project: Option<String>,
     all_folders: bool,
+    /// The project is on a connected machine, whose host lists and imports.
+    remote: bool,
     listing: Option<Result<AgentSessionListing, String>>,
     request: u64,
     loading: bool,
@@ -20,6 +22,79 @@ pub(super) struct ImportSheet {
     importing: Option<String>,
     error: Option<String>,
     _events: Vec<Subscription>,
+}
+
+/// The host and project of a machine project.
+fn remote_target(
+    store: &crate::runtime::Database,
+    client: &monocode_core::remote::Connections,
+    key: &str,
+) -> Result<(String, monocode_core::store::RemoteProject), String> {
+    let project = locked(store)?
+        .remote_projects()?
+        .into_values()
+        .find(|p| p.key == key)
+        .ok_or("Remote project identity is missing. Open this folder on its machine again.")?;
+    let machine = client.machine_for_environment(&project.environment_id)?;
+    Ok((machine.id, project))
+}
+
+/// Hosts from before terminal session import do not know these methods.
+fn remote_request(
+    client: &monocode_core::remote::Connections,
+    machine: &str,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    client.request(machine, method, params).map_err(|error| {
+        if error.contains("Unsupported host method") {
+            "Update this machine's host in Settings → Connections to import its terminal sessions."
+                .into()
+        } else {
+            error
+                .trim_start_matches("Host rejected request: ")
+                .to_owned()
+        }
+    })
+}
+
+/// agentSessions.import: the host saves the conversation as an idle host
+/// session bound to Claude's session id, so the next message resumes it where
+/// it ran. This registers that host session here.
+fn import_on_host(
+    store: &crate::runtime::Database,
+    client: &monocode_core::remote::Connections,
+    key: &str,
+    summary: &AgentSessionSummary,
+) -> Result<(monocode_core::store::Session, bool), String> {
+    let (machine, project) = remote_target(store, client, key)?;
+    let receipt = remote_request(
+        client,
+        &machine,
+        "agentSessions.import",
+        serde_json::json!({
+            "projectId": project.project_id,
+            "harness": summary.harness.id(),
+            "cwd": summary.cwd,
+            "sessionId": summary.id,
+        }),
+    )?;
+    let host_id = receipt["sessionId"]
+        .as_str()
+        .ok_or("The host did not say which session holds the import")?;
+    let sessions = client.request(
+        &machine,
+        "sessions.list",
+        serde_json::json!({"projectId": project.project_id}),
+    )?;
+    let value = sessions
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|value| value["id"] == host_id)
+        .ok_or("The imported session is not on the host yet")?;
+    let session = locked(store)?.register_remote_summary(&project, value)?;
+    Ok((session, receipt["existing"] == true))
 }
 
 impl Shell {
@@ -42,11 +117,16 @@ impl Shell {
             this.reload_import_sheet(cx)
         })];
         window.focus(&search.read(cx).focus_handle(cx), cx);
-        let local = project.filter(|path| !path.starts_with("remote://") && path != "~");
+        let project = project.filter(|path| path != "~");
+        // A machine's sessions are listed by its host, for that project only.
+        let remote = project
+            .as_deref()
+            .is_some_and(|p| p.starts_with("remote://"));
         self.import_sheet = Some(ImportSheet {
             search,
-            all_folders: local.is_none(),
-            project: local,
+            all_folders: project.is_none(),
+            remote,
+            project,
             listing: None,
             request: 0,
             loading: false,
@@ -79,9 +159,28 @@ impl Shell {
             owner: Some("import-sheet".into()),
             ..Default::default()
         };
+        let remote = sheet
+            .remote
+            .then(|| (self.remote.clone(), sheet.project.clone()));
         let work = cx.background_executor().spawn(async move {
             // Let a burst of typing settle before reading transcripts.
             std::thread::sleep(std::time::Duration::from_millis(150));
+            if let Some((client, Some(project))) = remote {
+                let (machine, project) = remote_target(&store, &client, &project)?;
+                let listing = remote_request(
+                    &client,
+                    &machine,
+                    "agentSessions.list",
+                    serde_json::json!({
+                        "projectId": project.project_id,
+                        "harnesses": ["claude"],
+                        "query": query.query,
+                        "limit": query.limit,
+                        "includeImported": true,
+                    }),
+                )?;
+                return serde_json::from_value(listing).map_err(|e| e.to_string());
+            }
             let known = agent_sessions::import::known(&*locked(&store)?)?;
             Ok::<_, String>(agent_sessions::list(&query, &known))
         });
@@ -110,7 +209,13 @@ impl Shell {
         }
         sheet.importing = Some(summary.id.clone());
         sheet.error = None;
+        let remote = sheet
+            .remote
+            .then(|| (self.remote.clone(), sheet.project.clone()));
         let work = cx.background_executor().spawn(async move {
+            if let Some((client, Some(project))) = remote {
+                return import_on_host(&store, &client, &project, &summary);
+            }
             let mut store = locked(&store)?;
             agent_sessions::import::import(&mut store, &summary)
         });
@@ -324,10 +429,14 @@ impl Shell {
                                                 .child("Import terminal sessions"),
                                         )
                                         .child(div().text_size(px(12.)).text_color(content(0.5)).child(
-                                            "Continue a Claude Code, Pi or omp conversation started in a terminal. The next message resumes it.",
+                                            if sheet.remote {
+                                                "Continue a Claude Code conversation started in a terminal on this machine. The next message resumes it there."
+                                            } else {
+                                                "Continue a Claude Code, Pi or omp conversation started in a terminal. The next message resumes it."
+                                            },
                                         ))
                                         .child(field)
-                                        .when(sheet.project.is_some(), |d| {
+                                        .when(sheet.project.is_some() && !sheet.remote, |d| {
                                             d.child(
                                                 div()
                                                     .flex()

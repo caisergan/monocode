@@ -5602,13 +5602,11 @@ impl Shell {
                         .into(),
                     ]);
                 }
-                if !path.starts_with("remote://") {
-                    items.push(
-                        MenuAction::new("import-sessions", "Import terminal sessions…")
-                            .icon("terminal")
-                            .into(),
-                    );
-                }
+                items.push(
+                    MenuAction::new("import-sessions", "Import terminal sessions…")
+                        .icon("terminal")
+                        .into(),
+                );
                 items.extend([
                     MenuAction::new("reveal", REVEAL_LABEL)
                         .icon("folder-open")

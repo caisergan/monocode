@@ -135,3 +135,26 @@ pub fn import(store: &mut Store, summary: &AgentSessionSummary) -> Result<(Sessi
     session.has_messages = true;
     Ok((session, false))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::{AgentSessionListing, SessionFolder};
+
+    #[test]
+    fn a_hosts_listing_reads_as_the_sheets_rows() {
+        let listing: AgentSessionListing = serde_json::from_value(serde_json::json!({
+            "sessions": [{
+                "harness": "claude", "id": "5f1d7e1c-0000-4000-8000-000000000001",
+                "cwd": "/home/me/repo", "title": null, "firstPrompt": "Fix it",
+                "lastPrompt": "Fix it", "gitBranch": "dev", "updatedAt": 20,
+                "sizeBytes": 400, "folder": "ok", "project": null, "monocodeSessionId": null
+            }],
+            "importedCount": 2,
+            "hasMore": false
+        }))
+        .unwrap();
+        assert_eq!(listing.sessions[0].folder, SessionFolder::Ok);
+        assert_eq!(listing.sessions[0].first_prompt, "Fix it");
+        assert_eq!(listing.imported_count, 2);
+    }
+}

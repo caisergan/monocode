@@ -138,9 +138,10 @@ pub struct AgentSessionQuery {
 }
 
 /// Whether a session's folder can hold a MonoCode chat.
-#[derive(Serialize, Debug, PartialEq, Eq, Clone, Copy)]
+#[derive(Serialize, Deserialize, Debug, Default, PartialEq, Eq, Clone, Copy)]
 #[serde(rename_all = "camelCase")]
 pub enum SessionFolder {
+    #[default]
     Ok,
     /// Started in the home folder, which is not a project.
     Home,
@@ -148,7 +149,7 @@ pub enum SessionFolder {
     Missing,
 }
 
-#[derive(Serialize, Debug, PartialEq, Eq, Clone)]
+#[derive(Serialize, Deserialize, Debug, PartialEq, Eq, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSessionSummary {
     pub harness: Harness,
@@ -168,8 +169,8 @@ pub struct AgentSessionSummary {
     pub monocode_session_id: Option<String>,
 }
 
-#[derive(Serialize, Debug, Default)]
-#[serde(rename_all = "camelCase")]
+#[derive(Serialize, Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
 pub struct AgentSessionListing {
     pub sessions: Vec<AgentSessionSummary>,
     /// Conversations left out because MonoCode already has them.
