@@ -6363,6 +6363,27 @@ impl Shell {
             .into_any()
     }
 
+    /// Sessions whose MonoCode or agent session id holds an id-like query.
+    fn sessions_matching_id(&self, cx: &App) -> HashSet<i64> {
+        if monocode_core::session_filters::id_query(&self.query).is_none() {
+            return HashSet::new();
+        }
+        let Ok(store) = locked(&self.store) else {
+            return HashSet::new();
+        };
+        self.order
+            .iter()
+            .copied()
+            .filter(|id| {
+                let provider = self.session_metadata(*id, cx).summary.provider_id.clone();
+                let saved = store.persisted_session_id(*id).ok();
+                monocode_core::session_filters::id_matches(
+                    &self.query,
+                    &[saved.as_deref(), provider.as_deref()],
+                )
+            })
+            .collect()
+    }
     /// The project's sessions as the sidebar lists them, top to bottom.
     fn sidebar_session_ids(&self, cx: &App) -> Vec<i64> {
         let start = self
@@ -6389,6 +6410,7 @@ impl Shell {
             .copied()
             .filter(|id| !self.sidebar_hidden_sessions.contains(id) && listable(*id))
             .collect();
+        let id_hits = self.sessions_matching_id(cx);
         let mut ids: Vec<_> = self
             .order
             .iter()
@@ -6403,6 +6425,7 @@ impl Shell {
                             .is_some_and(|caller| shown.contains(caller)))
                     && self.filter_session(*id, start, cx)
                     && (self.query.is_empty()
+                        || id_hits.contains(id)
                         || if self.workspace.classic_layout {
                             self.classic_session_matches_query(*id, cx)
                         } else {
