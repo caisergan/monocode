@@ -26,6 +26,7 @@ fn update(status: impl Into<String>, finished: bool) -> Update {
         model: None,
         config_model: None,
         config_settings: None,
+        config_effort: None,
         context: None,
         metrics: None,
         usage_limit: None,

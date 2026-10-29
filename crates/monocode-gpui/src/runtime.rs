@@ -40,6 +40,8 @@ pub(crate) struct Update {
     pub(crate) model: Option<String>,
     pub(crate) config_model: Option<String>,
     pub(crate) config_settings: Option<std::collections::HashMap<String, String>>,
+    /// A reasoning level the provider applied itself, as Claude's `/effort`.
+    pub(crate) config_effort: Option<String>,
     pub(crate) context: Option<monocode_core::context::Usage>,
     pub(crate) metrics: Option<monocode_core::agent::TurnMetrics>,
     pub(crate) usage_limit: Option<monocode_core::usage::Limit>,
@@ -241,6 +243,7 @@ fn run_turn_using(
                 model: None,
                 config_model: None,
                 config_settings: None,
+                config_effort: None,
                 context: None,
                 metrics: None,
                 usage_limit: None,
@@ -295,6 +298,7 @@ fn run_turn_using(
                     model: None,
                     config_model: None,
                     config_settings: None,
+                    config_effort: None,
                     context: None,
                     metrics: None,
                     usage_limit: None,
@@ -342,6 +346,7 @@ fn run_turn_using(
                     model: None,
                     config_model: None,
                     config_settings: None,
+                    config_effort: None,
                     context: None,
                     metrics: None,
                     usage_limit: None,
@@ -401,6 +406,7 @@ fn run_turn_using(
                     model: None,
                     config_model: None,
                     config_settings: None,
+                    config_effort: None,
                     context: None,
                     metrics: None,
                     usage_limit: None,
@@ -589,6 +595,7 @@ fn run_turn_using(
                 let mut model = None;
                 let mut config_model = None;
                 let mut config_settings = None;
+                let mut config_effort = None;
                 let mut context_changed = false;
                 let mut metrics = None;
                 let mut background = None;
@@ -739,6 +746,7 @@ fn run_turn_using(
                         Event::ConfigChanged {
                             model: changed_model,
                             model_settings,
+                            effort: changed_effort,
                         } => {
                             let store = locked(&store)?;
                             let mut settings =
@@ -751,6 +759,9 @@ fn run_turn_using(
                                     pending.model = Some(id.clone());
                                 }
                                 pending.model_settings.extend(model_settings.clone());
+                                if changed_effort.is_some() {
+                                    pending.effort = changed_effort.clone();
+                                }
                             } else if settings.account.id == source_account
                                 && store.sessions()?.iter().any(|session| {
                                     session.id == summary.id && session.provider == summary.provider
@@ -760,8 +771,14 @@ fn run_turn_using(
                                     settings.model = Some(id.clone());
                                 }
                                 settings.model_settings.extend(model_settings.clone());
+                                if changed_effort.is_some() {
+                                    settings.effort = changed_effort.clone();
+                                }
                             }
                             store.save_agent_settings(summary.id, &settings)?;
+                            if changed_effort.is_some() {
+                                config_effort = changed_effort;
+                            }
                             if changed_model.is_some() {
                                 model = changed_model.clone();
                                 config_model = changed_model;
@@ -856,6 +873,7 @@ fn run_turn_using(
                             model,
                             config_model,
                             config_settings,
+                            config_effort,
                             context: context_changed.then_some(context),
                             metrics,
                             usage_limit: None,
@@ -1046,6 +1064,7 @@ fn run_turn_using(
         model: None,
         config_model: None,
         config_settings: None,
+        config_effort: None,
         context: None,
         metrics: None,
         usage_limit: if cancelled { None } else { usage_limit },

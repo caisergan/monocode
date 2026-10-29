@@ -1252,6 +1252,17 @@ impl Conversation {
                                 this.settings.model = Some(model);
                             }
                         }
+                        if let Some(effort) = update.config_effort {
+                            if let Some(pending) = this.settings.pending_provider_switch.as_mut()
+                                && pending.from == source_provider
+                                && pending.account.id == source_account
+                            {
+                                pending.effort = Some(effort);
+                            } else if source_selected {
+                                this.settings.effort = Some(effort);
+                            }
+                            this.save_settings(cx);
+                        }
                         if let Some(settings) = update.config_settings {
                             if let Some(pending) = this.settings.pending_provider_switch.as_mut()
                                 && pending.from == source_provider

@@ -81,6 +81,9 @@ impl Protocol {
                 && self.activities.claude_background.is_empty()
                 && self.activities.claude_pending.is_empty()
                 && self.claude_resume_at.is_none_or(|at| Instant::now() >= at)
+                && self
+                    .claude_settings_check
+                    .is_none_or(|at| Instant::now() >= at)
             {
                 self.done = true;
                 events.push(Event::Done);
