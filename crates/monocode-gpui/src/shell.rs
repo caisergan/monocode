@@ -31,6 +31,7 @@ mod search;
 mod session_filters;
 mod session_folders;
 mod session_groups;
+mod session_import;
 mod session_loading;
 mod session_preview;
 mod session_shortcuts;
@@ -660,6 +661,7 @@ pub(crate) struct Shell {
     reminders: Vec<monocode_core::store::Reminder>,
     renaming: Option<session_groups::Renaming>,
     link_dialog: Option<session_groups::LinkDialog>,
+    import_sheet: Option<session_import::ImportSheet>,
     action_dialog: Option<actions::ActionDialog>,
     actions_anchor: AnchorSlot,
     /// The dock terminal each action last ran in, by project and action id.
@@ -1021,6 +1023,7 @@ impl Shell {
             reminders: sidebar_metadata.reminders,
             renaming: None,
             link_dialog: None,
+            import_sheet: None,
             action_dialog: None,
             actions_anchor: AnchorSlot::default(),
             action_terminals: HashMap::new(),
@@ -5595,6 +5598,13 @@ impl Shell {
                         .into(),
                     ]);
                 }
+                if !path.starts_with("remote://") {
+                    items.push(
+                        MenuAction::new("import-sessions", "Import terminal sessions…")
+                            .icon("terminal")
+                            .into(),
+                    );
+                }
                 items.extend([
                     MenuAction::new("reveal", REVEAL_LABEL)
                         .icon("folder-open")
@@ -5714,6 +5724,8 @@ impl Shell {
                     } else {
                         cx.reveal_path(std::path::Path::new(&path));
                     }
+                } else if action == "import-sessions" {
+                    self.open_import_sheet(Some(path), window, cx);
                 } else if action == "project-theme" {
                     self.open_project_theme(path, window, cx);
                 } else if action == "background" {
@@ -8545,6 +8557,10 @@ impl Render for Shell {
                     this.close_link_dialog(window, cx);
                     return;
                 }
+                if this.import_sheet.is_some() {
+                    this.close_import_sheet(window, cx);
+                    return;
+                }
                 if this.action_dialog.is_some() {
                     this.close_action_dialog(window, cx);
                     return;
@@ -8753,6 +8769,7 @@ impl Render for Shell {
             .children(self.drag_ghost(cx))
             .children(self.background_modal(window, cx))
             .children(self.link_modal(window, cx))
+            .children(self.import_modal(window, cx))
             .children(self.action_modal(window, cx))
             .children(self.resource_modal(window, cx))
             .children(self.quick_open_modal(window, cx))

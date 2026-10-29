@@ -18,6 +18,7 @@ impl Shell {
             || self.menu.is_some()
             || self.renaming.is_some()
             || self.link_dialog.is_some()
+            || self.import_sheet.is_some()
             || self.action_dialog.is_some()
             || self.background_dialog.is_some()
             || self.resources.read(cx).is_open()
