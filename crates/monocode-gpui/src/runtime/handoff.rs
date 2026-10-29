@@ -125,5 +125,6 @@ pub(super) fn prepare(
     Handoff {
         from: source.from.clone(),
         brief: monocode_core::response::choose_handoff_brief(&brief, rows),
+        continued: None,
     }
 }

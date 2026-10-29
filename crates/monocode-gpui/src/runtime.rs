@@ -463,13 +463,13 @@ fn run_turn_using(
                 String::new()
             };
             let prompt = if let Some(handoff) = &settings.handoff {
-                monocode_core::response::wrap_handoff_prompt(&handoff.from, &handoff.brief, &prompt)
+                monocode_core::response::wrap_any_handoff(handoff, &prompt)
             } else {
                 prompt
             };
             format!("{intro}\n\n{brief}\n\n{prompt}")
         } else if let Some(handoff) = &settings.handoff {
-            monocode_core::response::wrap_handoff_prompt(&handoff.from, &handoff.brief, &prompt)
+            monocode_core::response::wrap_any_handoff(handoff, &prompt)
         } else if provider_id.is_none() && turn_start > 0 {
             let mut history = String::new();
             for row in transcript.rows[..turn_start]

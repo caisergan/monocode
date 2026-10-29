@@ -6,6 +6,7 @@ mod btw;
 mod commands;
 pub(crate) mod composer_features;
 mod composer_shelf;
+mod continued_chat;
 mod edit_last_turn;
 mod follow_up;
 pub(crate) mod git_actions;
@@ -124,6 +125,8 @@ pub(crate) struct SessionChanged;
 pub(crate) struct ChooseFolder(pub(crate) AnchorSlot);
 /// The review card asked to open the session's recorded changes.
 pub(crate) struct OpenSessionChanges(pub(crate) crate::review::ReviewTab);
+/// Open another session, as a continued chat's card opens its source.
+pub(crate) struct OpenSession(pub(crate) i64);
 pub(crate) struct Conversation {
     editing_last_turn: edit_last_turn::State,
     btw: Option<Entity<btw::Btw>>,
@@ -205,6 +208,8 @@ pub(crate) struct Conversation {
     context: Option<monocode_core::context::Usage>,
     context_hovered: bool,
     tokens_hovered: bool,
+    /// A continued chat's card shows the recap that goes out with its first message.
+    handoff_context_open: bool,
     prompt_cache: PromptCacheWarning,
     menu: Option<OpenMenu>,
     add_anchor: AnchorSlot,
@@ -651,6 +656,7 @@ impl Conversation {
             context: None,
             context_hovered: false,
             tokens_hovered: false,
+            handoff_context_open: false,
             prompt_cache: PromptCacheWarning::default(),
             menu: None,
             add_anchor: AnchorSlot::default(),
@@ -1545,6 +1551,7 @@ impl Conversation {
 impl EventEmitter<SessionChanged> for Conversation {}
 impl EventEmitter<ChooseFolder> for Conversation {}
 impl EventEmitter<OpenSessionChanges> for Conversation {}
+impl EventEmitter<OpenSession> for Conversation {}
 impl EventEmitter<Transfer> for Conversation {}
 impl EventEmitter<composer_features::StartOrchestration> for Conversation {}
 impl EventEmitter<composer_features::StopOrchestration> for Conversation {}
@@ -2291,6 +2298,7 @@ impl Conversation {
                         brief: monocode_core::response::handoff(
                             self.transcript.read(cx).source_rows(),
                         ),
+                        continued: None,
                     });
                 }
             }
@@ -2816,7 +2824,19 @@ impl Conversation {
             .child(self.message_queue(window, cx))
             .children(if self.is_remote() { None } else { self.auth_notice(cx) })
             .when(self.settings.worktree_removed,|d|d.child(div().mb_2().p_3().rounded_lg().border_1().border_color(content(0.1)).flex().items_center().gap_3().text_size(px(12.)).child(div().flex_1().child("Worktree deleted. Select a branch or worktree to continue this conversation.")).child(tool_pill("reattach-worktree","Select worktree").child("Select worktree").on_click(cx.listener(|this,_,window,cx|this.open_git(GitMode::Worktree,window,cx))))))
-            .when_some(self.settings.handoff.clone(), |d, handoff| {
+            .when_some(
+                self.settings
+                    .handoff
+                    .clone()
+                    .filter(|handoff| handoff.continued.is_some()),
+                |d, handoff| d.child(self.continued_chat_card(handoff, cx)),
+            )
+            .when_some(
+                self.settings
+                    .handoff
+                    .clone()
+                    .filter(|handoff| handoff.continued.is_none()),
+                |d, handoff| {
                 d.child(
                     div()
                         .mb(px(6.))

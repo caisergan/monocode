@@ -1354,6 +1354,20 @@ impl Shell {
             }));
         self.observations.push(cx.subscribe(
             &view,
+            |_, _, event: &crate::conversation::OpenSession, cx| {
+                let id = event.0;
+                cx.spawn(async move |this, cx| {
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        if this.session_summaries.contains_key(&id) {
+                            this.open(id, window, cx);
+                        }
+                    });
+                })
+                .detach();
+            },
+        ));
+        self.observations.push(cx.subscribe(
+            &view,
             move |this, _, event: &crate::conversation::OpenSessionChanges, cx| {
                 let tab = event.0.clone();
                 // The card's pane takes focus, so its review opens beside it.
@@ -1509,6 +1523,7 @@ impl Shell {
                 settings.handoff = Some(Handoff {
                     from: transfer.from.clone(),
                     brief: response::handoff(&transfer.through),
+                    continued: None,
                 });
                 None
             };

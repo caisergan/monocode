@@ -188,6 +188,16 @@ impl TurnInfo {
 pub struct Handoff {
     pub from: String,
     pub brief: String,
+    /// The chat this one continues in a fresh session, rather than a
+    /// provider switch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continued: Option<ContinuedChat>,
+}
+/// The source of a chat started with "Continue in new session".
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContinuedChat {
+    pub session: i64,
+    pub title: String,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]

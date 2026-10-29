@@ -463,6 +463,9 @@ impl Shell {
                     },
                 )
                 .into(),
+                MenuAction::new("continue-in-new", "Continue in new session")
+                    .disabled(!summary.has_messages || summary.cwd.starts_with("remote://"))
+                    .into(),
             ]);
         }
         items.extend([
@@ -515,6 +518,78 @@ impl Shell {
         ]);
         items
     }
+    /// Sidebar.tsx's "Continue in new session": a fresh chat in a new tab
+    /// with the same model, effort, worktree and branch. The recap built from
+    /// the transcript waits in its composer and goes out with the first
+    /// message. A closed session is read for its recap without being opened.
+    pub(super) fn continue_in_new_session(&mut self, id: i64, cx: &mut Context<Self>) {
+        let source = self.session_metadata(id, cx).summary.clone();
+        let title = self.session_metadata(id, cx).display_title();
+        let live = self.sessions.get(&id).map(|view| {
+            let view = view.read(cx);
+            (
+                view.transcript.read(cx).history_rows().to_vec(),
+                view.settings.clone(),
+            )
+        });
+        let store = self.store.clone();
+        self.navigation_revision += 1;
+        let revision = self.navigation_revision;
+        let work = cx.background_executor().spawn(async move {
+            let store = locked(&store)?;
+            let (rows, source_settings) = match live {
+                Some(live) => live,
+                None => (
+                    store.load(id)?.rows,
+                    store.agent_settings(id)?.unwrap_or_default(),
+                ),
+            };
+            let settings = monocode_core::agent::Settings {
+                account: source_settings.account.clone(),
+                revision: monocode_core::time::now_ms() * 1_000_000,
+                model: source_settings.model.clone(),
+                effort: source_settings.effort.clone(),
+                model_settings: source_settings.model_settings.clone(),
+                fast: source_settings.fast,
+                service_tier: source_settings.service_tier.clone(),
+                thinking: source_settings.thinking,
+                access: source_settings.access,
+                worktree_cwd: source_settings.worktree_cwd.clone(),
+                handoff: Some(monocode_core::agent::Handoff {
+                    from: source.provider.clone(),
+                    brief: monocode_core::response::continuation(&rows, None),
+                    continued: Some(monocode_core::agent::ContinuedChat { session: id, title }),
+                }),
+                ..Default::default()
+            };
+            let summary = store.create(&source.provider, &source.cwd)?;
+            store.configure_agent(summary.id, &summary.provider, &settings)?;
+            Ok::<_, String>((summary, settings))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok((summary, settings)) => {
+                    let id = summary.id;
+                    this.add(summary, cx);
+                    this.sessions[&id]
+                        .update(cx, |view, cx| view.install_transfer(settings, None, cx));
+                    this.order.retain(|s| *s != id);
+                    this.order.insert(0, id);
+                    if this.navigation_revision == revision {
+                        this.activate_session(id, window, cx);
+                    }
+                    this.persist(cx);
+                }
+                Err(error) => {
+                    this.error = Some(error);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
     pub(super) fn run_session_menu(
         &mut self,
         id: i64,
@@ -528,6 +603,7 @@ impl Shell {
         let summary = self.session_metadata(id, cx).summary.clone();
         let ids = self.session_menu_ids(id, cx);
         match action {
+            "continue-in-new" => self.continue_in_new_session(id, cx),
             "copy-harness-session-id" | "copy-monocode-session-id" => {
                 let text = if action == "copy-harness-session-id" {
                     summary.provider_id
@@ -2401,6 +2477,58 @@ mod tests {
             save.right() <= dialog.right() - px(16.),
             "Update link at {save:?} overflows the dialog at {dialog:?}"
         );
+    }
+
+    #[gpui::test]
+    fn continue_in_new_session_opens_a_fresh_chat_carrying_the_recap(cx: &mut TestAppContext) {
+        let (window, a, _) = setup(cx);
+        let before = window
+            .update(cx, |shell, w, cx| {
+                shell.sessions[&a].update(cx, |view, cx| {
+                    view.settings.effort = Some("xhigh".into());
+                    let rows = vec![
+                        monocode_core::transcript::Row {
+                            role: "user".into(),
+                            text: "Fix the crash on launch".into(),
+                            first: true,
+                            sent_at: None,
+                        },
+                        monocode_core::transcript::Row {
+                            role: "assistant".into(),
+                            text: "Fixed it in main.rs.".into(),
+                            first: true,
+                            sent_at: None,
+                        },
+                    ];
+                    view.transcript.update(cx, |t, cx| t.patch(0, rows, cx));
+                });
+                let before = shell.session_summaries.len();
+                shell.run_menu(MenuTarget::Session(a), "continue-in-new", None, w, cx);
+                before
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| {
+                assert_eq!(shell.session_summaries.len(), before + 1);
+                let id = shell.workspace.active.unwrap();
+                assert_ne!(id, a);
+                let view = shell.sessions[&id].read(cx);
+                assert_eq!(
+                    view.summary.provider,
+                    shell.sessions[&a].read(cx).summary.provider
+                );
+                assert_eq!(view.settings.effort.as_deref(), Some("xhigh"));
+                let handoff = view.settings.handoff.clone().unwrap();
+                assert_eq!(handoff.continued.unwrap().session, a);
+                assert!(
+                    handoff
+                        .brief
+                        .contains("## First request\nFix the crash on launch")
+                );
+                assert!(handoff.brief.contains("Fixed it in main.rs."));
+            })
+            .unwrap();
     }
 
     #[gpui::test]

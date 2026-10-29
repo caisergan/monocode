@@ -183,6 +183,151 @@ pub fn choose_handoff_brief(agent: &str, rows: &[Row]) -> String {
     }
 }
 
+/// continuation.ts's buildContinuationBrief: the recap for continuing a
+/// session in a fresh chat, built from the transcript alone. Asking the old
+/// thread to summarize would replay its whole context, which is the cost a
+/// fresh chat exists to avoid once the prompt cache is cold.
+pub fn continuation(rows: &[Row], earlier: Option<&str>) -> String {
+    let mut users: Vec<String> = Vec::new();
+    let mut latest_user = None;
+    let mut changed: Vec<String> = Vec::new();
+    let mut read: Vec<String> = Vec::new();
+    for (ix, row) in rows.iter().enumerate() {
+        if row.role == "user" {
+            if row.first || users.is_empty() {
+                users.push(String::new());
+            }
+            users.last_mut().unwrap().push_str(&row.text);
+            latest_user = Some(ix);
+        } else if row.role == "tool" {
+            let Ok(tool) = serde_json::from_str::<ToolCall>(&row.text) else {
+                continue;
+            };
+            let (action, path) = tool.summary();
+            if path.is_empty() {
+                continue;
+            }
+            let key = path.to_lowercase();
+            if matches!(action.as_str(), "Edit" | "Write") {
+                if !changed.iter().any(|seen| seen.to_lowercase() == key) {
+                    changed.push(path);
+                }
+            } else if action == "Read" {
+                read.retain(|seen| seen.to_lowercase() != key);
+                read.push(path);
+            }
+        }
+    }
+    let list = |items: &[String], max: usize, note: Option<&str>| {
+        let mut lines: Vec<String> = Vec::new();
+        if let Some(note) = note.filter(|_| items.len() > 1) {
+            lines.push(format!("({note})"));
+        }
+        lines.extend(items.iter().take(max).map(|item| format!("- {item}")));
+        if items.len() > max {
+            lines.push(format!("- … and {} more", items.len() - max));
+        }
+        lines.join("\n")
+    };
+    let mut sections = Vec::new();
+    if let Some(earlier) = earlier.map(str::trim).filter(|e| !e.is_empty()) {
+        sections.push(format!(
+            "## Earlier context\nThis chat already continued an earlier one. Its recap:\n\n{}",
+            limit(earlier, 4_000)
+        ));
+    }
+    let texts: Vec<_> = users.iter().map(|text| text.trim()).collect();
+    if let Some(first) = texts.first().filter(|text| !text.is_empty()) {
+        sections.push(format!("## First request\n{}", limit(first, 1_200)));
+    }
+    let later: Vec<_> = texts
+        .iter()
+        .skip(1)
+        .filter(|text| !text.is_empty())
+        .collect();
+    if !later.is_empty() {
+        let recent = &later[later.len().saturating_sub(3)..];
+        let mut lines = vec!["## Latest requests".to_owned()];
+        if later.len() > recent.len() {
+            lines.push(format!(
+                "({} earlier messages omitted)",
+                later.len() - recent.len()
+            ));
+        }
+        lines.extend(recent.iter().map(|text| {
+            format!(
+                "- {}",
+                limit(text, 600)
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            )
+        }));
+        sections.push(lines.join("\n"));
+    }
+    let latest = prose(&rows[latest_user.map_or(0, |ix| ix + 1)..]);
+    if !latest.is_empty() {
+        // The end of a long reply holds its conclusion, so cut from the start.
+        let count = latest.chars().count();
+        let latest = if count > 8_000 {
+            format!(
+                "[earlier part truncated]\n\n{}",
+                latest.chars().skip(count - 8_000).collect::<String>()
+            )
+        } else {
+            latest
+        };
+        sections.push(format!("## Latest response\n{latest}"));
+    }
+    if !changed.is_empty() {
+        sections.push(format!(
+            "## Files changed in this session\n{}\nOnly edits made with file tools are listed; run `git diff` on a file before relying on its contents.",
+            list(&changed, 60, None)
+        ));
+    }
+    let read_only: Vec<String> = read
+        .into_iter()
+        .rev()
+        .filter(|path| {
+            !changed
+                .iter()
+                .any(|seen| seen.to_lowercase() == path.to_lowercase())
+        })
+        .collect();
+    if !read_only.is_empty() {
+        sections.push(format!(
+            "## Files read in this session\n{}",
+            list(&read_only, 30, Some("most recent first"))
+        ));
+    }
+    sections.join("\n\n")
+}
+
+/// A continued chat's first prompt: the user's request, then the recap of
+/// the chat it continues.
+pub fn wrap_continuation_prompt(title: &str, brief: &str, user_request: &str) -> String {
+    let lead = format!(
+        "You are continuing work from an earlier chat in this project, \"{title}\". This is not a new task. Do not say you have no prior context.\n\n{}",
+        user_request.trim()
+    );
+    let body = brief.trim();
+    if body.is_empty() {
+        lead
+    } else {
+        format!(
+            "{lead}\n\nRecap of the earlier chat, built from its transcript. Read the files it lists before relying on them:\n\n<continued_chat>\n{body}\n</continued_chat>"
+        )
+    }
+}
+
+/// The first prompt after a handoff: a provider switch, or a chat continued
+/// in a fresh session.
+pub fn wrap_any_handoff(handoff: &crate::agent::Handoff, user_request: &str) -> String {
+    match &handoff.continued {
+        Some(source) => wrap_continuation_prompt(&source.title, &handoff.brief, user_request),
+        None => wrap_handoff_prompt(&handoff.from, &handoff.brief, user_request),
+    }
+}
 pub fn wrap_handoff_prompt(from: &str, brief: &str, user_request: &str) -> String {
     let provider = crate::provider::Kind::from_id(from).label();
     let body = strip_goal_sections(brief);
@@ -233,6 +378,43 @@ pub fn strip_goal_sections(markdown: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn continuation_recaps_requests_the_latest_reply_and_files_from_the_transcript() {
+        let row = |role: &str, text: &str| Row {
+            role: role.into(),
+            text: text.into(),
+            first: true,
+            sent_at: None,
+        };
+        let tool = |name: &str, input: serde_json::Value| {
+            let mut call = ToolCall::new("t", name);
+            call.input = input.to_string();
+            row("tool", &serde_json::to_string(&call).unwrap())
+        };
+        let rows = [
+            row("user", "Fix the crash on launch"),
+            row("assistant", "Looking."),
+            tool("Read", serde_json::json!({"file_path":"src/a.rs"})),
+            tool("Edit", serde_json::json!({"file_path":"src/b.rs"})),
+            row("user", "Also add a test"),
+            row("user", "And update the changelog"),
+            tool("Read", serde_json::json!({"file_path":"src/b.rs"})),
+            row("assistant", "Done: added the test."),
+        ];
+        let brief = continuation(&rows, Some("Older recap"));
+        assert!(brief.starts_with("## Earlier context"));
+        assert!(brief.contains("## First request\nFix the crash on launch"));
+        assert!(brief.contains("- Also add a test\n- And update the changelog"));
+        assert!(brief.contains("## Latest response\nDone: added the test."));
+        assert!(brief.contains("## Files changed in this session\n- src/b.rs"));
+        // A file the session changed is not also listed as read.
+        assert!(brief.contains("## Files read in this session\n- src/a.rs"));
+        let prompt = wrap_continuation_prompt("Crash fix", &brief, "Ship it");
+        assert!(prompt.contains("\"Crash fix\""));
+        assert!(prompt.contains("Ship it"));
+        assert!(prompt.contains("<continued_chat>"));
+    }
+
     use super::*;
     #[test]
     fn copied_prose_and_transfer_recaps_keep_message_boundaries() {
