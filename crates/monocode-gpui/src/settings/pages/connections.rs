@@ -76,7 +76,8 @@ struct Health {
     needs_update: bool,
 }
 
-fn describe_health(environment: &str, host: &Value) -> Result<Health, String> {
+/// `head`: the source branch's tip "Update Host" builds from, for SSH machines.
+fn describe_health(environment: &str, host: &Value, head: Option<&str>) -> Result<Health, String> {
     if host.get("environmentId").and_then(Value::as_str) != Some(environment) {
         return Err("Host identity changed".into());
     }
@@ -89,17 +90,28 @@ fn describe_health(environment: &str, host: &Value) -> Result<Health, String> {
             .and_then(Value::as_array)
             .is_some_and(|values| values.iter().any(|v| v.as_str() == Some(capability)))
     };
-    let needs_update = !supports("workspace.run") || !supports("git.worktreeCreate");
+    let missing = !supports("workspace.run") || !supports("git.worktreeCreate");
+    // The host reports the commit it was built from (host/build.mjs).
+    let built = host["build"]["commit"].as_str();
+    let branch = monocode_core::remote::host_source::BRANCH;
+    let behind = head.is_some_and(|head| built != Some(head));
+    let short = |commit: &str| commit.chars().take(7).collect::<String>();
     Ok(Health {
-        label: if needs_update {
-            "Connected · host update needed for Explorer and Changes"
+        label: if missing {
+            "Connected · host update needed for Explorer and Changes".into()
+        } else if behind {
+            format!(
+                "Connected · host update available ({branch} {})",
+                short(head.unwrap_or_default())
+            )
         } else if providers.is_empty() {
-            "Connected · install a supported provider on the host"
+            "Connected · install a supported provider on the host".into()
+        } else if let Some(built) = built.filter(|built| head == Some(*built)) {
+            format!("Connected · host at {branch} {}", short(built))
         } else {
-            "Connected"
-        }
-        .into(),
-        needs_update,
+            "Connected".into()
+        },
+        needs_update: missing || behind,
     })
 }
 
@@ -324,6 +336,12 @@ impl SettingsView {
         let generation = self.connections.generation;
         let work = cx.background_executor().spawn(async move {
             let machines = remote.list()?;
+            // "Update Host" builds the host from this branch's tip on this computer.
+            let head = machines
+                .iter()
+                .any(|machine| machine.ssh.is_some())
+                .then(monocode_core::remote::host_source::latest_commit_cached)
+                .flatten();
             let providers: Vec<_> = monocode_core::provider::Kind::ALL
                 .into_iter()
                 .map(|p| p.id())
@@ -337,7 +355,10 @@ impl SettingsView {
                             "environment.describe",
                             json!({"supportedProviders": providers}),
                         )
-                        .and_then(|host| describe_health(&machine.environment_id, &host));
+                        .and_then(|host| {
+                            let head = head.as_deref().filter(|_| machine.ssh.is_some());
+                            describe_health(&machine.environment_id, &host, head)
+                        });
                     (machine.id.clone(), health)
                 })
                 .collect::<Vec<_>>();
@@ -1026,7 +1047,8 @@ mod tests {
         assert_eq!(
             describe_health(
                 "known-host",
-                &json!({"environmentId": "other-host", "providers": ["codex"], "capabilities": ["workspace.run", "git.worktreeCreate"]})
+                &json!({"environmentId": "other-host", "providers": ["codex"], "capabilities": ["workspace.run", "git.worktreeCreate"]}),
+                None
             ),
             Err("Host identity changed".into())
         );
@@ -1035,15 +1057,54 @@ mod tests {
     #[test]
     fn health_checks_explorer_and_worktree_support_before_provider_installation() {
         assert_eq!(
-            describe_health("host", &json!({"environmentId": "host", "providers": []})).unwrap(),
+            describe_health(
+                "host",
+                &json!({"environmentId": "host", "providers": []}),
+                None
+            )
+            .unwrap(),
             Health {
                 label: "Connected · host update needed for Explorer and Changes".into(),
                 needs_update: true
             }
         );
-        assert_eq!(describe_health("host", &json!({"environmentId": "host", "providers": [], "capabilities": ["workspace.run", "git.worktreeCreate"]})).unwrap(), Health {
+        assert_eq!(describe_health("host", &json!({"environmentId": "host", "providers": [], "capabilities": ["workspace.run", "git.worktreeCreate"]}), None).unwrap(), Health {
             label: "Connected · install a supported provider on the host".into(), needs_update: false
         });
+    }
+
+    #[test]
+    fn ssh_hosts_offer_an_update_once_the_source_branch_moves_past_their_build() {
+        let head = "1d1a7e275e9902c28307ba9e57b8570ec0e697cc";
+        let host = |commit: &str| {
+            json!({"environmentId": "host", "providers": ["codex"],
+            "capabilities": ["workspace.run", "git.worktreeCreate"], "build": {"commit": commit}})
+        };
+        assert_eq!(
+            describe_health("host", &host(head), Some(head)).unwrap(),
+            Health {
+                label: "Connected · host at dev 1d1a7e2".into(),
+                needs_update: false
+            }
+        );
+        assert_eq!(
+            describe_health("host", &host("0000000"), Some(head)).unwrap(),
+            Health {
+                label: "Connected · host update available (dev 1d1a7e2)".into(),
+                needs_update: true
+            }
+        );
+        // A host built elsewhere reports no commit, so it is behind too.
+        let upstream = json!({"environmentId": "host", "providers": ["codex"], "capabilities": ["workspace.run", "git.worktreeCreate"]});
+        assert!(
+            describe_health("host", &upstream, Some(head))
+                .unwrap()
+                .needs_update
+        );
+        assert_eq!(
+            describe_health("host", &upstream, None).unwrap().label,
+            "Connected"
+        );
     }
 
     #[test]
