@@ -1110,7 +1110,7 @@ fn github_pr_checks_args(repo: &str, number: i64) -> Result<Vec<String>, String>
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct GitHubStatusCheckRow {
+pub(crate) struct GitHubStatusCheckRow {
     #[serde(default, rename = "__typename")]
     typename: String,
     #[serde(default)]
@@ -1162,7 +1162,7 @@ fn parse_github_pr_checks(json: &str) -> Result<GitHubPrChecks, String> {
     })
 }
 
-fn github_pr_check_from_row(row: GitHubStatusCheckRow) -> GitHubPrCheck {
+pub(crate) fn github_pr_check_from_row(row: GitHubStatusCheckRow) -> GitHubPrCheck {
     let is_status_context = if row.typename.is_empty() {
         !row.context.is_empty()
     } else {
