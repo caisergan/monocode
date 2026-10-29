@@ -796,3 +796,134 @@ fn host_context_and_latest_turn_metrics_use_actual_session_fields() {
     assert_eq!(context.unwrap().window, None);
     assert!(metrics.is_none());
 }
+
+#[test]
+fn a_continued_chat_refuses_to_drop_its_recap_on_an_older_host() {
+    let dir = Directory::new();
+    let store = dir.store();
+    let mut binding = binding(&store);
+    binding.session_id = Some("host-session".into());
+    journal(&store, &binding).unwrap();
+    let dispatched = Arc::new(AtomicUsize::new(0));
+    let sent = dispatched.clone();
+    let host = Host::new(move |request| {
+        if request["method"] == "commands.dispatch" {
+            sent.fetch_add(1, Ordering::Relaxed);
+        }
+        Some(json!({"kind":"snapshot","value":snapshot("idle", 1)}))
+    });
+    let (tx, rx) = async_channel::unbounded();
+    let (_controls_tx, controls) = std::sync::mpsc::channel();
+    let settings = Settings {
+        model: Some("fixture".into()),
+        handoff: Some(monocode_core::agent::Handoff {
+            from: "codex".into(),
+            brief: "## First request\nFix it".into(),
+            continued: Some(monocode_core::agent::ContinuedChat {
+                session: 7,
+                title: "Crash fix".into(),
+            }),
+        }),
+        ..Default::default()
+    };
+    let client = host.client.clone();
+    let summary = binding.summary.clone();
+    let worker = thread::spawn(move || {
+        run_with_client(
+            client,
+            summary,
+            "Carry on".into(),
+            settings,
+            controls,
+            store,
+            Arc::new(AtomicBool::new(false)),
+            tx,
+        )
+    });
+    let update = receive(&rx);
+    worker.join().unwrap();
+    assert!(update.finished);
+    assert!(
+        update.status.contains("Update MonoCode Host"),
+        "{}",
+        update.status
+    );
+    assert_eq!(dispatched.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn a_steer_reaches_the_running_host_turn_and_is_reported_delivered() {
+    let dir = Directory::new();
+    let store = dir.store();
+    let mut binding = binding(&store);
+    binding.session_id = Some("host-session".into());
+    journal(&store, &binding).unwrap();
+    let steers = Arc::new(Mutex::new(Vec::<Value>::new()));
+    let seen = steers.clone();
+    let mut polls = 0;
+    let host = Host::new(move |request| {
+        if request["method"] == "commands.dispatch" {
+            let command = request["params"].clone();
+            seen.lock().unwrap().push(command.clone());
+            Some(receipt(&command))
+        } else {
+            polls += 1;
+            Some(
+                json!({"kind":"snapshot","value":snapshot(if polls<6 {"running"}else{"idle"},polls)}),
+            )
+        }
+    });
+    let (tx, rx) = async_channel::unbounded();
+    let (controls_tx, controls) = std::sync::mpsc::channel();
+    let settings = Settings {
+        remote_action: Some(json!({"type":"attach"})),
+        ..Default::default()
+    };
+    let client = host.client.clone();
+    let summary = binding.summary.clone();
+    let worker = thread::spawn(move || {
+        run_with_client(
+            client,
+            summary,
+            String::new(),
+            settings,
+            controls,
+            store,
+            Arc::new(AtomicBool::new(false)),
+            tx,
+        )
+    });
+    assert!(receive(&rx).turn_ready);
+    let message = monocode_core::follow_up::Message {
+        id: "follow-up".into(),
+        text: "Change course".into(),
+        ..Default::default()
+    };
+    controls_tx
+        .send(Control {
+            id: message.id.clone(),
+            decision: Decision::Steer(message),
+        })
+        .unwrap();
+    let mut delivered = Vec::new();
+    loop {
+        let update = receive(&rx);
+        delivered.extend(update.follow_up_delivered);
+        assert!(
+            update.follow_up_errors.is_empty(),
+            "{:?} {}",
+            update.follow_up_errors,
+            update.status
+        );
+        if update.finished {
+            break;
+        }
+    }
+    worker.join().unwrap();
+    assert_eq!(delivered, vec!["follow-up".to_owned()]);
+    let steers = steers.lock().unwrap();
+    assert_eq!(steers.len(), 1);
+    assert_eq!(steers[0]["type"], "steer");
+    assert_eq!(steers[0]["runId"], "host-run");
+    assert_eq!(steers[0]["text"], "Change course");
+}

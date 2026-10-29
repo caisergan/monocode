@@ -464,7 +464,7 @@ impl Shell {
                 )
                 .into(),
                 MenuAction::new("continue-in-new", "Continue in new session")
-                    .disabled(!summary.has_messages || summary.cwd.starts_with("remote://"))
+                    .disabled(!summary.has_messages)
                     .into(),
             ]);
         }

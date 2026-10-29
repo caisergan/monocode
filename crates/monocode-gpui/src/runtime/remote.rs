@@ -518,6 +518,7 @@ pub(crate) fn run_with_client(
             .unwrap_or_else(|| json!({"type":"send"}));
         let attaching = action["type"] == "attach";
         let retrying = action["type"] == "retry";
+        let mut handed_off = false;
         if !attaching
             && let Some(recovery) = binding
                 .rejected
@@ -610,6 +611,37 @@ pub(crate) fn run_with_client(
                 if settings.plan {
                     send["intent"] = json!("plan");
                 }
+                // A continued chat's recap goes out with its first message.
+                // Hosts without sessions.handoff would drop it and send only
+                // the typed text.
+                if let Some((handoff, source)) = settings
+                    .handoff
+                    .as_ref()
+                    .filter(|_| operation == "send")
+                    .and_then(|handoff| Some((handoff, handoff.continued.as_ref()?)))
+                {
+                    let descriptor =
+                        client.request(&machine.id, "environment.describe", json!({}))?;
+                    if !descriptor["capabilities"]
+                        .as_array()
+                        .is_some_and(|all| all.iter().any(|c| c == "sessions.handoff"))
+                    {
+                        return Err("Update MonoCode Host in Connections settings to continue a chat on this machine.".into());
+                    }
+                    let mut value = json!({
+                        "from": handoff.from,
+                        "brief": handoff.brief,
+                        "source": source.title,
+                    });
+                    if let Some(id) = locked(&store)?
+                        .remote_session(source.session)?
+                        .and_then(|source| source.session_id)
+                    {
+                        value["sourceId"] = json!(id);
+                    }
+                    send["handoff"] = value;
+                    handed_off = true;
+                }
                 for key in ["draftBlockId", "planBlockId", "intent"] {
                     if let Some(value) = action.get(key) {
                         send[key] = value.clone();
@@ -638,6 +670,16 @@ pub(crate) fn run_with_client(
         if !attaching {
             upload_pending(&client, &machine.id, &store, &mut binding)?;
             dispatch_outbox(&client, &machine.id, &store, &mut binding)?;
+        }
+        if handed_off {
+            // The host holds the recap now; the composer card goes.
+            let store = locked(&store)?;
+            let mut persisted = store.agent_settings(summary.id)?.unwrap_or_default();
+            persisted.handoff = None;
+            store.save_agent_settings(summary.id, &persisted)?;
+            let mut cleared = update("Working…", false);
+            cleared.handoff = Some(None);
+            tx.send_blocking(cleared).map_err(|_| "Window closed")?;
         }
         drop(guard);
         let id = binding
@@ -737,6 +779,30 @@ pub(crate) fn run_with_client(
                 stopping_run = Some(run_id.into());
             }
             while let Ok(control) = controls.try_recv() {
+                if let Decision::Steer(message) = &control.decision {
+                    // sessions.steer: the host records the message in the
+                    // transcript and the agent reads it now.
+                    let mut steer = command("steer", Some(&id));
+                    steer["runId"] = snapshot["runId"].clone();
+                    steer["text"] = json!(message.text);
+                    match prepare_for_session(
+                        &client,
+                        &machine.id,
+                        &binding.project.environment_id,
+                        &message.attachments,
+                        steer["commandId"].as_str().unwrap_or_default(),
+                    ) {
+                        Ok((references, uploads)) => {
+                            if !references.is_empty() {
+                                steer["attachments"] = json!(references);
+                            }
+                            binding.uploads.extend(uploads);
+                            steering.push((message.id.clone(), steer));
+                        }
+                        Err(error) => steer_errors.push((message.id.clone(), error)),
+                    }
+                    continue;
+                }
                 let mut next = command("approve", Some(&id));
                 next["runId"] = snapshot["runId"].clone();
                 next["requestId"] = json!(
@@ -765,30 +831,7 @@ pub(crate) fn run_with_client(
                         next["reply"] = reply(question, answers);
                     }
                     Decision::KeepOpen => continue,
-                    Decision::Steer(message) => {
-                        // sessions.steer: the host records the message in the
-                        // transcript and the agent reads it now.
-                        let mut steer = command("steer", Some(&id));
-                        steer["runId"] = snapshot["runId"].clone();
-                        steer["text"] = json!(message.text);
-                        match prepare_for_session(
-                            &client,
-                            &machine.id,
-                            &binding.project.environment_id,
-                            &message.attachments,
-                            steer["commandId"].as_str().unwrap_or_default(),
-                        ) {
-                            Ok((references, uploads)) => {
-                                if !references.is_empty() {
-                                    steer["attachments"] = json!(references);
-                                }
-                                binding.uploads.extend(uploads);
-                                steering.push((message.id.clone(), steer));
-                            }
-                            Err(error) => steer_errors.push((message.id.clone(), error)),
-                        }
-                        continue;
-                    }
+                    Decision::Steer(_) => unreachable!("steers are handled above"),
                 }
                 control_commands.push(next);
             }
