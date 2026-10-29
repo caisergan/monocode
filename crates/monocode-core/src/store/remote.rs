@@ -65,6 +65,18 @@ impl RemoteSession {
             })
     }
 }
+/// A host session's links: every one under `linkedWorkItems`, newest first,
+/// or the card's `linkedWorkItem` from hosts that predate the list.
+fn host_work_item(host: &Value) -> Option<crate::session_groups::WorkItem> {
+    let decode =
+        |v: &Value| serde_json::from_value::<crate::session_groups::WorkItem>(v.clone()).ok();
+    if let Some(items) = host.get("linkedWorkItems").and_then(Value::as_array) {
+        return crate::session_groups::WorkItem::from_links(items.iter().filter_map(decode));
+    }
+    host.get("linkedWorkItem")
+        .filter(|v| !v.is_null())
+        .and_then(decode)
+}
 fn host_settings(project: &RemoteProject, host: &Value) -> Settings {
     let mut settings = Settings::default();
     settings.model = host["model"].as_str().map(str::to_owned);
@@ -358,10 +370,7 @@ impl Store {
             updated_at: value["updatedAt"].as_u64().unwrap_or(0),
             archived: value["archived"].as_bool().unwrap_or(false),
             pinned: value["pinned"].as_bool().unwrap_or(false),
-            work_item: host
-                .get("linkedWorkItem")
-                .filter(|v| !v.is_null())
-                .and_then(|v| serde_json::from_value(v.clone()).ok()),
+            work_item: host_work_item(host),
         };
         let imported = host_settings(project, host);
         let full_snapshot = value.get("session").is_some_and(Value::is_object);
@@ -475,8 +484,8 @@ impl Store {
         if let Some(pinned) = patch["pinned"].as_bool() {
             remote.summary.pinned = pinned;
         }
-        if let Some(item) = patch.get("linkedWorkItem") {
-            remote.summary.work_item = serde_json::from_value(item.clone()).ok();
+        if patch.get("linkedWorkItem").is_some() || patch.get("linkedWorkItems").is_some() {
+            remote.summary.work_item = host_work_item(&patch);
         }
         self.save_remote_session(&remote)
     }
@@ -518,6 +527,28 @@ mod tests {
             "session":{"id":id,"harness":"codex","title":"Host conversation","model":"codex:live-model",
                 "runtimeMode":"auto","modelSettings":{"reasoningEffort":"high"},"cwd":"/host/repo/worktree",
                 "blocks":[{"id":"prompt","role":"user","text":"hello"}]}})
+    }
+
+    #[test]
+    fn host_links_read_the_full_list_or_the_card_item_from_older_hosts() {
+        let item = |n: u64| json!({"kind":"pr","repo":"a/b","number":n,"url":format!("https://github.com/a/b/pull/{n}")});
+        let links = host_work_item(
+            &json!({"linkedWorkItem": item(2), "linkedWorkItems": [item(2), item(1)]}),
+        )
+        .unwrap()
+        .links();
+        assert_eq!(
+            links.iter().map(|i| i.number).collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+        assert_eq!(
+            host_work_item(&json!({"linkedWorkItem": item(5)}))
+                .unwrap()
+                .number,
+            5
+        );
+        assert_eq!(host_work_item(&json!({"linkedWorkItem": null})), None);
+        assert_eq!(host_work_item(&json!({"linkedWorkItems": []})), None);
     }
 
     #[test]

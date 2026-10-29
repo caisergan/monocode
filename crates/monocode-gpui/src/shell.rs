@@ -348,6 +348,8 @@ pub(crate) enum MenuTarget {
     SearchTab,
     AppTab(app_views::AppView),
     Session(i64),
+    /// A session card's linked issues and PRs, when it has more than one.
+    WorkItems(i64),
     Folder(String),
     /// The sidebar project header's menu.
     Header,
@@ -5322,6 +5324,12 @@ impl Shell {
                 228.,
                 MenuStyle::Explorer,
             ),
+            MenuTarget::WorkItems(id) => (
+                format!("Links for {}", title(id)).into(),
+                self.work_item_menu_items(*id, cx),
+                260.,
+                MenuStyle::Explorer,
+            ),
             MenuTarget::Folder(folder) => (
                 "Folder actions".into(),
                 self.folder_menu_items(folder, events, cx),
@@ -5636,6 +5644,7 @@ impl Shell {
                 self.run_title_tab_menu(TitleTab::App(view), action, window, cx)
             }
             MenuTarget::Session(id) => self.run_session_menu(id, action, window, cx),
+            MenuTarget::WorkItems(_) => cx.open_url(action),
             MenuTarget::Folder(folder) => self.run_folder_menu(folder, action, window, cx),
             MenuTarget::ProjectRailAdd => match action {
                 "open-project" => self.open_project(cx),

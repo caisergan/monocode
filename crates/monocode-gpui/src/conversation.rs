@@ -1464,6 +1464,7 @@ impl Conversation {
                             }
                             this.settings.turns = this.transcript.read(cx).window_turns();
                             this.save_settings(cx);
+                            this.link_created_pull_requests(cx);
                             this.refresh_git(cx);
                             this.run_history_actions(cx);
                             this.mono_flush_external(cx);

@@ -140,6 +140,7 @@ impl Item {
             repo: self.repo.clone(),
             number: self.number.max(0) as u64,
             url: self.url.clone(),
+            more: Vec::new(),
         }
     }
     pub fn prompt(&self, body: &str, ask: bool) -> String {

@@ -8,7 +8,7 @@ enum Effect {
     Card(Value),
     None,
     Start(
-        Session,
+        Box<Session>,
         Box<Settings>,
         String,
         bool,
@@ -114,6 +114,7 @@ impl Monos {
                             });
                         }
                         Effect::Start(summary, settings, _prompt, draft, reveal, placement) => {
+                            let summary = *summary;
                             let id = summary.id;
                             let caller = call.session;
                             let origin = this
@@ -380,7 +381,7 @@ impl Monos {
                         Ok((
                             json!({"sessionId":summary.id,"accepted":true,"project":project}),
                             Effect::Start(
-                                summary,
+                                Box::new(summary),
                                 Box::new(settings),
                                 prompt,
                                 draft,
