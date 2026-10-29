@@ -237,6 +237,8 @@ fn executable(path: &Path) -> bool {
     }
 }
 
+/// The request id of Claude's `get_context_usage` probe.
+const CLAUDE_CONTEXT_PROBE: &str = "native-context";
 fn write_json(out: &mut impl Write, value: Value) -> Result<(), String> {
     let mut frame = serde_json::to_vec(&value).map_err(|e| e.to_string())?;
     frame.push(b'\n');
@@ -258,6 +260,9 @@ struct Protocol {
     claude_result_seen: bool,
     claude_usage_limit: Option<crate::usage::Limit>,
     claude_resume_at: Option<Instant>,
+    /// An unanswered `get_context_usage`: whether its token count still
+    /// counts, which stops once the turn's own readings arrive.
+    claude_context_probe: Option<bool>,
     follow_up_ready: bool,
     steering: HashMap<String, (crate::follow_up::Message, Instant)>,
     request: Request,
@@ -299,6 +304,7 @@ impl Protocol {
             claude_result_seen: false,
             claude_usage_limit: None,
             claude_resume_at: None,
+            claude_context_probe: None,
             follow_up_ready: false,
             steering: HashMap::new(),
             emitted: HashMap::new(),
@@ -761,7 +767,32 @@ impl Protocol {
                             crate::usage::Limit::from_claude_info(&v["rate_limit_info"]);
                     }
                     "control_response" if v["response"]["request_id"] == "native-init" => {
+                        // Claude reports the window only on a turn's result, so
+                        // ask now; a resumed conversation already has a level.
+                        self.claude_context_probe = Some(self.request.provider_id.is_none());
+                        write_json(
+                            stdin,
+                            json!({"type":"control_request","request_id":CLAUDE_CONTEXT_PROBE,"request":{"subtype":"get_context_usage","detail":"summary"}}),
+                        )?;
                         self.claude_prompt(stdin)?;
+                    }
+                    "control_response" if v["response"]["request_id"] == CLAUDE_CONTEXT_PROBE => {
+                        // An older Claude Code that refuses changes nothing.
+                        let level = self.claude_context_probe.take();
+                        let usage = &v["response"]["response"];
+                        let window = usage["maxTokens"].as_u64().filter(|w| *w > 0);
+                        if let (Some(level), Some(window), "success") = (
+                            level,
+                            window,
+                            v["response"]["subtype"].as_str().unwrap_or(""),
+                        ) {
+                            events.push(Event::Context {
+                                used: usage["totalTokens"]
+                                    .as_u64()
+                                    .filter(|used| level && *used > 0),
+                                window: Some(window),
+                            });
+                        }
                     }
                     "stream_event" => {
                         let e = &v["event"];
@@ -825,6 +856,9 @@ impl Protocol {
                         if v["parent_tool_use_id"].is_null() {
                             if let Some(used) = crate::context::claude_used(&v["message"]["usage"])
                             {
+                                if let Some(level) = &mut self.claude_context_probe {
+                                    *level = false;
+                                }
                                 events.push(Event::Context {
                                     used: Some(used),
                                     window: None,
@@ -1884,6 +1918,51 @@ mod tests {
                 assert_eq!(started["params"]["sandboxPolicy"]["type"], "readOnly");
             }
         }
+    }
+    #[test]
+    fn claude_asks_for_its_context_window_before_the_first_turn_ends() {
+        let probe = |provider_id: Option<&str>, stream_first: bool| {
+            let mut claude = protocol(Kind::Claude);
+            claude.request.provider_id = provider_id.map(str::to_owned);
+            let mut out = Vec::new();
+            claude
+                .frame(
+                    json!({"type":"control_response","response":{"request_id":"native-init"}}),
+                    &mut out,
+                )
+                .unwrap();
+            let asked = String::from_utf8_lossy(&out)
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .any(|m| m["request"]["subtype"] == "get_context_usage");
+            assert!(asked);
+            if stream_first {
+                claude.frame(json!({"type":"assistant","message":{"content":[],"usage":{"input_tokens":10,"output_tokens":1}}}), &mut out).unwrap();
+            }
+            claude
+                .frame(json!({"type":"control_response","response":{"subtype":"success","request_id":"native-context","response":{"maxTokens":1000000,"totalTokens":18000}}}), &mut out)
+                .unwrap()
+        };
+        let context = |used| Event::Context {
+            used,
+            window: Some(1_000_000),
+        };
+        assert_eq!(probe(None, false), vec![context(Some(18_000))]);
+        // A resumed conversation, or a turn already reporting, keeps its own level.
+        assert_eq!(probe(Some("saved"), false), vec![context(None)]);
+        assert_eq!(probe(None, true), vec![context(None)]);
+        // An older Claude Code that refuses changes nothing.
+        let mut claude = protocol(Kind::Claude);
+        claude
+            .frame(
+                json!({"type":"control_response","response":{"request_id":"native-init"}}),
+                &mut Vec::new(),
+            )
+            .unwrap();
+        let refused = claude
+            .frame(json!({"type":"control_response","response":{"subtype":"error","request_id":"native-context","error":"Unknown"}}), &mut Vec::new())
+            .unwrap();
+        assert!(refused.is_empty());
     }
     #[test]
     fn context_reports_use_the_latest_request_and_include_cached_tokens() {

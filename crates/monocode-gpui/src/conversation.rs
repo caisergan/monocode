@@ -202,6 +202,7 @@ pub(crate) struct Conversation {
     preparing_worktree: bool,
     context: Option<monocode_core::context::Usage>,
     context_hovered: bool,
+    tokens_hovered: bool,
     menu: Option<OpenMenu>,
     add_anchor: AnchorSlot,
     model_anchor: AnchorSlot,
@@ -218,6 +219,7 @@ pub(crate) struct Conversation {
     session_edits_generation: u64,
     branch_anchor: AnchorSlot,
     context_anchor: AnchorSlot,
+    tokens_anchor: AnchorSlot,
     composer_anchor: AnchorSlot,
     composer_motion: ComposerMotion,
     narrow: bool,
@@ -645,6 +647,7 @@ impl Conversation {
             preparing_worktree: false,
             context: None,
             context_hovered: false,
+            tokens_hovered: false,
             menu: None,
             add_anchor: AnchorSlot::default(),
             model_anchor: AnchorSlot::default(),
@@ -658,6 +661,7 @@ impl Conversation {
             session_edits_generation: 0,
             branch_anchor: AnchorSlot::default(),
             context_anchor: AnchorSlot::default(),
+            tokens_anchor: AnchorSlot::default(),
             composer_anchor: AnchorSlot::default(),
             composer_motion: ComposerMotion::default(),
             narrow: false,
@@ -3062,6 +3066,19 @@ impl Conversation {
         let headline = ratio
             .map(|r| format!("{:.0}% context used", r * 100.))
             .unwrap_or_else(|| "No context used yet".into());
+        // SessionTokenCount: Claude's running totals; Codex already counts
+        // cached reads in its input, and the same sum would count them twice.
+        let tokens = (self.summary.provider == "claude")
+            .then(|| {
+                monocode_core::context::TokenTotals::sum(
+                    self.transcript
+                        .read(cx)
+                        .turns
+                        .values()
+                        .filter_map(|turn| turn.metrics.as_ref()),
+                )
+            })
+            .flatten();
         let detail = self.context.map(|usage| {
             format!(
                 "{} / {} tokens",
@@ -3146,6 +3163,57 @@ impl Conversation {
                             )
                         },
                     )
+                    .when_some(tokens, |d, tokens| {
+                        let format = monocode_core::context::format_tokens;
+                        d.child(
+                            div()
+                                .id("session-tokens")
+                                .debug_selector(|| "session-tokens".into())
+                                .role(Role::Image)
+                                .aria_label(format!("Session tokens: {}", tokens.detail()))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .text_size(px(11.))
+                                .line_height(px(16.))
+                                .text_color(content(0.45))
+                                .child(self.tokens_anchor.probe())
+                                .child(format!("↑{}", format(tokens.uncached)))
+                                .child(format!("↓{}", format(tokens.output)))
+                                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                                    this.tokens_hovered = *hovered;
+                                    cx.notify();
+                                }))
+                                .when(self.tokens_hovered, |d| {
+                                    d.child(
+                                        popover(
+                                            "session-tokens-tooltip",
+                                            Anchor::Slot(self.tokens_anchor.clone()),
+                                        )
+                                        .side(Side::Top)
+                                        .align(Align::End)
+                                        .max_width(280.)
+                                        .padding(10.)
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .text_size(px(12.))
+                                                .line_height(px(16.))
+                                                .text_color(content(1.))
+                                                .child("Session tokens")
+                                                .child(
+                                                    div()
+                                                        .text_size(px(11.))
+                                                        .text_color(content(0.5))
+                                                        .child(tokens.detail()),
+                                                ),
+                                        ),
+                                    )
+                                }),
+                        )
+                    })
                     .when(show_context, |d| {
                         d.child(
                             div()
