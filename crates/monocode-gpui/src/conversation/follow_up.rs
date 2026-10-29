@@ -120,9 +120,21 @@ impl Conversation {
         invert: bool,
         cx: &mut Context<Self>,
     ) {
+        self.enqueue_follow_up_as(prompt, mode, invert, false, cx);
+    }
+    /// `queued` holds the message until the running turn finishes, whatever
+    /// the follow-up setting says, as `/queue` does.
+    pub(super) fn enqueue_follow_up_as(
+        &mut self,
+        prompt: String,
+        mode: Option<String>,
+        invert: bool,
+        queued: bool,
+        cx: &mut Context<Self>,
+    ) {
         let attachments = std::mem::take(&mut self.attachments);
         let mut message = self.message(prompt, attachments, mode, cx);
-        message.steer = message.can_steer() && self.steers_follow_up(invert, cx);
+        message.steer = !queued && message.can_steer() && self.steers_follow_up(invert, cx);
         if invert && self.busy && message.steer {
             self.follow_ups.requested = Some(message.id.clone());
         }
@@ -1064,6 +1076,38 @@ mod tests {
                 })
                 .unwrap();
         }
+    }
+
+    #[gpui::test]
+    fn queue_commands_hold_the_message_even_when_follow_ups_steer(cx: &mut TestAppContext) {
+        let window = conversation(cx);
+        cx.update(|cx| {
+            cx.update_global::<crate::settings::Preferences, _>(|prefs, _| {
+                prefs.follow_up = "steer".into()
+            })
+        });
+        window
+            .update(cx, |view, _, cx| {
+                view.summary.has_messages = true;
+                view.busy = true;
+                view.input.update(cx, |input, cx| {
+                    input.set_text("/queue after this".into(), cx)
+                });
+                assert_eq!(
+                    view.follow_up_action(false, cx),
+                    Some(("Add to queue", "queue-list"))
+                );
+                view.send(cx);
+                let messages = &view.follow_ups.state.messages;
+                assert_eq!(messages.len(), 1);
+                assert_eq!(messages[0].text, "after this");
+                assert!(!messages[0].steer);
+                view.input
+                    .update(cx, |input, cx| input.set_text("change course".into(), cx));
+                view.send(cx);
+                assert!(view.follow_ups.state.messages[1].steer);
+            })
+            .unwrap();
     }
 
     #[gpui::test]

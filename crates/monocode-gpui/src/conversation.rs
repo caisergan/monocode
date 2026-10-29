@@ -931,6 +931,12 @@ impl Conversation {
             .map(str::to_owned)
             .unwrap_or(raw);
         self.folder_selected = false;
+        // `/queue <message>`: queue it behind the running turn, never steer.
+        let queued = monocode_core::composer::consume_command(&raw, "queue").map(str::to_owned);
+        let (raw, queued) = match queued {
+            Some(rest) => (rest, true),
+            None => (raw, false),
+        };
         let prompt = self.consume_mode_command(raw, cx);
         if prompt.trim().is_empty() && self.attachments.is_empty() {
             return;
@@ -952,7 +958,7 @@ impl Conversation {
             self.stop(cx);
         }
         if self.sends_as_follow_up() {
-            self.enqueue_follow_up_inverted(prompt, mode.map(str::to_owned), invert, cx);
+            self.enqueue_follow_up_as(prompt, mode.map(str::to_owned), invert, queued, cx);
             if self.stopping || self.settings.pending_provider_switch.is_some() {
                 // A fresh Send continues the conversation, while older queued
                 // messages remain paused after Stop.
@@ -1005,6 +1011,9 @@ impl Conversation {
             return None;
         }
         let mode = self.settings.orchestrator || self.settings.plan || self.settings.operator;
+        if input::Command::leading(&self.input.read(cx).content) == Some(input::Command::Queue) {
+            return Some(("Add to queue", "queue-list"));
+        }
         Some(
             if self.busy && !mode && self.steers_follow_up(alternate, cx) {
                 ("Steer", "queue-steer")

@@ -630,6 +630,11 @@ impl Completion {
                     "Save this message without starting the agent",
                 ),
                 (
+                    "queue",
+                    "Queue",
+                    "Hold this message until the running turn finishes",
+                ),
+                (
                     "orchestrator",
                     "Orchestrator",
                     "Plan and coordinate agent work",
@@ -692,7 +697,7 @@ impl Completion {
                             label: label.into(),
                             detail: detail.into(),
                             insertion: format!("/{id}"),
-                            mode: (!matches!(id, "compact" | "btw" | "stage" | "commit"))
+                            mode: (!matches!(id, "compact" | "btw" | "stage" | "commit" | "queue"))
                                 .then_some(id),
                             file: false,
                             server: None,
@@ -749,6 +754,7 @@ impl Completion {
                         | "orchestrator"
                         | "add-to-folder"
                         | "draft"
+                        | "queue"
                         | "btw"
                         | "mono"
                         | "monocode"
@@ -1157,6 +1163,7 @@ mod tests {
                     commands,
                     [
                         "/draft",
+                        "/queue",
                         "/orchestrator",
                         "/operator",
                         "/plan",
