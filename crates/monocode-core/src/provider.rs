@@ -969,6 +969,7 @@ impl Protocol {
                                 || usage.get("cache_creation_input_tokens").is_some())
                                 && input + read + write > 0)
                                 .then(|| read as f64 / (input + read + write) as f64 * 100.),
+                            cache_ttl_seconds: crate::prompt_cache::claude_ttl(usage),
                         };
                         if metrics.reported() {
                             events.push(Event::Metrics(metrics));

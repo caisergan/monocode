@@ -104,6 +104,7 @@ mod tests {
             cache_read_tokens: read,
             cache_write_tokens: write,
             cache_hit_percent: None,
+            cache_ttl_seconds: None,
         };
         let turns = [turn(100, 5_000, 2_000, 300), turn(20, 7_000, 0, 1_200)];
         let totals = TokenTotals::sum(&turns).unwrap();

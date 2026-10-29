@@ -13,6 +13,7 @@ mod history;
 mod mobile;
 mod mono;
 mod notifications;
+mod prompt_cache;
 mod remote;
 pub(crate) mod remote_plans;
 mod response_menu;
@@ -117,6 +118,7 @@ struct OpenMenu {
     menu: Entity<Menu>,
     _events: Vec<Subscription>,
 }
+use prompt_cache::PromptCacheWarning;
 use response_menu::ResponseMenu;
 pub(crate) struct SessionChanged;
 pub(crate) struct ChooseFolder(pub(crate) AnchorSlot);
@@ -203,6 +205,7 @@ pub(crate) struct Conversation {
     context: Option<monocode_core::context::Usage>,
     context_hovered: bool,
     tokens_hovered: bool,
+    prompt_cache: PromptCacheWarning,
     menu: Option<OpenMenu>,
     add_anchor: AnchorSlot,
     model_anchor: AnchorSlot,
@@ -648,6 +651,7 @@ impl Conversation {
             context: None,
             context_hovered: false,
             tokens_hovered: false,
+            prompt_cache: PromptCacheWarning::default(),
             menu: None,
             add_anchor: AnchorSlot::default(),
             model_anchor: AnchorSlot::default(),
@@ -876,6 +880,11 @@ impl Conversation {
             return;
         }
         if self.handle_local_command(cx) {
+            return;
+        }
+        if self.confirms_expired_cache(cx) {
+            self.prompt_cache.confirming = Some(invert);
+            cx.notify();
             return;
         }
         if self.settings.mono.is_some() {
@@ -3007,6 +3016,7 @@ impl Conversation {
                                             .child(icon("chevron-down", 12.)),
                                     ),
                             )
+                            .children(self.prompt_cache_mark(cx))
                             .child(self.action(has_value, window, cx)),
                     )
                     .children(self.attachment_drop_overlay(12.)),

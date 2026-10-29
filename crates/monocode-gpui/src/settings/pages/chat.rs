@@ -79,6 +79,20 @@ impl SettingsView {
                 )],
             ),
             self.row(
+                Some("confirm-expired-cache-send"),
+                false,
+                "Confirm send after cache expires",
+                Some("Ask before a message re-reads a Claude chat whose prompt cache has expired.".into()),
+                vec![self.toggle(
+                    "confirm-expired-cache-send",
+                    "Confirm send after cache expires",
+                    p.confirm_expired_cache_send,
+                    false,
+                    cx,
+                    |this, on, cx| this.update(cx, |p| p.confirm_expired_cache_send = on),
+                )],
+            ),
+            self.row(
                 Some("composer-autocorrect"),
                 false,
                 "Autocorrect",

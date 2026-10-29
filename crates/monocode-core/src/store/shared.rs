@@ -899,7 +899,8 @@ impl Store {
             if let Some(metrics) = info.metrics.filter(|metrics| metrics.reported()) {
                 fields.push(("turnMetrics", json!({"inputTokens":metrics.input_tokens,
                     "outputTokens":metrics.output_tokens,"cacheReadTokens":metrics.cache_read_tokens,
-                    "cacheWriteTokens":metrics.cache_write_tokens,"cacheHitPercent":metrics.cache_hit_percent})));
+                    "cacheWriteTokens":metrics.cache_write_tokens,"cacheHitPercent":metrics.cache_hit_percent,
+                    "cacheTtlSeconds":metrics.cache_ttl_seconds})));
             }
             for (key, value) in fields {
                 if block[key].is_null() {

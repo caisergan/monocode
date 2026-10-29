@@ -20,6 +20,7 @@ pub mod mono;
 pub mod notes;
 pub mod process;
 pub mod project_appearance;
+pub mod prompt_cache;
 pub mod provider;
 pub mod remote;
 pub mod resources;

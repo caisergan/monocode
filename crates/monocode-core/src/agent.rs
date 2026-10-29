@@ -202,6 +202,9 @@ pub struct TurnMetrics {
     pub cache_write_tokens: u64,
     #[serde(alias = "cacheHitPercent")]
     pub cache_hit_percent: Option<f64>,
+    /// How long the provider keeps the prompt cache this turn wrote, in seconds.
+    #[serde(alias = "cacheTtlSeconds", skip_serializing_if = "Option::is_none")]
+    pub cache_ttl_seconds: Option<u64>,
 }
 impl TurnMetrics {
     pub fn reported(self) -> bool {

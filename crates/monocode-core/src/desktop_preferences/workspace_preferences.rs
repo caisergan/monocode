@@ -22,6 +22,11 @@ impl DesktopPreferences {
             ("anchor_prompts", "transcriptAnchor", true),
             ("paced_reveal", "pacedReveal", true),
             ("autocorrect", "composerAutocorrect", false),
+            (
+                "confirm_expired_cache_send",
+                "confirmExpiredCacheSend",
+                true,
+            ),
             ("format_on_save", "formatOnSave", true),
             ("autosave", "autosave", false),
             ("composer_mascot", "composerRunner", true),
