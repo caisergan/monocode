@@ -24,6 +24,7 @@ mod project_removal;
 mod project_settings;
 mod quick_composer;
 mod quick_open;
+mod rail_chats;
 mod rails;
 mod remote_projects;
 mod remote_sessions;
@@ -662,6 +663,8 @@ pub(crate) struct Shell {
     renaming: Option<session_groups::Renaming>,
     link_dialog: Option<session_groups::LinkDialog>,
     import_sheet: Option<session_import::ImportSheet>,
+    /// The rail's Chats section lists every chat, not the newest five.
+    rail_chats_expanded: bool,
     action_dialog: Option<actions::ActionDialog>,
     actions_anchor: AnchorSlot,
     /// The dock terminal each action last ran in, by project and action id.
@@ -1024,6 +1027,7 @@ impl Shell {
             renaming: None,
             link_dialog: None,
             import_sheet: None,
+            rail_chats_expanded: false,
             action_dialog: None,
             actions_anchor: AnchorSlot::default(),
             action_terminals: HashMap::new(),

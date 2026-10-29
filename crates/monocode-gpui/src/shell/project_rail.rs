@@ -324,6 +324,7 @@ impl Shell {
                     .overflow_hidden()
                     .child(rows),
             )
+            .child(self.rail_chats(cx))
             .children(self.live_agents_preview(cx))
             .child(self.app_update_footer(cx))
             .child(self.project_rail_footer(compact, cx))
