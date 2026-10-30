@@ -18,6 +18,7 @@ mod mono_panes;
 pub(crate) mod monos;
 mod notifications;
 mod orchestration;
+mod panel_peek;
 mod picker_preferences;
 mod project_rail;
 mod project_removal;
@@ -618,6 +619,14 @@ pub(crate) struct Shell {
     peek_animating: bool,
     peek_close: Option<gpui::Task<()>>,
     peek_toggle_bounds: AnchorSlot,
+    /// The closed inset right panel peeking out over the workspace.
+    panel_peek: Option<sidebar_peek::SidebarPeek>,
+    panel_peek_animating: bool,
+    panel_peek_close: Option<gpui::Task<()>>,
+    panel_peek_toggle_bounds: AnchorSlot,
+    /// A click on the toggle, until the pointer leaves it, so closing the
+    /// panel does not peek it straight back out.
+    panel_peek_toggle_spent: bool,
     /// useTrafficLightsVisible: fullscreen hides the native buttons, so the
     /// title bar takes their room back.
     fullscreen: bool,
@@ -992,6 +1001,11 @@ impl Shell {
             peek_animating: false,
             peek_close: None,
             peek_toggle_bounds: AnchorSlot::default(),
+            panel_peek: None,
+            panel_peek_animating: false,
+            panel_peek_close: None,
+            panel_peek_toggle_bounds: AnchorSlot::default(),
+            panel_peek_toggle_spent: false,
             fullscreen: false,
             window_controls: 0.,
             right_panel_min: crate::right_panel::WIDTH_MIN,
@@ -1636,7 +1650,7 @@ impl Shell {
         let opening = self.right_slide.as_ref().is_some_and(PaneSlide::opening);
         let shown = !self.mono_active(cx)
             && !self.workspace.classic_layout
-            && self.workspace.right_panel_open
+            && (self.workspace.right_panel_open || self.panel_peek.is_some())
             && !self.app_view_open()
             && self.settings.is_none()
             && self.app_search.is_none()
@@ -4623,29 +4637,7 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let content =
-            if let Some(monos) = self.monos.as_ref().filter(|m| m.read(cx).active.is_some()) {
-                let manager = monos.read(cx);
-                let details = manager.details.clone();
-                let html = manager.native_detail_content(cx);
-                // Native artifact views must update their frames and clipping
-                // on every paint; replaying cached GPU quads skips that work.
-                if html {
-                    details.into_any_element()
-                } else {
-                    details
-                        .cached(StyleRefinement::default().size_full())
-                        .into_any_element()
-                }
-            } else if self.terminal_in_panel(cx)
-                && panel.read(cx).tab() == crate::right_panel::RightTab::Terminal
-            {
-                self.panel_terminal(window, cx)
-            } else {
-                panel
-                    .cached(StyleRefinement::default().size_full())
-                    .into_any_element()
-            };
+        let content = self.right_panel_content(panel, true, window, cx);
         div()
             .id("right-panel-frame")
             .debug_selector(|| "right-panel-frame".into())
@@ -4682,6 +4674,42 @@ impl Shell {
                     )),
             )
             .into_any_element()
+    }
+
+    /// What the panel shows: the active Mono's details, the panel's own
+    /// terminal, or its tools. A fading peek paints them uncached, since
+    /// inherited opacity is not part of a cached paint's key.
+    pub(super) fn right_panel_content(
+        &mut self,
+        panel: Entity<RightPanel>,
+        cache: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if let Some(monos) = self.monos.as_ref().filter(|m| m.read(cx).active.is_some()) {
+            let manager = monos.read(cx);
+            let details = manager.details.clone();
+            let html = manager.native_detail_content(cx);
+            // Native artifact views must update their frames and clipping
+            // on every paint; replaying cached GPU quads skips that work.
+            if html || !cache {
+                details.into_any_element()
+            } else {
+                details
+                    .cached(StyleRefinement::default().size_full())
+                    .into_any_element()
+            }
+        } else if self.terminal_in_panel(cx)
+            && panel.read(cx).tab() == crate::right_panel::RightTab::Terminal
+        {
+            self.panel_terminal(window, cx)
+        } else if cache {
+            panel
+                .cached(StyleRefinement::default().size_full())
+                .into_any_element()
+        } else {
+            panel.into_any_element()
+        }
     }
 
     fn right_panel_resize_handle(
@@ -4950,7 +4978,12 @@ impl Shell {
                             div()
                                 .id("toggle-right-panel")
                                 .debug_selector(|| "toggle-right-panel".into())
+                                .child(self.panel_peek_toggle_bounds.probe())
                                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                // Hovering the toggle peeks a closed panel out.
+                                .on_hover(cx.listener(|this, hovered, window, cx| {
+                                    this.hover_panel_peek_toggle(*hovered, window, cx)
+                                }))
                                 .role(Role::Button)
                                 .aria_label(if dot {
                                     TOGGLE_RIGHT_PANEL_DOT_LABEL
@@ -4997,6 +5030,7 @@ impl Shell {
                                 )
                                 .when(!panel_off, |d| {
                                     d.on_click(cx.listener(|this, _, window, cx| {
+                                        this.panel_peek_toggle_spent = true;
                                         this.toggle_right_panel(window, cx)
                                     }))
                                 }),
@@ -8594,6 +8628,10 @@ impl Render for Shell {
                     this.set_peek(false, cx);
                     return;
                 }
+                if this.panel_peek_open() && this.menu.is_none() {
+                    this.set_panel_peek(false, window, cx);
+                    return;
+                }
                 if this.menu.is_none()
                     && this.right_panel_shown(cx)
                     && !this.mono_active(cx)
@@ -8749,6 +8787,7 @@ impl Render for Shell {
             .child(self.right_panel_resize_watch(cx))
             .children(self.layout_body(sidebar_width, right_shown, right_width, full, window, cx))
             .children(self.peek_watch(window, cx))
+            .children(self.panel_peek_watch(window, cx))
             .child(self.notices_overlay(cx))
             .children(self.menu.as_ref().map(|open| {
                 let point = matches!(open.anchor, Anchor::Point(_));
@@ -10599,6 +10638,125 @@ mod tests {
         cx.simulate_mouse_move(gpui::point(px(2.), px(300.)), None, Default::default());
         cx.run_until_parked();
         assert!(!open(cx));
+    }
+    #[gpui::test]
+    fn closed_right_panel_peeks_from_the_edge_and_the_toggle(cx: &mut TestAppContext) {
+        let (window, _, _) = window(cx);
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let (width, viewport) = window
+            .update(cx, |shell, _, _| {
+                assert!(!shell.workspace.right_panel_open);
+                (shell.right_panel_width(), shell.viewport_width)
+            })
+            .unwrap();
+        let open = |cx: &mut gpui::VisualTestContext| {
+            window
+                .update(cx, |shell, _, _| shell.panel_peek_open())
+                .unwrap()
+        };
+        assert!(cx.debug_bounds("right-panel-peek").is_none());
+        // The window's right edge peeks it out, below the title bar.
+        let edge = viewport - 2.;
+        cx.simulate_mouse_move(gpui::point(px(edge), px(20.)), None, Default::default());
+        assert!(!open(cx));
+        cx.simulate_mouse_move(gpui::point(px(edge), px(300.)), None, Default::default());
+        cx.run_until_parked();
+        assert!(open(cx));
+        let panel = cx.debug_bounds("right-panel-peek").unwrap();
+        assert_eq!(panel.right(), px(viewport - 6.));
+        assert_eq!(panel.top(), px(TITLE_BAR_HEIGHT));
+        assert_eq!(panel.size.width, px(width));
+        // The tabs that sit in the title bar while it is open head the card.
+        let tabs = cx.debug_bounds("right-panel-tabs").unwrap();
+        assert!(tabs.left() > panel.left() && tabs.right() <= panel.right());
+        assert_eq!(tabs.top(), panel.top());
+        assert_eq!(tabs.bottom(), panel.top() + px(TITLE_BAR_HEIGHT));
+        // Peeking, its panes read as if it were open.
+        window
+            .update(cx, |shell, _, cx| {
+                assert!(shell.right_panel.as_ref().unwrap().read(cx).shown());
+            })
+            .unwrap();
+        // Crossing onto the panel keeps it out; leaving it puts it away after
+        // a grace period.
+        cx.simulate_mouse_move(
+            gpui::point(px(viewport - 100.), px(300.)),
+            None,
+            Default::default(),
+        );
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(500));
+        cx.run_until_parked();
+        assert!(open(cx));
+        cx.simulate_mouse_move(
+            gpui::point(px(viewport - width - 200.), px(300.)),
+            None,
+            Default::default(),
+        );
+        cx.run_until_parked();
+        assert!(open(cx));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        cx.run_until_parked();
+        assert!(!open(cx));
+        assert!(cx.debug_bounds("right-panel-peek").is_none());
+        window
+            .update(cx, |shell, _, cx| {
+                assert!(!shell.right_panel.as_ref().unwrap().read(cx).shown());
+            })
+            .unwrap();
+        // Hovering the toggle peeks it too, and a click elsewhere dismisses it.
+        let toggle = cx.debug_bounds("toggle-right-panel").unwrap();
+        cx.simulate_mouse_move(toggle.center(), None, Default::default());
+        cx.run_until_parked();
+        assert!(open(cx));
+        cx.simulate_click(
+            gpui::point(px(viewport - width - 200.), px(300.)),
+            Default::default(),
+        );
+        cx.run_until_parked();
+        assert!(!open(cx));
+        // Opening the panel drops the peek, and an open panel never peeks.
+        cx.simulate_mouse_move(toggle.center(), None, Default::default());
+        cx.run_until_parked();
+        assert!(open(cx));
+        cx.simulate_click(toggle.center(), Default::default());
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, _| {
+                assert!(shell.workspace.right_panel_open);
+                assert!(shell.panel_peek.is_none());
+            })
+            .unwrap();
+        cx.simulate_mouse_move(gpui::point(px(edge), px(300.)), None, Default::default());
+        cx.run_until_parked();
+        assert!(!open(cx));
+        // Closing it from the toggle does not peek it straight back out; only
+        // a fresh hover does.
+        cx.simulate_click(toggle.center(), Default::default());
+        cx.run_until_parked();
+        cx.simulate_mouse_move(
+            toggle.center() + gpui::point(px(1.), px(0.)),
+            None,
+            Default::default(),
+        );
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, _| {
+                assert!(!shell.workspace.right_panel_open);
+                assert!(!shell.panel_peek_open());
+            })
+            .unwrap();
+        cx.simulate_mouse_move(
+            gpui::point(px(viewport - width - 200.), px(300.)),
+            None,
+            Default::default(),
+        );
+        cx.simulate_mouse_move(toggle.center(), None, Default::default());
+        cx.run_until_parked();
+        assert!(open(cx));
     }
     #[gpui::test]
     fn original_sidebar_geometry_matches_tauri_chrome(cx: &mut TestAppContext) {

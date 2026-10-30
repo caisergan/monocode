@@ -357,6 +357,10 @@ impl RightPanel {
             cx.notify();
         }
     }
+    #[cfg(test)]
+    pub(crate) fn shown(&self) -> bool {
+        self.shown
+    }
     /// The panes read and poll only while their tab is on screen.
     pub(crate) fn set_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
         if self.shown == shown {
