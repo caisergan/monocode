@@ -24,6 +24,7 @@ mod project_removal;
 mod project_settings;
 mod quick_composer;
 mod quick_open;
+mod rail_chats;
 mod rails;
 mod remote_projects;
 mod remote_sessions;
@@ -31,6 +32,7 @@ mod search;
 mod session_filters;
 mod session_folders;
 mod session_groups;
+mod session_import;
 mod session_loading;
 mod session_preview;
 mod session_shortcuts;
@@ -348,6 +350,8 @@ pub(crate) enum MenuTarget {
     SearchTab,
     AppTab(app_views::AppView),
     Session(i64),
+    /// A session card's linked issues and PRs, when it has more than one.
+    WorkItems(i64),
     Folder(String),
     /// The sidebar project header's menu.
     Header,
@@ -658,6 +662,9 @@ pub(crate) struct Shell {
     reminders: Vec<monocode_core::store::Reminder>,
     renaming: Option<session_groups::Renaming>,
     link_dialog: Option<session_groups::LinkDialog>,
+    import_sheet: Option<session_import::ImportSheet>,
+    /// The rail's Chats section lists every chat, not the newest five.
+    rail_chats_expanded: bool,
     action_dialog: Option<actions::ActionDialog>,
     actions_anchor: AnchorSlot,
     /// The dock terminal each action last ran in, by project and action id.
@@ -1019,6 +1026,8 @@ impl Shell {
             reminders: sidebar_metadata.reminders,
             renaming: None,
             link_dialog: None,
+            import_sheet: None,
+            rail_chats_expanded: false,
             action_dialog: None,
             actions_anchor: AnchorSlot::default(),
             action_terminals: HashMap::new(),
@@ -1352,6 +1361,20 @@ impl Shell {
             }));
         self.observations.push(cx.subscribe(
             &view,
+            |_, _, event: &crate::conversation::OpenSession, cx| {
+                let id = event.0;
+                cx.spawn(async move |this, cx| {
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        if this.session_summaries.contains_key(&id) {
+                            this.open(id, window, cx);
+                        }
+                    });
+                })
+                .detach();
+            },
+        ));
+        self.observations.push(cx.subscribe(
+            &view,
             move |this, _, event: &crate::conversation::OpenSessionChanges, cx| {
                 let tab = event.0.clone();
                 // The card's pane takes focus, so its review opens beside it.
@@ -1507,6 +1530,7 @@ impl Shell {
                 settings.handoff = Some(Handoff {
                     from: transfer.from.clone(),
                     brief: response::handoff(&transfer.through),
+                    continued: None,
                 });
                 None
             };
@@ -5322,6 +5346,12 @@ impl Shell {
                 228.,
                 MenuStyle::Explorer,
             ),
+            MenuTarget::WorkItems(id) => (
+                format!("Links for {}", title(id)).into(),
+                self.work_item_menu_items(*id, cx),
+                260.,
+                MenuStyle::Explorer,
+            ),
             MenuTarget::Folder(folder) => (
                 "Folder actions".into(),
                 self.folder_menu_items(folder, events, cx),
@@ -5572,6 +5602,11 @@ impl Shell {
                         .into(),
                     ]);
                 }
+                items.push(
+                    MenuAction::new("import-sessions", "Import terminal sessions…")
+                        .icon("terminal")
+                        .into(),
+                );
                 items.extend([
                     MenuAction::new("reveal", REVEAL_LABEL)
                         .icon("folder-open")
@@ -5636,6 +5671,7 @@ impl Shell {
                 self.run_title_tab_menu(TitleTab::App(view), action, window, cx)
             }
             MenuTarget::Session(id) => self.run_session_menu(id, action, window, cx),
+            MenuTarget::WorkItems(_) => cx.open_url(action),
             MenuTarget::Folder(folder) => self.run_folder_menu(folder, action, window, cx),
             MenuTarget::ProjectRailAdd => match action {
                 "open-project" => self.open_project(cx),
@@ -5690,6 +5726,8 @@ impl Shell {
                     } else {
                         cx.reveal_path(std::path::Path::new(&path));
                     }
+                } else if action == "import-sessions" {
+                    self.open_import_sheet(Some(path), window, cx);
                 } else if action == "project-theme" {
                     self.open_project_theme(path, window, cx);
                 } else if action == "background" {
@@ -5911,7 +5949,9 @@ impl Shell {
             mark.update(cx, |mark, cx| mark.set_size(side, cx));
         }
         let work_item = self.work_item_badge(id, compact, cx);
+        let subagents = self.subagent_badge(id, cx);
         let has_badges = work_item.is_some()
+            || subagents.is_some()
             || mode.is_some()
             || self.automation_state.session_automations.contains_key(&id);
         let session = self.session_metadata(id, cx);
@@ -6037,6 +6077,7 @@ impl Shell {
             .items_center()
             .gap_1()
             .flex_shrink_0()
+            .children(subagents)
             .children(work_item)
             .when(
                 self.automation_state.session_automations.contains_key(&id),
@@ -6354,6 +6395,27 @@ impl Shell {
             .into_any()
     }
 
+    /// Sessions whose MonoCode or agent session id holds an id-like query.
+    fn sessions_matching_id(&self, cx: &App) -> HashSet<i64> {
+        if monocode_core::session_filters::id_query(&self.query).is_none() {
+            return HashSet::new();
+        }
+        let Ok(store) = locked(&self.store) else {
+            return HashSet::new();
+        };
+        self.order
+            .iter()
+            .copied()
+            .filter(|id| {
+                let provider = self.session_metadata(*id, cx).summary.provider_id.clone();
+                let saved = store.persisted_session_id(*id).ok();
+                monocode_core::session_filters::id_matches(
+                    &self.query,
+                    &[saved.as_deref(), provider.as_deref()],
+                )
+            })
+            .collect()
+    }
     /// The project's sessions as the sidebar lists them, top to bottom.
     fn sidebar_session_ids(&self, cx: &App) -> Vec<i64> {
         let start = self
@@ -6380,6 +6442,7 @@ impl Shell {
             .copied()
             .filter(|id| !self.sidebar_hidden_sessions.contains(id) && listable(*id))
             .collect();
+        let id_hits = self.sessions_matching_id(cx);
         let mut ids: Vec<_> = self
             .order
             .iter()
@@ -6394,6 +6457,7 @@ impl Shell {
                             .is_some_and(|caller| shown.contains(caller)))
                     && self.filter_session(*id, start, cx)
                     && (self.query.is_empty()
+                        || id_hits.contains(id)
                         || if self.workspace.classic_layout {
                             self.classic_session_matches_query(*id, cx)
                         } else {
@@ -8048,6 +8112,7 @@ impl Render for Shell {
             self.review_focused = false;
             window.focus(&view.read(cx).input.focus_handle(cx), cx);
         }
+        crate::monos::html::hide_all();
         if let Some(m) = &self.monos {
             m.read(cx).hide_html(cx);
             m.update(cx, |m, cx| m.bind_window(window, cx));
@@ -8498,6 +8563,10 @@ impl Render for Shell {
                     this.close_link_dialog(window, cx);
                     return;
                 }
+                if this.import_sheet.is_some() {
+                    this.close_import_sheet(window, cx);
+                    return;
+                }
                 if this.action_dialog.is_some() {
                     this.close_action_dialog(window, cx);
                     return;
@@ -8706,6 +8775,7 @@ impl Render for Shell {
             .children(self.drag_ghost(cx))
             .children(self.background_modal(window, cx))
             .children(self.link_modal(window, cx))
+            .children(self.import_modal(window, cx))
             .children(self.action_modal(window, cx))
             .children(self.resource_modal(window, cx))
             .children(self.quick_open_modal(window, cx))

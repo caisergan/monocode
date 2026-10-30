@@ -323,32 +323,11 @@ impl SettingsView {
                 }
                 match result {
                     Ok(output) => {
-                        for line in output.lines() {
-                            let Some((name, detail)) = line.split_once(": ") else {
-                                continue;
-                            };
-                            let name = name.trim();
-                            if name.is_empty()
-                                || !name
-                                    .bytes()
-                                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
-                            {
-                                continue;
-                            }
+                        for (name, status, detail) in
+                            monocode_core::mcp::parse_claude_health(&output)
+                        {
+                            let name = name.as_str();
                             let lower = detail.to_lowercase();
-                            let status = if lower.contains("connected") {
-                                "Connected"
-                            } else if lower.contains("authentication")
-                                || lower.contains("needs auth")
-                            {
-                                "Needs authentication"
-                            } else if lower.contains("failed") {
-                                "Failed"
-                            } else if lower.contains("disabled") {
-                                "Disabled"
-                            } else {
-                                "Configured"
-                            };
                             let mut found = false;
                             for server in &mut this.discovery.mcp {
                                 if server.provider == "claude" && server.name == name {

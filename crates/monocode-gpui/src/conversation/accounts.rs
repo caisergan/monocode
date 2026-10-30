@@ -307,6 +307,7 @@ impl Conversation {
                         brief: monocode_core::response::handoff(
                             this.transcript.read(cx).source_rows(),
                         ),
+                        continued: None,
                     });
                 } else if let Some(id) = &this.summary.provider_id {
                     monocode_core::provider::forget_session(

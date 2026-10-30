@@ -54,6 +54,8 @@ pub(crate) struct Preferences {
     pub follow_up: String,
     pub model_controls: String,
     pub autocorrect: bool,
+    /// Ask before a send re-reads a Claude chat whose prompt cache expired.
+    pub confirm_expired_cache_send: bool,
     pub format_on_save: bool,
     pub autosave: bool,
     pub diff_view: String,
@@ -135,6 +137,7 @@ impl Default for Preferences {
             follow_up: "steer".into(),
             model_controls: "menu".into(),
             autocorrect: false,
+            confirm_expired_cache_send: true,
             format_on_save: true,
             autosave: false,
             diff_view: "editor".into(),

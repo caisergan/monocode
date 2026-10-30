@@ -872,7 +872,15 @@ impl Store {
         item: Option<&crate::session_groups::WorkItem>,
     ) -> Result<(), String> {
         if self.remote_session(id)?.is_some() {
-            return self.patch_remote_session(id, serde_json::json!({"linkedWorkItem": item}));
+            // Hosts that predate `linkedWorkItems` keep the card's item, and
+            // with it the rest under `more`.
+            let links = item
+                .map(crate::session_groups::WorkItem::links)
+                .unwrap_or_default();
+            return self.patch_remote_session(
+                id,
+                serde_json::json!({"linkedWorkItem": item, "linkedWorkItems": links}),
+            );
         }
         if self.shared.is_some() {
             return self.shared_patch(

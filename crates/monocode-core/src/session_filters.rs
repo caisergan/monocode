@@ -102,8 +102,43 @@ impl Filters {
     }
 }
 
+/// sessionHistory.ts's ID_QUERY: a query this long made only of hex digits
+/// and dashes can be part of a session id. Shorter ones ("add", "bed") are
+/// too often ordinary words. Ids match as substrings, not fuzzily: scattered
+/// hex digits hit almost any id.
+pub fn id_query(query: &str) -> Option<String> {
+    let query = query.trim();
+    (query.len() >= 6 && query.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
+        .then(|| query.to_ascii_lowercase())
+}
+/// Whether an id-like query is part of a MonoCode or agent session id.
+pub fn id_matches(query: &str, ids: &[Option<&str>]) -> bool {
+    id_query(query).is_some_and(|query| {
+        ids.iter()
+            .flatten()
+            .any(|id| id.to_ascii_lowercase().contains(&query))
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_id_like_queries_match_session_ids() {
+        let ids = [
+            Some("9b27194c-591d-4924-aa98-ca610d32ecd5"),
+            None,
+            Some("b415453e-3812"),
+        ];
+        assert!(id_matches("9b27194c", &ids));
+        assert!(id_matches("591D-4924", &ids));
+        assert!(id_matches(" b415453e ", &ids));
+        // Too short, or not hex: ordinary words never match ids.
+        for query in ["9b271", "bed", "added", "9b27194z"] {
+            assert!(!id_matches(query, &ids), "{query}");
+        }
+        assert!(!id_matches("ffffff", &ids));
+    }
+
     use super::*;
 
     #[test]

@@ -125,6 +125,26 @@ impl Conversation {
         cx.emit(SessionChanged);
         cx.notify();
     }
+    /// withCreatedPullRequests: when a turn ends, the PRs its agent opened
+    /// with `gh pr create` join the session's links, newest first.
+    pub(super) fn link_created_pull_requests(&mut self, cx: &mut Context<Self>) {
+        let Some(item) = monocode_core::session_groups::with_created_pull_requests(
+            self.summary.work_item.as_ref(),
+            self.transcript.read(cx).history_rows(),
+        ) else {
+            return;
+        };
+        self.summary.work_item = Some(item.clone());
+        let store = self.store.clone();
+        let id = self.summary.id;
+        cx.background_executor()
+            .spawn(async move {
+                let _ = locked(&store).and_then(|s| s.set_work_item(id, Some(&item)));
+            })
+            .detach();
+        cx.emit(SessionChanged);
+        cx.notify();
+    }
     pub(super) fn apply_generated_title(
         &mut self,
         seed: &str,
@@ -247,6 +267,108 @@ mod tests {
         assert_eq!(
             view.read_with(cx, |v, _| v.summary.work_item.clone()),
             manual
+        );
+    }
+    #[gpui::test]
+    fn finished_turns_link_the_pull_requests_their_agent_opened(cx: &mut gpui::TestAppContext) {
+        use monocode_core::{tool::ToolCall, transcript::Row};
+        let store = Arc::new(std::sync::Mutex::new(
+            monocode_core::store::Store::open(Path::new(":memory:")).unwrap(),
+        ));
+        let summary = locked(&store).unwrap().create("claude", "/tmp").unwrap();
+        let id = summary.id;
+        let view = cx.new(|cx| Conversation::new(summary, store.clone(), cx));
+        let row = |role: &str, text: String| Row {
+            role: role.into(),
+            text,
+            first: true,
+            sent_at: None,
+        };
+        let created = |number: u64| {
+            let mut call = ToolCall::new(&format!("toolu_{number}"), "Bash");
+            call.input = serde_json::json!({
+                "command": "gh pr create -R acme/app --base dev --fill"
+            })
+            .to_string();
+            call.output = format!("https://github.com/acme/app/pull/{number}\n");
+            row("tool", serde_json::to_string(&call).unwrap())
+        };
+        let numbers = |cx: &mut gpui::TestAppContext| {
+            view.read_with(cx, |v, _| {
+                v.summary
+                    .work_item
+                    .as_ref()
+                    .map(|item| item.links().iter().map(|i| i.number).collect::<Vec<_>>())
+                    .unwrap_or_default()
+            })
+        };
+        view.update(cx, |v, cx| {
+            let rows = vec![row("user", "Fix the crash".into()), created(48)];
+            v.transcript.update(cx, |t, cx| t.patch(0, rows, cx));
+            v.link_created_pull_requests(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(numbers(cx), vec![48]);
+        view.update(cx, |v, cx| {
+            let rows = vec![row("user", "And the follow-up".into()), created(49)];
+            v.transcript.update(cx, |t, cx| t.patch(2, rows, cx));
+            v.link_created_pull_requests(cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(numbers(cx), vec![49, 48]);
+        let saved = locked(&store).unwrap().sessions().unwrap();
+        let saved = saved.into_iter().find(|s| s.id == id).unwrap();
+        assert_eq!(saved.work_item.unwrap().links().len(), 2);
+    }
+    #[gpui::test]
+    fn a_saved_unlinked_session_links_its_created_pr_when_it_loads(cx: &mut gpui::TestAppContext) {
+        use monocode_core::{tool::ToolCall, transcript::Row};
+        let store = Arc::new(std::sync::Mutex::new(
+            monocode_core::store::Store::open(Path::new(":memory:")).unwrap(),
+        ));
+        let mut call = ToolCall::new("toolu_1", "Bash");
+        call.input = serde_json::json!({"command": "gh pr create --fill"}).to_string();
+        call.output = "https://github.com/caisergan/Search/pull/48\n".into();
+        call.state = monocode_core::tool::ToolState::Completed;
+        let rows = [
+            Row {
+                role: "user".into(),
+                text: "Fix the crash".into(),
+                first: true,
+                sent_at: None,
+            },
+            Row {
+                role: "tool".into(),
+                text: serde_json::to_string(&call).unwrap(),
+                first: true,
+                sent_at: None,
+            },
+        ];
+        let summary = {
+            let mut store = locked(&store).unwrap();
+            let summary = store.create("claude", "/tmp").unwrap();
+            store.write_rows(summary.id, 0, &rows).unwrap();
+            summary
+        };
+        let id = summary.id;
+        let view = cx.new(|cx| Conversation::new(summary, store.clone(), cx));
+        view.update(cx, |v, cx| v.load(cx));
+        cx.run_until_parked();
+        let linked = view
+            .read_with(cx, |v, _| v.summary.work_item.clone())
+            .unwrap();
+        assert_eq!(
+            (linked.repo.as_str(), linked.number),
+            ("caisergan/Search", 48)
+        );
+        let saved = locked(&store).unwrap().sessions().unwrap();
+        assert!(
+            saved
+                .iter()
+                .find(|s| s.id == id)
+                .unwrap()
+                .work_item
+                .is_some()
         );
     }
 }

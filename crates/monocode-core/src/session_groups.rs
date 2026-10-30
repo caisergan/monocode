@@ -297,6 +297,105 @@ pub struct WorkItem {
     pub repo: String,
     pub number: u64,
     pub url: String,
+    /// sessionStore.ts's StoredLinkedWorkItem: every other link, newest first,
+    /// kept inside the card's item so older builds and the mobile app still
+    /// read that one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub more: Vec<WorkItem>,
+}
+impl WorkItem {
+    /// sameLinkedWorkItem: one GitHub identity, however its URL was written.
+    pub fn same(&self, other: &WorkItem) -> bool {
+        self.kind == other.kind
+            && self.number == other.number
+            && self.repo.trim().eq_ignore_ascii_case(other.repo.trim())
+    }
+    /// linkedWorkItemsOf: the card's item, then the rest, each once.
+    pub fn links(&self) -> Vec<WorkItem> {
+        let mut links: Vec<WorkItem> = Vec::new();
+        for item in std::iter::once(self).chain(&self.more) {
+            if !links.iter().any(|seen| seen.same(item)) {
+                links.push(WorkItem {
+                    more: Vec::new(),
+                    ..item.clone()
+                });
+            }
+        }
+        links
+    }
+    /// withLinkedWorkItems: the first item is the card's, carrying the rest.
+    pub fn from_links(items: impl IntoIterator<Item = WorkItem>) -> Option<WorkItem> {
+        let mut links: Vec<WorkItem> = Vec::new();
+        for item in items.into_iter().flat_map(|item| item.links()) {
+            if !links.iter().any(|seen| seen.same(&item)) {
+                links.push(item);
+            }
+        }
+        let mut links = links.into_iter();
+        let mut first = links.next()?;
+        first.more = links.collect();
+        Some(first)
+    }
+}
+
+/// createdPullRequests: PRs the agent opened with `gh pr create`, newest
+/// first, read from the command's output. A failed create still counts: gh
+/// exits non-zero when the branch already has a PR, and prints its URL.
+pub fn created_pull_requests(rows: &[crate::transcript::Row]) -> Vec<WorkItem> {
+    static CREATE: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"\bgh\s+pr\s+create\b").unwrap());
+    static URL: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?i)https?://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/\d+\b")
+            .unwrap()
+    });
+    let mut created: Vec<WorkItem> = Vec::new();
+    for row in rows.iter().rev().filter(|row| row.role == "tool") {
+        let Ok(tool) = serde_json::from_str::<crate::tool::ToolCall>(&row.text) else {
+            continue;
+        };
+        if !tool
+            .presentation()
+            .command
+            .is_some_and(|command| CREATE.is_match(&command))
+        {
+            continue;
+        }
+        // gh prints the new PR's URL last; earlier URLs can be warnings or links.
+        let item = URL
+            .find_iter(&tool.output)
+            .last()
+            .and_then(|url| parse_github_work_item(url.as_str()));
+        if let Some(item) = item.filter(|item| !created.iter().any(|seen| seen.same(item))) {
+            created.push(item);
+        }
+    }
+    created
+}
+
+/// withCreatedPullRequests: the session's links with the PRs its agent
+/// opened added first, or `None` when nothing new was opened. A linked
+/// session only reads its latest turn, so a link removed by hand stays
+/// removed.
+pub fn with_created_pull_requests(
+    linked: Option<&WorkItem>,
+    rows: &[crate::transcript::Row],
+) -> Option<WorkItem> {
+    let rows = match linked {
+        Some(_) => rows
+            .iter()
+            .rposition(|row| row.is_prompt() && row.first)
+            .map_or(rows, |start| &rows[start + 1..]),
+        None => rows,
+    };
+    let current = linked.map(WorkItem::links).unwrap_or_default();
+    let created: Vec<_> = created_pull_requests(rows)
+        .into_iter()
+        .filter(|item| !current.iter().any(|seen| seen.same(item)))
+        .collect();
+    if created.is_empty() {
+        return None;
+    }
+    WorkItem::from_links(created.into_iter().chain(current))
 }
 
 /// parseGithubWorkItemUrl: the first github.com issue or pull request URL.
@@ -342,6 +441,7 @@ pub fn parse_github_work_item(text: &str) -> Option<WorkItem> {
             repo,
             number,
             url,
+            more: Vec::new(),
         });
     }
     None
@@ -416,6 +516,7 @@ pub fn resolve_work_item(
             url: github_url(&repo, kind, number),
             repo,
             number,
+            more: Vec::new(),
         });
     }
     if !references_current_pr(message) {
@@ -437,6 +538,7 @@ pub fn resolve_work_item(
         repo,
         number,
         url,
+        more: Vec::new(),
     })
 }
 
@@ -549,6 +651,7 @@ mod tests {
                 repo: "acme/app".into(),
                 number: 123,
                 url: "https://github.com/acme/app/pull/123".into(),
+                more: Vec::new(),
             })
         );
         assert_eq!(
@@ -566,6 +669,89 @@ mod tests {
         ] {
             assert_eq!(parse_github_work_item(bad), None, "{bad}");
         }
+    }
+
+    fn row(role: &str, text: String) -> crate::transcript::Row {
+        crate::transcript::Row {
+            role: role.into(),
+            text,
+            first: true,
+            sent_at: None,
+        }
+    }
+    fn bash(command: &str, output: &str) -> crate::transcript::Row {
+        let mut call = crate::tool::ToolCall::new("toolu_1", "Bash");
+        call.input = serde_json::json!({ "command": command }).to_string();
+        call.output = output.into();
+        row("tool", serde_json::to_string(&call).unwrap())
+    }
+    fn pr(number: u64) -> WorkItem {
+        parse_github_work_item(&format!("https://github.com/acme/app/pull/{number}")).unwrap()
+    }
+
+    #[test]
+    fn created_pull_requests_come_from_gh_pr_create_output_newest_first() {
+        let rows = [
+            bash(
+                "gh pr create --title A --body-file - <<'EOF'\nSee https://github.com/acme/app/pull/1\nEOF",
+                "Warning: https://github.com/acme/app/pull/3 is related\nhttps://github.com/acme/app/pull/7\n",
+            ),
+            // gh exits non-zero when the branch already has a PR, and prints it.
+            bash(
+                "cd app && gh pr create -R acme/app --fill",
+                "a pull request for branch \"x\" already exists:\nhttps://github.com/acme/app/pull/9\n",
+            ),
+            bash("gh pr view 12", "https://github.com/acme/app/pull/12"),
+            bash("echo https://github.com/acme/app/pull/13", "https://github.com/acme/app/pull/13"),
+            row("assistant", "Opened https://github.com/acme/app/pull/14".into()),
+            bash("gh pr create --fill", "https://github.com/acme/app/pull/7\n"),
+        ];
+        let numbers = |items: Vec<WorkItem>| items.iter().map(|i| i.number).collect::<Vec<_>>();
+        assert_eq!(numbers(created_pull_requests(&rows)), vec![7, 9]);
+    }
+
+    #[test]
+    fn created_pull_requests_join_the_links_and_a_removed_link_stays_removed() {
+        let first = [
+            row("user", "Fix the crash".into()),
+            bash("gh pr create --fill", "https://github.com/acme/app/pull/48"),
+        ];
+        let linked = with_created_pull_requests(None, &first).unwrap();
+        assert_eq!((linked.number, linked.more.len()), (48, 0));
+        // Nothing new: nothing to save.
+        assert_eq!(with_created_pull_requests(Some(&linked), &first), None);
+
+        let mut rows = first.to_vec();
+        rows.push(row("user", "Open a follow-up".into()));
+        rows.push(bash(
+            "gh pr create --fill",
+            "https://github.com/acme/app/pull/49",
+        ));
+        let both = with_created_pull_requests(Some(&linked), &rows).unwrap();
+        assert_eq!(
+            both.links().iter().map(|i| i.number).collect::<Vec<_>>(),
+            vec![49, 48]
+        );
+
+        // Removing #48 by hand: its turn is no longer the latest, so it stays gone.
+        let kept = WorkItem::from_links([pr(49)]).unwrap();
+        assert_eq!(with_created_pull_requests(Some(&kept), &rows), None);
+    }
+
+    #[test]
+    fn extra_links_round_trip_under_more_and_old_items_still_read() {
+        let item = WorkItem::from_links([pr(3), pr(2), pr(3), pr(1)]).unwrap();
+        let json = serde_json::to_value(&item).unwrap();
+        assert_eq!(json["number"], 3);
+        assert_eq!(json["more"][1]["number"], 1);
+        assert!(json["more"][0].get("more").is_none());
+        let back: WorkItem = serde_json::from_value(json).unwrap();
+        assert_eq!(back.links().len(), 3);
+        // A single link is stored exactly as before.
+        assert!(serde_json::to_value(pr(5)).unwrap().get("more").is_none());
+        let mut upper = pr(5);
+        upper.repo = "ACME/App".into();
+        assert!(upper.same(&pr(5)));
     }
 
     #[test]

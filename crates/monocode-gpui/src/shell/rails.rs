@@ -295,6 +295,7 @@ impl Shell {
             return row;
         }
         let work_item = self.work_item_badge(id, false, cx);
+        let subagents = self.subagent_badge(id, cx);
         let agents = match rail {
             Some((Rail::Agents(summary), true)) => Some(self.agents(id, summary, cx)),
             _ => None,
@@ -468,6 +469,7 @@ impl Shell {
                                         d.child(self.session_archive_button(id, &session, cx))
                                     }),
                             )
+                            .children(subagents)
                             .children(work_item)
                             .when(
                                 self.automation_state.session_automations.contains_key(&id),

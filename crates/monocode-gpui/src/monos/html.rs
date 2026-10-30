@@ -94,7 +94,7 @@ struct Markup {
     accent: gpui::Hsla,
     html: Arc<str>,
 }
-pub(super) struct Html {
+pub(crate) struct Html {
     body: String,
     interactive: bool,
     #[cfg(target_os = "macos")]
@@ -136,14 +136,18 @@ fn sandbox(body: &str) -> String {
     )
 }
 impl Html {
-    pub(super) fn new(body: String) -> Self {
+    pub(crate) fn new(body: String) -> Self {
+        #[cfg(target_os = "macos")]
+        let view = Rc::new(RefCell::new(None));
+        #[cfg(target_os = "macos")]
+        LIVE.with(|live| live.borrow_mut().push(Rc::downgrade(&view)));
         Self {
             body,
             interactive: true,
             #[cfg(target_os = "macos")]
             markup: None,
             #[cfg(target_os = "macos")]
-            view: Rc::new(RefCell::new(None)),
+            view,
         }
     }
     #[cfg(target_os = "macos")]
@@ -174,6 +178,30 @@ impl Html {
             view.clip.setHidden(true);
         }
     }
+}
+#[cfg(target_os = "macos")]
+thread_local! {
+    /// Every hosted document, so a frame can hide the ones it no longer paints.
+    static LIVE: RefCell<Vec<std::rc::Weak<RefCell<Option<Hosted>>>>> =
+        const { RefCell::new(Vec::new()) };
+}
+/// Hide every hosted document; the ones still on screen show again as they
+/// paint. Native views otherwise stay where their last frame put them.
+pub(crate) fn hide_all() {
+    #[cfg(target_os = "macos")]
+    LIVE.with(|live| {
+        live.borrow_mut().retain(|view| {
+            let Some(view) = view.upgrade() else {
+                return false;
+            };
+            if let Ok(view) = view.try_borrow()
+                && let Some(hosted) = view.as_ref()
+            {
+                hosted.clip.setHidden(true);
+            }
+            true
+        });
+    });
 }
 impl gpui::Render for Html {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

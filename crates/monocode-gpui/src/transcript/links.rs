@@ -39,7 +39,8 @@ impl Target {
             return None;
         }
         let (path, location) = crate::file_editor::file_location(url, base.unwrap_or(""));
-        if !Path::new(&path).is_absolute() {
+        // A connected machine's files open from a local copy.
+        if !Path::new(&path).is_absolute() && !path.starts_with("remote://") {
             return None;
         }
         Some(Self::File {
@@ -54,7 +55,7 @@ impl Target {
                 MenuAction::new("open-web", "Open Link").into(),
                 MenuAction::new("copy-link", "Copy Link Address").into(),
             ],
-            Self::File { base, .. } => {
+            Self::File { base, path, .. } => {
                 let reveal = if cfg!(target_os = "macos") {
                     "Reveal in Finder"
                 } else if cfg!(target_os = "windows") {
@@ -65,7 +66,10 @@ impl Target {
                 let mut items = vec![
                     MenuAction::new("open-monocode", "Open in MonoCode").into(),
                     MenuAction::new("open-default", "Open in Default App").into(),
-                    MenuAction::new("reveal", reveal).into(),
+                    // A remote file has no folder on this computer to show.
+                    MenuAction::new("reveal", reveal)
+                        .disabled(path.starts_with("remote://"))
+                        .into(),
                     MenuItem::Separator,
                     MenuAction::new("copy-path", "Copy Path").into(),
                 ];

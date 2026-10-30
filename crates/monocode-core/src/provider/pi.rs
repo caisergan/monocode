@@ -719,6 +719,7 @@ impl Protocol {
                 events.push(Event::ConfigChanged {
                     model,
                     model_settings,
+                    effort: None,
                 });
             }
             "available_commands_update" if self.request.kind == Kind::Omp => {

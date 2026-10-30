@@ -231,6 +231,21 @@ pub fn cached_models_for(kind: Kind, account: &crate::accounts::Profile) -> Opti
         .find(|(k, profile, _, _)| *k == kind && profile == account)
         .map(|(_, _, models, _)| models.clone())
 }
+/// Seed an account's cached catalog, as a finished catalog query would.
+#[cfg(test)]
+pub(crate) fn remember_for_tests(
+    kind: Kind,
+    account: &crate::accounts::Profile,
+    models: Vec<Model>,
+) {
+    let mut cache = cache().lock().unwrap_or_else(|e| e.into_inner());
+    cache
+        .entries
+        .retain(|(k, p, _, _)| *k != kind || p != account);
+    cache
+        .entries
+        .push((kind, account.clone(), models, Instant::now()));
+}
 pub fn models(kind: Kind) -> Result<Vec<Model>, String> {
     models_for(kind, &crate::accounts::Profile::default())
 }
@@ -367,7 +382,7 @@ pub fn models_for(kind: Kind, account: &crate::accounts::Profile) -> Result<Vec<
     Ok(models)
 }
 
-fn model(id: &str, name: &str) -> Model {
+pub(crate) fn model(id: &str, name: &str) -> Model {
     Model {
         id: id.into(),
         name: name.into(),

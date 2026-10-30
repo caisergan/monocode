@@ -268,6 +268,17 @@ fn api(endpoint: &str) -> Result<Value, String> {
     )?;
     serde_json::from_str(&text).map_err(|e| e.to_string())
 }
+/// Every link of a session that can enter a gh API endpoint or query.
+fn links(session: &Session) -> Vec<WorkItem> {
+    session
+        .work_item
+        .as_ref()
+        .map(WorkItem::links)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(canonical)
+        .collect()
+}
 /// Only canonical GitHub repository slugs enter a gh API endpoint or query.
 fn canonical(item: &WorkItem) -> bool {
     let parts = item.repo.split('/').collect::<Vec<_>>();
@@ -339,11 +350,11 @@ fn fetch(
     let mut details = Details::new();
     let sessions: Vec<_> = sessions
         .into_iter()
-        .filter(|s| !s.archived && s.work_item.as_ref().is_some_and(canonical))
+        .filter(|s| !s.archived && !links(s).is_empty())
         .collect();
     let mut items: Vec<(String, u64)> = sessions
         .iter()
-        .filter_map(|s| s.work_item.as_ref())
+        .flat_map(links)
         .map(|item| (item.repo.clone(), item.number))
         .collect();
     items.sort();
@@ -351,24 +362,30 @@ fn fetch(
     let batched = summaries(&items);
     let mut cache: HashMap<String, Option<Value>> = HashMap::new();
     for session in sessions {
-        let item = session.work_item.clone().unwrap();
-        let base = format!(
-            "repos/{}/{}s/{}",
-            item.repo,
-            if item.kind == "pr" { "pull" } else { "issue" },
-            item.number
-        );
-        let summary = match &batched {
-            Some(batched) => batched.get(&(item.repo.clone(), item.number)).cloned(),
-            None => cache
-                .entry(base.clone())
-                .or_insert_with(|| api(&base).ok())
-                .clone(),
-        };
-        let Some(body) = summary else {
+        // A session linked to several PRs shows the one updated last.
+        let latest = links(&session)
+            .into_iter()
+            .filter_map(|item| {
+                let base = format!(
+                    "repos/{}/{}s/{}",
+                    item.repo,
+                    if item.kind == "pr" { "pull" } else { "issue" },
+                    item.number
+                );
+                let summary = match &batched {
+                    Some(batched) => batched.get(&(item.repo.clone(), item.number)).cloned(),
+                    None => cache
+                        .entry(base.clone())
+                        .or_insert_with(|| api(&base).ok())
+                        .clone(),
+                }?;
+                let updated_at = timestamp(summary["updated_at"].as_str().unwrap_or(""));
+                Some((updated_at, item, base, summary))
+            })
+            .max_by_key(|(updated_at, ..)| *updated_at);
+        let Some((updated_at, item, base, body)) = latest else {
             continue;
         };
-        let updated_at = timestamp(body["updated_at"].as_str().unwrap_or(""));
         let since = (session.updated_at.min(i64::MAX as u64) as i64)
             .max(*seen.get(&session.id).unwrap_or(&0));
         if updated_at <= since {

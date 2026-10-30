@@ -26,6 +26,7 @@ fn update(status: impl Into<String>, finished: bool) -> Update {
         model: None,
         config_model: None,
         config_settings: None,
+        config_effort: None,
         context: None,
         metrics: None,
         usage_limit: None,
@@ -517,6 +518,7 @@ pub(crate) fn run_with_client(
             .unwrap_or_else(|| json!({"type":"send"}));
         let attaching = action["type"] == "attach";
         let retrying = action["type"] == "retry";
+        let mut handed_off = false;
         if !attaching
             && let Some(recovery) = binding
                 .rejected
@@ -609,6 +611,37 @@ pub(crate) fn run_with_client(
                 if settings.plan {
                     send["intent"] = json!("plan");
                 }
+                // A continued chat's recap goes out with its first message.
+                // Hosts without sessions.handoff would drop it and send only
+                // the typed text.
+                if let Some((handoff, source)) = settings
+                    .handoff
+                    .as_ref()
+                    .filter(|_| operation == "send")
+                    .and_then(|handoff| Some((handoff, handoff.continued.as_ref()?)))
+                {
+                    let descriptor =
+                        client.request(&machine.id, "environment.describe", json!({}))?;
+                    if !descriptor["capabilities"]
+                        .as_array()
+                        .is_some_and(|all| all.iter().any(|c| c == "sessions.handoff"))
+                    {
+                        return Err("Update MonoCode Host in Connections settings to continue a chat on this machine.".into());
+                    }
+                    let mut value = json!({
+                        "from": handoff.from,
+                        "brief": handoff.brief,
+                        "source": source.title,
+                    });
+                    if let Some(id) = locked(&store)?
+                        .remote_session(source.session)?
+                        .and_then(|source| source.session_id)
+                    {
+                        value["sourceId"] = json!(id);
+                    }
+                    send["handoff"] = value;
+                    handed_off = true;
+                }
                 for key in ["draftBlockId", "planBlockId", "intent"] {
                     if let Some(value) = action.get(key) {
                         send[key] = value.clone();
@@ -638,6 +671,16 @@ pub(crate) fn run_with_client(
             upload_pending(&client, &machine.id, &store, &mut binding)?;
             dispatch_outbox(&client, &machine.id, &store, &mut binding)?;
         }
+        if handed_off {
+            // The host holds the recap now; the composer card goes.
+            let store = locked(&store)?;
+            let mut persisted = store.agent_settings(summary.id)?.unwrap_or_default();
+            persisted.handoff = None;
+            store.save_agent_settings(summary.id, &persisted)?;
+            let mut cleared = update("Working…", false);
+            cleared.handoff = Some(None);
+            tx.send_blocking(cleared).map_err(|_| "Window closed")?;
+        }
         drop(guard);
         let id = binding
             .session_id
@@ -649,6 +692,10 @@ pub(crate) fn run_with_client(
         let mut last_revision = None;
         let mut control_commands = Vec::<Value>::new();
         let mut stopping_run = None::<String>;
+        // Messages handed to the running turn, and the ones it refused.
+        let mut steered = Vec::<String>::new();
+        let mut steer_errors = Vec::<(String, String)>::new();
+        let mut steering = Vec::<(String, Value)>::new();
         loop {
             // Cancel is explicit Stop. Dropping the desktop receiver simply
             // ends observation, leaving the host process and run untouched.
@@ -661,7 +708,11 @@ pub(crate) fn run_with_client(
             let current_approvals = approvals(&snapshot);
             let current_question = question(&snapshot);
             let mut next = update(if running { "Working…" } else { "Ready" }, !running);
+            // A running remote turn takes queued messages from here on.
+            next.turn_ready = running;
             next.start = latest_rows.len();
+            next.follow_up_delivered = std::mem::take(&mut steered);
+            next.follow_up_errors = std::mem::take(&mut steer_errors);
             if revision != last_revision {
                 let mut projected = snapshot.clone();
                 monocode_core::remote::attachments::qualify_snapshot(
@@ -728,6 +779,30 @@ pub(crate) fn run_with_client(
                 stopping_run = Some(run_id.into());
             }
             while let Ok(control) = controls.try_recv() {
+                if let Decision::Steer(message) = &control.decision {
+                    // sessions.steer: the host records the message in the
+                    // transcript and the agent reads it now.
+                    let mut steer = command("steer", Some(&id));
+                    steer["runId"] = snapshot["runId"].clone();
+                    steer["text"] = json!(message.text);
+                    match prepare_for_session(
+                        &client,
+                        &machine.id,
+                        &binding.project.environment_id,
+                        &message.attachments,
+                        steer["commandId"].as_str().unwrap_or_default(),
+                    ) {
+                        Ok((references, uploads)) => {
+                            if !references.is_empty() {
+                                steer["attachments"] = json!(references);
+                            }
+                            binding.uploads.extend(uploads);
+                            steering.push((message.id.clone(), steer));
+                        }
+                        Err(error) => steer_errors.push((message.id.clone(), error)),
+                    }
+                    continue;
+                }
                 let mut next = command("approve", Some(&id));
                 next["runId"] = snapshot["runId"].clone();
                 next["requestId"] = json!(
@@ -756,9 +831,7 @@ pub(crate) fn run_with_client(
                         next["reply"] = reply(question, answers);
                     }
                     Decision::KeepOpen => continue,
-                    Decision::Steer(_) => {
-                        return Err("Steering is not supported by this remote host".into());
-                    }
+                    Decision::Steer(_) => unreachable!("steers are handled above"),
                 }
                 control_commands.push(next);
             }
@@ -766,6 +839,22 @@ pub(crate) fn run_with_client(
                 binding.outbox.push(command);
                 journal(&store, &binding)?;
                 dispatch_outbox(&client, &machine.id, &store, &mut binding)?;
+            }
+            for (message, steer) in steering.drain(..) {
+                upload_pending(&client, &machine.id, &store, &mut binding)?;
+                binding.outbox.push(steer);
+                journal(&store, &binding)?;
+                // A turn that refuses the message (it just ended, or the agent
+                // cannot take one) returns it to a paused queue.
+                match dispatch_outbox(&client, &machine.id, &store, &mut binding) {
+                    Ok(()) => steered.push(message),
+                    Err(error) => {
+                        binding.outbox.retain(|queued| queued["type"] != "steer");
+                        binding.rejected = None;
+                        journal(&store, &binding)?;
+                        steer_errors.push((message, error));
+                    }
+                }
             }
             known = Some(snapshot);
             for _ in 0..15 {

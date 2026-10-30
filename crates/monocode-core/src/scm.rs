@@ -1,5 +1,6 @@
 //! Source control for the Changes and History panes, ported from
 //! src-tauri/src/fs.rs. Synchronous: callers run these on a background executor.
+mod pull_requests;
 mod review;
 pub(crate) mod shell;
 pub(crate) mod text;
@@ -11,6 +12,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::files::remote as remote_workspace;
+pub use pull_requests::{checkout as pr_checkout, pull_requests, PullRequest, PullRequestList};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 

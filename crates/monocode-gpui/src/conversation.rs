@@ -6,6 +6,7 @@ mod btw;
 mod commands;
 pub(crate) mod composer_features;
 mod composer_shelf;
+mod continued_chat;
 mod edit_last_turn;
 mod follow_up;
 pub(crate) mod git_actions;
@@ -13,9 +14,11 @@ mod history;
 mod mobile;
 mod mono;
 mod notifications;
+mod prompt_cache;
 mod remote;
 pub(crate) mod remote_plans;
 mod response_menu;
+mod subagent_dock;
 #[cfg(test)]
 mod submission_tests;
 mod title;
@@ -117,11 +120,14 @@ struct OpenMenu {
     menu: Entity<Menu>,
     _events: Vec<Subscription>,
 }
+use prompt_cache::PromptCacheWarning;
 use response_menu::ResponseMenu;
 pub(crate) struct SessionChanged;
 pub(crate) struct ChooseFolder(pub(crate) AnchorSlot);
 /// The review card asked to open the session's recorded changes.
 pub(crate) struct OpenSessionChanges(pub(crate) crate::review::ReviewTab);
+/// Open another session, as a continued chat's card opens its source.
+pub(crate) struct OpenSession(pub(crate) i64);
 pub(crate) struct Conversation {
     editing_last_turn: edit_last_turn::State,
     btw: Option<Entity<btw::Btw>>,
@@ -202,6 +208,12 @@ pub(crate) struct Conversation {
     preparing_worktree: bool,
     context: Option<monocode_core::context::Usage>,
     context_hovered: bool,
+    tokens_hovered: bool,
+    /// A continued chat's card shows the recap that goes out with its first message.
+    handoff_context_open: bool,
+    /// The subagent dock lists each running subagent.
+    subagents_open: bool,
+    prompt_cache: PromptCacheWarning,
     menu: Option<OpenMenu>,
     add_anchor: AnchorSlot,
     model_anchor: AnchorSlot,
@@ -218,6 +230,7 @@ pub(crate) struct Conversation {
     session_edits_generation: u64,
     branch_anchor: AnchorSlot,
     context_anchor: AnchorSlot,
+    tokens_anchor: AnchorSlot,
     composer_anchor: AnchorSlot,
     composer_motion: ComposerMotion,
     narrow: bool,
@@ -645,6 +658,10 @@ impl Conversation {
             preparing_worktree: false,
             context: None,
             context_hovered: false,
+            tokens_hovered: false,
+            handoff_context_open: false,
+            subagents_open: false,
+            prompt_cache: PromptCacheWarning::default(),
             menu: None,
             add_anchor: AnchorSlot::default(),
             model_anchor: AnchorSlot::default(),
@@ -658,6 +675,7 @@ impl Conversation {
             session_edits_generation: 0,
             branch_anchor: AnchorSlot::default(),
             context_anchor: AnchorSlot::default(),
+            tokens_anchor: AnchorSlot::default(),
             composer_anchor: AnchorSlot::default(),
             composer_motion: ComposerMotion::default(),
             narrow: false,
@@ -796,6 +814,11 @@ impl Conversation {
                         });
                         this.status = "Ready".into();
                         this.loaded = true;
+                        // A session saved before PRs were linked at turn end
+                        // links the ones its agent opened when it loads.
+                        if this.summary.work_item.is_none() {
+                            this.link_created_pull_requests(cx);
+                        }
                         if let Some((row, query)) = this.pending_search.take() {
                             this.reveal_search(row, query, cx);
                         }
@@ -874,6 +897,11 @@ impl Conversation {
         if self.handle_local_command(cx) {
             return;
         }
+        if self.confirms_expired_cache(cx) {
+            self.prompt_cache.confirming = Some(invert);
+            cx.notify();
+            return;
+        }
         if self.settings.mono.is_some() {
             if self.attaching || self.input.read(cx).is_composing() {
                 return;
@@ -927,6 +955,12 @@ impl Conversation {
             .map(str::to_owned)
             .unwrap_or(raw);
         self.folder_selected = false;
+        // `/queue <message>`: queue it behind the running turn, never steer.
+        let queued = monocode_core::composer::consume_command(&raw, "queue").map(str::to_owned);
+        let (raw, queued) = match queued {
+            Some(rest) => (rest, true),
+            None => (raw, false),
+        };
         let prompt = self.consume_mode_command(raw, cx);
         if prompt.trim().is_empty() && self.attachments.is_empty() {
             return;
@@ -948,7 +982,7 @@ impl Conversation {
             self.stop(cx);
         }
         if self.sends_as_follow_up() {
-            self.enqueue_follow_up_inverted(prompt, mode.map(str::to_owned), invert, cx);
+            self.enqueue_follow_up_as(prompt, mode.map(str::to_owned), invert, queued, cx);
             if self.stopping || self.settings.pending_provider_switch.is_some() {
                 // A fresh Send continues the conversation, while older queued
                 // messages remain paused after Stop.
@@ -993,7 +1027,6 @@ impl Conversation {
     ) -> Option<(&'static str, &'static str)> {
         // Stop and provider switches send the message as the next turn.
         if self.settings.mono.is_some()
-            || self.is_remote()
             || self.stopping
             || self.settings.pending_provider_switch.is_some()
             || !self.sends_as_follow_up()
@@ -1001,6 +1034,9 @@ impl Conversation {
             return None;
         }
         let mode = self.settings.orchestrator || self.settings.plan || self.settings.operator;
+        if input::Command::leading(&self.input.read(cx).content) == Some(input::Command::Queue) {
+            return Some(("Add to queue", "queue-list"));
+        }
         Some(
             if self.busy && !mode && self.steers_follow_up(alternate, cx) {
                 ("Steer", "queue-steer")
@@ -1248,6 +1284,17 @@ impl Conversation {
                                 this.settings.model = Some(model);
                             }
                         }
+                        if let Some(effort) = update.config_effort {
+                            if let Some(pending) = this.settings.pending_provider_switch.as_mut()
+                                && pending.from == source_provider
+                                && pending.account.id == source_account
+                            {
+                                pending.effort = Some(effort);
+                            } else if source_selected {
+                                this.settings.effort = Some(effort);
+                            }
+                            this.save_settings(cx);
+                        }
                         if let Some(settings) = update.config_settings {
                             if let Some(pending) = this.settings.pending_provider_switch.as_mut()
                                 && pending.from == source_provider
@@ -1464,6 +1511,7 @@ impl Conversation {
                             }
                             this.settings.turns = this.transcript.read(cx).window_turns();
                             this.save_settings(cx);
+                            this.link_created_pull_requests(cx);
                             this.refresh_git(cx);
                             this.run_history_actions(cx);
                             this.mono_flush_external(cx);
@@ -1511,6 +1559,7 @@ impl Conversation {
 impl EventEmitter<SessionChanged> for Conversation {}
 impl EventEmitter<ChooseFolder> for Conversation {}
 impl EventEmitter<OpenSessionChanges> for Conversation {}
+impl EventEmitter<OpenSession> for Conversation {}
 impl EventEmitter<Transfer> for Conversation {}
 impl EventEmitter<composer_features::StartOrchestration> for Conversation {}
 impl EventEmitter<composer_features::StopOrchestration> for Conversation {}
@@ -2257,6 +2306,7 @@ impl Conversation {
                         brief: monocode_core::response::handoff(
                             self.transcript.read(cx).source_rows(),
                         ),
+                        continued: None,
                     });
                 }
             }
@@ -2779,10 +2829,23 @@ impl Conversation {
             .children(self.orchestration_card(cx))
             .children(if self.is_remote() { None } else { self.usage_notice(false, cx) })
             .child(self.background_shelf(window, cx))
+            .children(self.subagent_dock(cx))
             .child(self.message_queue(window, cx))
             .children(if self.is_remote() { None } else { self.auth_notice(cx) })
             .when(self.settings.worktree_removed,|d|d.child(div().mb_2().p_3().rounded_lg().border_1().border_color(content(0.1)).flex().items_center().gap_3().text_size(px(12.)).child(div().flex_1().child("Worktree deleted. Select a branch or worktree to continue this conversation.")).child(tool_pill("reattach-worktree","Select worktree").child("Select worktree").on_click(cx.listener(|this,_,window,cx|this.open_git(GitMode::Worktree,window,cx))))))
-            .when_some(self.settings.handoff.clone(), |d, handoff| {
+            .when_some(
+                self.settings
+                    .handoff
+                    .clone()
+                    .filter(|handoff| handoff.continued.is_some()),
+                |d, handoff| d.child(self.continued_chat_card(handoff, cx)),
+            )
+            .when_some(
+                self.settings
+                    .handoff
+                    .clone()
+                    .filter(|handoff| handoff.continued.is_none()),
+                |d, handoff| {
                 d.child(
                     div()
                         .mb(px(6.))
@@ -2982,6 +3045,7 @@ impl Conversation {
                                             .child(icon("chevron-down", 12.)),
                                     ),
                             )
+                            .children(self.prompt_cache_mark(cx))
                             .child(self.action(has_value, window, cx)),
                     )
                     .children(self.attachment_drop_overlay(12.)),
@@ -3061,6 +3125,19 @@ impl Conversation {
         let headline = ratio
             .map(|r| format!("{:.0}% context used", r * 100.))
             .unwrap_or_else(|| "No context used yet".into());
+        // SessionTokenCount: Claude's running totals; Codex already counts
+        // cached reads in its input, and the same sum would count them twice.
+        let tokens = (self.summary.provider == "claude")
+            .then(|| {
+                monocode_core::context::TokenTotals::sum(
+                    self.transcript
+                        .read(cx)
+                        .turns
+                        .values()
+                        .filter_map(|turn| turn.metrics.as_ref()),
+                )
+            })
+            .flatten();
         let detail = self.context.map(|usage| {
             format!(
                 "{} / {} tokens",
@@ -3145,6 +3222,57 @@ impl Conversation {
                             )
                         },
                     )
+                    .when_some(tokens, |d, tokens| {
+                        let format = monocode_core::context::format_tokens;
+                        d.child(
+                            div()
+                                .id("session-tokens")
+                                .debug_selector(|| "session-tokens".into())
+                                .role(Role::Image)
+                                .aria_label(format!("Session tokens: {}", tokens.detail()))
+                                .flex_shrink_0()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .text_size(px(11.))
+                                .line_height(px(16.))
+                                .text_color(content(0.45))
+                                .child(self.tokens_anchor.probe())
+                                .child(format!("↑{}", format(tokens.uncached)))
+                                .child(format!("↓{}", format(tokens.output)))
+                                .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                                    this.tokens_hovered = *hovered;
+                                    cx.notify();
+                                }))
+                                .when(self.tokens_hovered, |d| {
+                                    d.child(
+                                        popover(
+                                            "session-tokens-tooltip",
+                                            Anchor::Slot(self.tokens_anchor.clone()),
+                                        )
+                                        .side(Side::Top)
+                                        .align(Align::End)
+                                        .max_width(280.)
+                                        .padding(10.)
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .text_size(px(12.))
+                                                .line_height(px(16.))
+                                                .text_color(content(1.))
+                                                .child("Session tokens")
+                                                .child(
+                                                    div()
+                                                        .text_size(px(11.))
+                                                        .text_color(content(0.5))
+                                                        .child(tokens.detail()),
+                                                ),
+                                        ),
+                                    )
+                                }),
+                        )
+                    })
                     .when(show_context, |d| {
                         d.child(
                             div()

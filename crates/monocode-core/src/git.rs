@@ -23,6 +23,26 @@ pub struct Worktree {
     pub main: bool,
     pub missing: bool,
 }
+impl Worktree {
+    /// worktreeMatches: each word of the query appears in the branch (or
+    /// detached HEAD) or the path, ignoring case, so "orch 0c3" finds
+    /// `mc/orch-0c347c6d5f2c`.
+    pub fn matches(&self, query: &str) -> bool {
+        let label = self.branch.clone().unwrap_or_else(|| {
+            format!("detached {}", self.head.chars().take(7).collect::<String>())
+        });
+        words_match(&format!("{label} {}", self.path), query)
+    }
+}
+/// Whether every whitespace-separated word of `query` appears in `text`,
+/// ignoring case. An empty query matches.
+pub fn words_match(text: &str, query: &str) -> bool {
+    let text = text.to_lowercase();
+    query
+        .to_lowercase()
+        .split_whitespace()
+        .all(|word| text.contains(word))
+}
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
     pub current: Option<String>,
@@ -435,6 +455,27 @@ pub fn create_project_worktree(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn worktree_search_matches_every_word_of_the_query() {
+        let orch = Worktree {
+            path: "/repo/project-worktrees/orch".into(),
+            branch: Some("mc/orch-0c347c6d5f2c".into()),
+            head: "abc".into(),
+            ..Default::default()
+        };
+        assert!(orch.matches(""));
+        assert!(orch.matches("ORCH 0c3"));
+        assert!(orch.matches(" worktrees  orch "));
+        assert!(!orch.matches("orch feature-x"));
+        let detached = Worktree {
+            path: "/repo/x".into(),
+            head: "1234567890abcdef".into(),
+            ..Default::default()
+        };
+        assert!(detached.matches("detached 1234567"));
+        assert!(!detached.matches("890abc"));
+    }
+
     use super::*;
     #[test]
     fn uncommitted_only_checks_the_sessions_paths_staged_or_unstaged() {

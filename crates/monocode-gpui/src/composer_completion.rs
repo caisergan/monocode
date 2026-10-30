@@ -54,6 +54,11 @@ pub(crate) struct Completion {
     mcp: Vec<monocode_core::mcp::McpConnection>,
     selected_mcp: Vec<(String, monocode_core::mcp::McpConnection)>,
     mcp_open: bool,
+    /// McpServerPicker's live status of Claude's servers, from `claude mcp list`.
+    mcp_health: std::collections::HashMap<String, &'static str>,
+    /// The server a Reconnect is checking, which keeps its row's button busy.
+    mcp_reconnecting: Option<String>,
+    mcp_health_task: Option<gpui::Task<()>>,
     disabled_paths: Vec<String>,
     known: std::collections::HashSet<String>,
     files: Vec<ProjectFile>,
@@ -121,6 +126,9 @@ impl Completion {
             mcp: Vec::new(),
             selected_mcp: Vec::new(),
             mcp_open: false,
+            mcp_health: Default::default(),
+            mcp_reconnecting: None,
+            mcp_health_task: None,
             disabled_paths: Vec::new(),
             known: [
                 "/plan",
@@ -187,6 +195,9 @@ impl Completion {
         self.mcp.clear();
         self.selected_mcp.clear();
         self.mcp_open = false;
+        self.mcp_health.clear();
+        self.mcp_reconnecting = None;
+        self.mcp_health_task = None;
         self.files.clear();
         self.short_mentions.clear();
         self.notes.clear();
@@ -270,8 +281,50 @@ impl Completion {
         if !self.loading {
             self.load(cx);
         }
+        self.check_mcp_health(None, cx);
         self.rank();
         cx.notify();
+    }
+    /// Ask Claude Code how its servers stand. A Reconnect asks again: the
+    /// next message starts a Claude process that connects every server.
+    fn check_mcp_health(&mut self, reconnect: Option<String>, cx: &mut Context<Self>) {
+        if self.provider != monocode_core::provider::Kind::Claude
+            || self.cwd.is_empty()
+            || self.cwd.starts_with("remote://")
+            || (reconnect.is_none() && self.mcp_health_task.is_some())
+        {
+            return;
+        }
+        self.mcp_reconnecting = reconnect;
+        let cwd = self.cwd.clone();
+        let work = cx
+            .background_executor()
+            .spawn(async move { monocode_core::mcp::claude_health(&cwd) });
+        self.mcp_health_task = Some(cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let _ = this.update(cx, |this, cx| {
+                if let Ok(output) = result {
+                    this.mcp_health = monocode_core::mcp::parse_claude_health(&output)
+                        .into_iter()
+                        .map(|(name, status, _)| (name, status))
+                        .collect();
+                }
+                this.mcp_reconnecting = None;
+                if this.mcp_open {
+                    this.rank();
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+    /// A Claude server that failed or needs authentication, which Reconnect checks again.
+    fn mcp_reconnectable(&self, server: &monocode_core::mcp::McpConnection) -> bool {
+        server.provider == "claude"
+            && matches!(
+                self.mcp_health.get(&server.name).copied(),
+                Some("Failed" | "Needs authentication")
+            )
     }
     pub(crate) fn prepare_prompt(&self, text: &str) -> String {
         if self.cwd.starts_with("remote://") {
@@ -565,7 +618,10 @@ impl Completion {
                         } else if !server.enabled {
                             "Disabled in provider configuration"
                         } else {
-                            "Configured for this provider"
+                            (server.provider == "claude")
+                                .then(|| self.mcp_health.get(&server.name).copied())
+                                .flatten()
+                                .unwrap_or("Configured for this provider")
                         }
                     ),
                     insertion: String::new(),
@@ -630,6 +686,11 @@ impl Completion {
                     "Save this message without starting the agent",
                 ),
                 (
+                    "queue",
+                    "Queue",
+                    "Hold this message until the running turn finishes",
+                ),
+                (
                     "orchestrator",
                     "Orchestrator",
                     "Plan and coordinate agent work",
@@ -692,7 +753,7 @@ impl Completion {
                             label: label.into(),
                             detail: detail.into(),
                             insertion: format!("/{id}"),
-                            mode: (!matches!(id, "compact" | "btw" | "stage" | "commit"))
+                            mode: (!matches!(id, "compact" | "btw" | "stage" | "commit" | "queue"))
                                 .then_some(id),
                             file: false,
                             server: None,
@@ -749,6 +810,7 @@ impl Completion {
                         | "orchestrator"
                         | "add-to-folder"
                         | "draft"
+                        | "queue"
                         | "btw"
                         | "mono"
                         | "monocode"
@@ -978,6 +1040,46 @@ impl Render for Completion {
                                         .child(choice.detail.clone()),
                                 ),
                         )
+                        .when_some(
+                            choice
+                                .server
+                                .clone()
+                                .filter(|server| self.mcp_open && self.mcp_reconnectable(server)),
+                            |d, server| {
+                                let busy =
+                                    self.mcp_reconnecting.as_deref() == Some(server.name.as_str());
+                                d.child(
+                                    div()
+                                        .id(("mcp-reconnect", ix))
+                                        .debug_selector(move || format!("mcp-reconnect-{ix}"))
+                                        .role(Role::Button)
+                                        .aria_label(format!("Reconnect {}", server.name))
+                                        .flex_shrink_0()
+                                        .px_2()
+                                        .py_0p5()
+                                        .rounded_md()
+                                        .border_1()
+                                        .border_color(content(0.12))
+                                        .text_size(px(11.))
+                                        .text_color(content(0.8))
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(content(0.08)))
+                                        .child(if busy { "Reconnecting…" } else { "Reconnect" })
+                                        .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                                            cx.stop_propagation()
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            cx.stop_propagation();
+                                            if this.mcp_reconnecting.is_none() {
+                                                this.check_mcp_health(
+                                                    Some(server.name.clone()),
+                                                    cx,
+                                                );
+                                            }
+                                        })),
+                                )
+                            },
+                        )
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(move |this, _, window, cx| this.pick(ix, window, cx)))
                         .into_any_element()
@@ -1157,6 +1259,7 @@ mod tests {
                     commands,
                     [
                         "/draft",
+                        "/queue",
                         "/orchestrator",
                         "/operator",
                         "/plan",

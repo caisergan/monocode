@@ -1,6 +1,7 @@
 //! Remote host connections. The renderer receives machine metadata, never the
 //! saved bearer credential. Workspace requests never fall back to local calls.
 pub mod attachments;
+pub mod host_source;
 pub mod protocol;
 mod ssh;
 pub mod ssh_askpass;
@@ -483,6 +484,33 @@ fn supported_remote_method(method: &str) -> bool {
     )
 }
 
+/// Builds the host from the fork's source branch for this machine, uploads
+/// it and returns the script that installs it.
+fn upload_source_build(
+    data: &Path,
+    target: &SshTarget,
+    job: &Arc<Job>,
+    askpass: &ssh_askpass::Askpass,
+) -> Result<String, String> {
+    let probe = ssh::run_script(
+        target,
+        ssh::HostPlatform::Unix,
+        host_source::MACHINE_PROBE.into(),
+        job,
+        askpass,
+    )?;
+    let package = host_source::build(data, &host_source::parse_machine(&probe)?, job)?;
+    job.message("Uploading MonoCode Host to the machine…");
+    ssh::upload_package(target, &package.file, package.bytes, job, askpass)?;
+    Ok(ssh::uploaded_package_script(
+        target.remote_port,
+        &package.version,
+        &package.file,
+        &package.sha256,
+        package.reuse_node.as_deref(),
+    ))
+}
+
 impl Connections {
     fn start_ssh_job(
         self: &Arc<Self>,
@@ -514,14 +542,14 @@ impl Connections {
                 let mut machine = if let Some(mut existing) = existing {
                     if upgrade {
                         let platform = ssh::detect_platform(&target, &job, &askpass)?;
+                        let script = if platform == ssh::HostPlatform::Unix {
+                            upload_source_build(&state.data_dir, &target, &job, &askpass)?
+                        } else {
+                            // Packages for Windows hosts need PowerShell to build.
+                            ssh::upgrade_script(platform, target.remote_port)
+                        };
                         job.message("Updating MonoCode Host on the machine…");
-                        let output = ssh::run_script(
-                            &target,
-                            platform,
-                            ssh::upgrade_script(platform, target.remote_port),
-                            &job,
-                            &askpass,
-                        )?;
+                        let output = ssh::run_script(&target, platform, script, &job, &askpass)?;
                         let info: Value = serde_json::from_str(output.lines().last().unwrap_or(""))
                             .map_err(|_| "Host update returned an invalid response")?;
                         target.remote_port = info

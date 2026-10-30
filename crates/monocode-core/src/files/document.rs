@@ -162,7 +162,7 @@ pub fn read_document(path: &Path) -> Result<Document, String> {
     document_from_bytes(&path, bytes, MAX_TEXT_BYTES)
 }
 
-fn read_remote_bytes(path: &Path) -> Result<Vec<u8>, String> {
+pub(crate) fn read_remote_bytes(path: &Path) -> Result<Vec<u8>, String> {
     use base64::Engine;
     let encoded: String =
         super::remote::command("read_binary_file", serde_json::json!({"path":path}))?;

@@ -237,6 +237,8 @@ pub(crate) struct Changes {
     menu: Option<OpenMenu>,
     branch_anchor: AnchorSlot,
     commit_anchor: AnchorSlot,
+    /// GitPullRequests: the project's pull requests, under the changed files.
+    pull_requests: Entity<crate::pull_requests::PullRequests>,
     _subscriptions: Vec<Subscription>,
 }
 impl EventEmitter<ChangesEvent> for Changes {}
@@ -273,6 +275,7 @@ impl Changes {
             menu: None,
             branch_anchor: AnchorSlot::default(),
             commit_anchor: AnchorSlot::default(),
+            pull_requests: cx.new(|_| crate::pull_requests::PullRequests::new()),
             _subscriptions: subscriptions,
         };
         this.rebuild(cx);
@@ -327,6 +330,9 @@ impl Changes {
                 .update(cx, |m, cx| m.set_text(String::new(), cx));
         }
         let branch = index.as_ref().and_then(|i| i.branch.clone());
+        let (cwd, enabled, current) = (self.cwd.clone(), self.enabled, branch.clone());
+        self.pull_requests
+            .update(cx, |list, cx| list.set_project(&cwd, current, enabled, cx));
         if self.enabled && branch != self.pr_branch {
             self.pr_branch = branch;
             self.load_pr(cx);
@@ -1953,7 +1959,7 @@ impl Render for Changes {
             .child(self.commit_box(cx))
             .map(|d| match empty {
                 Some(text) => d.child(
-                    div().py_1().child(
+                    div().flex_1().py_1().child(
                         div()
                             .px_3()
                             .py_2()
@@ -1973,6 +1979,7 @@ impl Render for Changes {
                     .min_h_0(),
                 ),
             })
+            .child(self.pull_requests.clone())
             .children(menu)
             .into_any_element()
     }

@@ -734,8 +734,84 @@ pub fn desktop_agent(run: &AgentRun) -> Value {
     })
 }
 
+/// A subagent the current turn started, as the composer's dock lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Subagent {
+    pub id: String,
+    pub run: AgentRun,
+    pub running: bool,
+}
+impl Subagent {
+    /// The step it is on, or last finished.
+    pub fn latest(&self) -> Option<&str> {
+        self.run
+            .steps
+            .iter()
+            .rev()
+            .map(|step| step.text.trim())
+            .find(|text| !text.is_empty())
+    }
+}
+
+/// The subagents of the latest turn, in the order it started them.
+pub fn subagents(rows: &[crate::transcript::Row]) -> Vec<Subagent> {
+    let start = rows
+        .iter()
+        .rposition(|row| row.is_prompt() && row.first)
+        .map_or(0, |at| at + 1);
+    rows[start..]
+        .iter()
+        .filter(|row| row.role == "tool")
+        .filter_map(|row| {
+            let call: super::ToolCall = serde_json::from_str(&row.text).ok()?;
+            let Some(Panel::Agent(run)) = call.panel() else {
+                return None;
+            };
+            Some(Subagent {
+                running: call.state == super::ToolState::Running,
+                id: call.id,
+                run,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_latest_turn_lists_its_subagents_and_which_still_run() {
+        let row = |role: &str, text: String| crate::transcript::Row {
+            role: role.into(),
+            text,
+            first: true,
+            sent_at: None,
+        };
+        let agent = |id: &str, state: super::super::ToolState| {
+            let mut call = super::super::ToolCall::new(id, "Task");
+            call.input =
+                serde_json::json!({"description":format!("Review {id}"),"subagent_type":"Explore"})
+                    .to_string();
+            call.state = state;
+            row("tool", serde_json::to_string(&call).unwrap())
+        };
+        let rows = [
+            row("user", "Earlier".into()),
+            agent("old", super::super::ToolState::Running),
+            row("user", "Now".into()),
+            agent("a", super::super::ToolState::Completed),
+            agent("b", super::super::ToolState::Running),
+        ];
+        let listed = subagents(&rows);
+        assert_eq!(
+            listed
+                .iter()
+                .map(|s| (s.id.as_str(), s.running))
+                .collect::<Vec<_>>(),
+            vec![("a", false), ("b", true)]
+        );
+        assert_eq!(listed[1].run.title(), "Review b");
+    }
+
     use super::*;
     use serde_json::json;
     #[test]

@@ -929,6 +929,37 @@ pub fn remove(cwd: &str, name: &str, scope: &str) -> Result<(), String> {
     )
     .map(|_| ())
 }
+/// `claude mcp list`'s lines as (server, status, detail): Connected, Needs
+/// authentication, Failed, Disabled or Configured.
+pub fn parse_claude_health(output: &str) -> Vec<(String, &'static str, String)> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let (name, detail) = line.split_once(": ")?;
+            let name = name.trim();
+            if name.is_empty()
+                || !name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+            {
+                return None;
+            }
+            let lower = detail.to_lowercase();
+            let status = if lower.contains("connected") {
+                "Connected"
+            } else if lower.contains("authentication") || lower.contains("needs auth") {
+                "Needs authentication"
+            } else if lower.contains("failed") {
+                "Failed"
+            } else if lower.contains("disabled") {
+                "Disabled"
+            } else {
+                "Configured"
+            };
+            Some((name.to_owned(), status, detail.trim().to_owned()))
+        })
+        .collect()
+}
 pub fn claude_health(cwd: &str) -> Result<String, String> {
     mcp_command(
         resolve_mcp_binary("claude", None)?,
@@ -940,6 +971,24 @@ pub fn claude_health(cwd: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn claude_health_lines_name_each_servers_status() {
+        let output = "Checking MCP server health...\n\ndocs: npx docs-server - ✓ Connected\nlinear: https://mcp.linear.app/sse (SSE) - ! Needs authentication\nbroken: node x.js - ✗ Failed to connect\nnot a server line";
+        let parsed = parse_claude_health(output);
+        let statuses: Vec<_> = parsed
+            .iter()
+            .map(|(name, status, _)| (name.as_str(), *status))
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![
+                ("docs", "Connected"),
+                ("linear", "Needs authentication"),
+                ("broken", "Failed")
+            ]
+        );
+    }
+
     use super::*;
 
     #[test]

@@ -5,8 +5,8 @@ use chrono::{Local, NaiveDateTime, TimeZone};
 use gpui::EventEmitter;
 use monocode_core::{
     session_groups::{
-        Entry, Groups, build_list, format_reminder, navigation_ids, parse_github_work_item,
-        reminder_at, reminder_presets,
+        Entry, Groups, WorkItem, build_list, format_reminder, navigation_ids,
+        parse_github_work_item, reminder_at, reminder_presets,
     },
     store::Reminder,
 };
@@ -107,6 +107,10 @@ pub(super) struct LinkDialog {
     input: Entity<input::Input>,
     error: Option<SharedString>,
     editing: bool,
+    /// The session's links when the dialog opened, newest first.
+    initial: Vec<WorkItem>,
+    /// The links kept so far; a removed row leaves at Save.
+    links: Vec<WorkItem>,
     _events: Vec<Subscription>,
 }
 
@@ -459,6 +463,9 @@ impl Shell {
                     },
                 )
                 .into(),
+                MenuAction::new("continue-in-new", "Continue in new session")
+                    .disabled(!summary.has_messages)
+                    .into(),
             ]);
         }
         items.extend([
@@ -511,6 +518,78 @@ impl Shell {
         ]);
         items
     }
+    /// Sidebar.tsx's "Continue in new session": a fresh chat in a new tab
+    /// with the same model, effort, worktree and branch. The recap built from
+    /// the transcript waits in its composer and goes out with the first
+    /// message. A closed session is read for its recap without being opened.
+    pub(super) fn continue_in_new_session(&mut self, id: i64, cx: &mut Context<Self>) {
+        let source = self.session_metadata(id, cx).summary.clone();
+        let title = self.session_metadata(id, cx).display_title();
+        let live = self.sessions.get(&id).map(|view| {
+            let view = view.read(cx);
+            (
+                view.transcript.read(cx).history_rows().to_vec(),
+                view.settings.clone(),
+            )
+        });
+        let store = self.store.clone();
+        self.navigation_revision += 1;
+        let revision = self.navigation_revision;
+        let work = cx.background_executor().spawn(async move {
+            let store = locked(&store)?;
+            let (rows, source_settings) = match live {
+                Some(live) => live,
+                None => (
+                    store.load(id)?.rows,
+                    store.agent_settings(id)?.unwrap_or_default(),
+                ),
+            };
+            let settings = monocode_core::agent::Settings {
+                account: source_settings.account.clone(),
+                revision: monocode_core::time::now_ms() * 1_000_000,
+                model: source_settings.model.clone(),
+                effort: source_settings.effort.clone(),
+                model_settings: source_settings.model_settings.clone(),
+                fast: source_settings.fast,
+                service_tier: source_settings.service_tier.clone(),
+                thinking: source_settings.thinking,
+                access: source_settings.access,
+                worktree_cwd: source_settings.worktree_cwd.clone(),
+                handoff: Some(monocode_core::agent::Handoff {
+                    from: source.provider.clone(),
+                    brief: monocode_core::response::continuation(&rows, None),
+                    continued: Some(monocode_core::agent::ContinuedChat { session: id, title }),
+                }),
+                ..Default::default()
+            };
+            let summary = store.create(&source.provider, &source.cwd)?;
+            store.configure_agent(summary.id, &summary.provider, &settings)?;
+            Ok::<_, String>((summary, settings))
+        });
+        cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok((summary, settings)) => {
+                    let id = summary.id;
+                    this.add(summary, cx);
+                    this.sessions[&id]
+                        .update(cx, |view, cx| view.install_transfer(settings, None, cx));
+                    this.order.retain(|s| *s != id);
+                    this.order.insert(0, id);
+                    if this.navigation_revision == revision {
+                        this.activate_session(id, window, cx);
+                    }
+                    this.persist(cx);
+                }
+                Err(error) => {
+                    this.error = Some(error);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
     pub(super) fn run_session_menu(
         &mut self,
         id: i64,
@@ -524,6 +603,7 @@ impl Shell {
         let summary = self.session_metadata(id, cx).summary.clone();
         let ids = self.session_menu_ids(id, cx);
         match action {
+            "continue-in-new" => self.continue_in_new_session(id, cx),
             "copy-harness-session-id" | "copy-monocode-session-id" => {
                 let text = if action == "copy-harness-session-id" {
                     summary.provider_id
@@ -1071,8 +1151,58 @@ impl Shell {
         )
     }
 
+    /// SessionCard's running subagent count, while its turn has any.
+    pub(super) fn subagent_badge(&self, id: i64, cx: &App) -> Option<AnyElement> {
+        let view = self.sessions.get(&id)?.read(cx);
+        if !view.busy {
+            return None;
+        }
+        let running = view.running_subagents(cx).len();
+        (running > 0).then(|| {
+            div()
+                .id(("subagents", id as usize))
+                .role(Role::Status)
+                .aria_label(format!(
+                    "{running} subagent{} running",
+                    if running == 1 { "" } else { "s" }
+                ))
+                .flex_shrink_0()
+                .flex()
+                .items_center()
+                .gap(px(2.))
+                .text_size(px(11.))
+                .text_color(content(0.5))
+                .child(icon("bot", 12.).text_color(content(0.5)))
+                .child(running.to_string())
+                .into_any()
+        })
+    }
+    /// SessionCard's linked issues and PRs, newest first, each opening on GitHub.
+    pub(super) fn work_item_menu_items(&self, id: i64, cx: &App) -> Vec<MenuItem> {
+        let links = self
+            .session_metadata(id, cx)
+            .summary
+            .work_item
+            .as_ref()
+            .map(WorkItem::links)
+            .unwrap_or_default();
+        links
+            .into_iter()
+            .map(|item| {
+                let noun = if item.kind == "pr" { "PR" } else { "Issue" };
+                MenuAction::new(
+                    item.url.clone(),
+                    format!("{noun} #{} · {}", item.number, item.repo),
+                )
+                .into()
+            })
+            .collect()
+    }
+
     /// SessionCard's linked issue or PR, opened on GitHub. Hover underlines
     /// it as a link; with no number shown, the line runs under the icon.
+    /// Several links show the newest plus a count, like `#34 +2`, and open a
+    /// menu of every link.
     pub(super) fn work_item_badge(
         &self,
         id: i64,
@@ -1080,13 +1210,18 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let item = self.session_metadata(id, cx).summary.work_item.clone()?;
+        let extra = item.links().len().saturating_sub(1);
         let noun = if item.kind == "pr" { "PR" } else { "issue" };
         let url = item.url.clone();
         Some(
             div()
                 .id(("work-item", id as usize))
-                .role(Role::Link)
-                .aria_label(format!("Open {noun} #{}", item.number))
+                .role(if extra > 0 { Role::Button } else { Role::Link })
+                .aria_label(if extra > 0 {
+                    format!("{} linked items, newest {noun} #{}", extra + 1, item.number)
+                } else {
+                    format!("Open {noun} #{}", item.number)
+                })
                 .flex_shrink_0()
                 .flex()
                 .items_center()
@@ -1107,6 +1242,9 @@ impl Shell {
                     .text_color(rgb(ACCENT)),
                 )
                 .when(!compact, |d| d.child(format!("#{}", item.number)))
+                .when(!compact && extra > 0, |d| {
+                    d.child(div().text_color(content(0.5)).child(format!("+{extra}")))
+                })
                 .cursor_pointer()
                 .when(compact, |d| {
                     d.border_b_1()
@@ -1123,10 +1261,17 @@ impl Shell {
                         cx.open_url(&url);
                     }
                 })
-                .on_click(move |_, _, cx| {
-                    cx.stop_propagation();
-                    cx.open_url(&url);
-                })
+                .on_click(
+                    cx.listener(move |this, event: &gpui::ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        if extra > 0 {
+                            let anchor = Anchor::Point(event.position());
+                            this.open_menu(MenuTarget::WorkItems(id), anchor, window, cx);
+                        } else {
+                            cx.open_url(&url);
+                        }
+                    }),
+                )
                 .into_any(),
         )
     }
@@ -1637,7 +1782,13 @@ impl Shell {
 
     fn open_link_dialog(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
         self.close_preview(cx);
-        let initial = self.session_metadata(id, cx).summary.work_item.clone();
+        let initial = self
+            .session_metadata(id, cx)
+            .summary
+            .work_item
+            .as_ref()
+            .map(WorkItem::links)
+            .unwrap_or_default();
         let input = cx.new(|cx| {
             input::Input::field(
                 "GitHub issue or pull request URL",
@@ -1646,10 +1797,6 @@ impl Shell {
                 cx,
             )
         });
-        if let Some(item) = &initial {
-            let url = item.url.clone();
-            input.update(cx, |i, cx| i.set_text(url, cx));
-        }
         let events = vec![
             cx.subscribe_in(
                 &input,
@@ -1669,7 +1816,9 @@ impl Shell {
             id,
             input,
             error: None,
-            editing: initial.is_some(),
+            editing: !initial.is_empty(),
+            links: initial.clone(),
+            initial,
             _events: events,
         });
         cx.notify();
@@ -1680,24 +1829,42 @@ impl Shell {
             cx.notify();
         }
     }
-    /// Saves the parsed link, or with `keep` false, removes it.
+    /// LinkSessionWorkItemDialog's submit: a pasted URL joins the kept links
+    /// ahead of the rest; an empty field saves the removals. With `keep`
+    /// false, every link is removed.
     fn save_link(&mut self, keep: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(dialog) = &mut self.link_dialog else {
             return;
         };
         let id = dialog.id;
-        let item = if keep {
-            match parse_github_work_item(dialog.input.read(cx).content.trim()) {
-                Some(item) => Some(item),
-                None => {
-                    dialog.error = Some("Enter a valid GitHub issue or pull request URL.".into());
-                    cx.notify();
-                    return;
-                }
+        let text = dialog.input.read(cx).content.trim().to_owned();
+        let links = if !keep {
+            Vec::new()
+        } else if text.is_empty() {
+            if !dialog.editing {
+                dialog.error = Some("Enter a valid GitHub issue or pull request URL.".into());
+                cx.notify();
+                return;
             }
+            if dialog.links.len() == dialog.initial.len() {
+                self.close_link_dialog(window, cx);
+                return;
+            }
+            dialog.links.clone()
         } else {
-            None
+            let Some(item) = parse_github_work_item(&text) else {
+                dialog.error = Some("Enter a valid GitHub issue or pull request URL.".into());
+                cx.notify();
+                return;
+            };
+            if dialog.links.iter().any(|linked| linked.same(&item)) {
+                dialog.error = Some("This conversation is already linked to it.".into());
+                cx.notify();
+                return;
+            }
+            std::iter::once(item).chain(dialog.links.clone()).collect()
         };
+        let item = WorkItem::from_links(links);
         if let Some(summary) = self.session_summaries.get_mut(&id) {
             summary.work_item = item.clone();
         }
@@ -1710,6 +1877,14 @@ impl Shell {
         self.invalidate_chrome(cx);
         self.close_link_dialog(window, cx);
     }
+    fn remove_dialog_link(&mut self, ix: usize, cx: &mut Context<Self>) {
+        if let Some(dialog) = &mut self.link_dialog
+            && ix < dialog.links.len()
+        {
+            dialog.links.remove(ix);
+            cx.notify();
+        }
+    }
     /// LinkSessionWorkItemDialog, centred over the window.
     pub(super) fn link_modal(&self, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
         let dialog = self.link_dialog.as_ref()?;
@@ -1718,17 +1893,81 @@ impl Shell {
         let width = 384f32.min(viewport.width.as_f32() - 24.);
         let anchor = Anchor::Center;
         let weak = cx.weak_entity();
-        let button = |id: &'static str, label: &'static str| {
-            div()
-                .id(id)
-                .role(Role::Button)
-                .cursor_pointer()
-                .px_3()
-                .py_1p5()
-                .rounded_md()
-                .text_size(px(12.))
-                .child(label)
-        };
+        let linked = div()
+            .flex()
+            .flex_col()
+            .gap_1p5()
+            .child(
+                div()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(content(0.8))
+                    .child("Linked"),
+            )
+            .child(if dialog.links.is_empty() {
+                div()
+                    .text_size(px(11.))
+                    .text_color(content(0.45))
+                    .child("Every link will be removed when you save.")
+            } else {
+                div()
+                    .flex()
+                    .flex_col()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(content(0.1))
+                    .children(dialog.links.iter().enumerate().map(|(ix, item)| {
+                        let noun = if item.kind == "pr" { "PR" } else { "issue" };
+                        div()
+                            .id(("link-row", ix))
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .px_2()
+                            .py_1p5()
+                            .when(ix > 0, |d| d.border_t_1().border_color(content(0.1)))
+                            .child(
+                                icon(
+                                    if item.kind == "pr" {
+                                        "git-pull-request"
+                                    } else {
+                                        "circle-dot"
+                                    },
+                                    12.,
+                                )
+                                .text_color(rgb(ACCENT)),
+                            )
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_color(content(0.55))
+                                    .child(format!("#{}", item.number)),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(content(0.8))
+                                    .child(item.repo.clone()),
+                            )
+                            .child(
+                                div()
+                                    .id(("link-row-remove", ix))
+                                    .debug_selector(move || format!("link-row-remove-{ix}"))
+                                    .role(Role::Button)
+                                    .aria_label(format!("Remove {noun} #{}", item.number))
+                                    .cursor_pointer()
+                                    .p_0p5()
+                                    .rounded_sm()
+                                    .text_color(content(0.45))
+                                    .hover(|s| s.bg(content(0.08)).text_color(content(0.9)))
+                                    .child(icon("x", 14.))
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.remove_dialog_link(ix, cx)
+                                    })),
+                            )
+                    }))
+            });
         let field = div()
             .h(px(36.))
             .px(px(10.))
@@ -1765,7 +2004,7 @@ impl Shell {
                                 .debug_selector(|| "link-work-item-dialog".into())
                                 .role(Role::Dialog)
                                 .aria_label(if dialog.editing {
-                                    "Edit GitHub link"
+                                    "GitHub links"
                                 } else {
                                     "Link GitHub issue or PR"
                                 })
@@ -1784,7 +2023,7 @@ impl Shell {
                                                 .font_weight(FontWeight::SEMIBOLD)
                                                 .text_color(content(1.))
                                                 .child(if dialog.editing {
-                                                    "Edit GitHub link"
+                                                    "GitHub links"
                                                 } else {
                                                     "Link GitHub issue or PR"
                                                 }),
@@ -1804,6 +2043,7 @@ impl Shell {
                                         .flex_col()
                                         .gap_4()
                                         .text_size(px(12.))
+                                        .when(dialog.editing, |d| d.child(linked))
                                         .child(
                                             div()
                                                 .flex()
@@ -1813,7 +2053,11 @@ impl Shell {
                                                     div()
                                                         .font_weight(FontWeight::MEDIUM)
                                                         .text_color(content(0.8))
-                                                        .child("Issue or pull request URL"),
+                                                        .child(if dialog.editing {
+                                                            "Add an issue or pull request"
+                                                        } else {
+                                                            "Issue or pull request URL"
+                                                        }),
                                                 )
                                                 .child(field)
                                                 .child(match &dialog.error {
@@ -1828,7 +2072,7 @@ impl Shell {
                                                         .text_size(px(11.))
                                                         .text_color(content(0.45))
                                                         .child(
-                                                            "Paste the full github.com URL. The linked item will appear on the session card.",
+                                                            "Paste the full github.com URL. The newest link shows on the session card.",
                                                         ),
                                                 }),
                                         )
@@ -1838,17 +2082,6 @@ impl Shell {
                                                 .items_center()
                                                 .justify_end()
                                                 .gap_2()
-                                                .when(dialog.editing, |d| {
-                                                    d.child(
-                                                        button("link-remove", "Remove link")
-                                                            .text_color(rgb(0xf87171))
-                                                            .hover(|s| s.bg(rgba(0xf871711a)))
-                                                            .on_click(cx.listener(|this, _, window, cx| {
-                                                                this.save_link(false, window, cx)
-                                                            })),
-                                                    )
-                                                    .child(div().flex_1())
-                                                })
                                                 .child(
                                                     crate::modal::ghost_button("link-cancel", "Cancel")
                                                         .cursor_pointer()
@@ -1859,7 +2092,7 @@ impl Shell {
                                                 .child(
                                                     crate::modal::primary_button(
                                                         "link-save",
-                                                        if dialog.editing { "Update link" } else { "Link" },
+                                                        if dialog.editing { "Save" } else { "Link" },
                                                     )
                                                     .debug_selector(|| "link-save".into())
                                                     .cursor_pointer()
@@ -2270,6 +2503,134 @@ mod tests {
             save.right() <= dialog.right() - px(16.),
             "Update link at {save:?} overflows the dialog at {dialog:?}"
         );
+    }
+
+    #[gpui::test]
+    fn continue_in_new_session_opens_a_fresh_chat_carrying_the_recap(cx: &mut TestAppContext) {
+        let (window, a, _) = setup(cx);
+        let before = window
+            .update(cx, |shell, w, cx| {
+                shell.sessions[&a].update(cx, |view, cx| {
+                    view.settings.effort = Some("xhigh".into());
+                    let rows = vec![
+                        monocode_core::transcript::Row {
+                            role: "user".into(),
+                            text: "Fix the crash on launch".into(),
+                            first: true,
+                            sent_at: None,
+                        },
+                        monocode_core::transcript::Row {
+                            role: "assistant".into(),
+                            text: "Fixed it in main.rs.".into(),
+                            first: true,
+                            sent_at: None,
+                        },
+                    ];
+                    view.transcript.update(cx, |t, cx| t.patch(0, rows, cx));
+                });
+                let before = shell.session_summaries.len();
+                shell.run_menu(MenuTarget::Session(a), "continue-in-new", None, w, cx);
+                before
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| {
+                assert_eq!(shell.session_summaries.len(), before + 1);
+                let id = shell.workspace.active.unwrap();
+                assert_ne!(id, a);
+                let view = shell.sessions[&id].read(cx);
+                assert_eq!(
+                    view.summary.provider,
+                    shell.sessions[&a].read(cx).summary.provider
+                );
+                assert_eq!(view.settings.effort.as_deref(), Some("xhigh"));
+                let handoff = view.settings.handoff.clone().unwrap();
+                assert_eq!(handoff.continued.unwrap().session, a);
+                assert!(
+                    handoff
+                        .brief
+                        .contains("## First request\nFix the crash on launch")
+                );
+                assert!(handoff.brief.contains("Fixed it in main.rs."));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn the_link_dialog_lists_every_link_removes_rows_and_adds_new_ones_first(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, a, _) = setup(cx);
+        let set = |shell: &mut Shell, text: &str, cx: &mut Context<Shell>| {
+            let text = text.to_owned();
+            shell
+                .link_dialog
+                .as_ref()
+                .unwrap()
+                .input
+                .update(cx, |i, cx| i.set_text(text, cx));
+        };
+        let numbers = |shell: &Shell, cx: &App| {
+            shell
+                .session_metadata(a, cx)
+                .summary
+                .work_item
+                .as_ref()
+                .map(|item| item.links().iter().map(|i| i.number).collect::<Vec<_>>())
+                .unwrap_or_default()
+        };
+        window
+            .update(cx, |shell, w, cx| {
+                for url in [
+                    "https://github.com/acme/app/pull/1",
+                    "https://github.com/acme/app/pull/2",
+                    "https://github.com/acme/app/issues/3",
+                ] {
+                    shell.run_menu(MenuTarget::Session(a), "link-work-item", None, w, cx);
+                    set(shell, url, cx);
+                    shell.save_link(true, w, cx);
+                }
+                assert_eq!(numbers(shell, cx), vec![3, 2, 1]);
+                assert_eq!(shell.work_item_menu_items(a, cx).len(), 3);
+
+                // A link already there is refused.
+                shell.run_menu(MenuTarget::Session(a), "link-work-item", None, w, cx);
+                assert_eq!(shell.link_dialog.as_ref().unwrap().links.len(), 3);
+                set(shell, "https://github.com/ACME/app/pull/2", cx);
+                shell.save_link(true, w, cx);
+                assert!(shell.link_dialog.as_ref().unwrap().error.is_some());
+
+                // Removing a row saves with an empty field.
+                set(shell, "", cx);
+                shell.remove_dialog_link(1, cx);
+                shell.save_link(true, w, cx);
+                assert!(shell.link_dialog.is_none());
+                assert_eq!(numbers(shell, cx), vec![3, 1]);
+
+                // Removing every row clears the link.
+                shell.run_menu(MenuTarget::Session(a), "link-work-item", None, w, cx);
+                shell.remove_dialog_link(0, cx);
+                shell.remove_dialog_link(0, cx);
+                shell.save_link(true, w, cx);
+                assert_eq!(numbers(shell, cx), Vec::<u64>::new());
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, _| {
+                let store = locked(&shell.store).unwrap();
+                let saved = store.sessions().unwrap();
+                assert!(
+                    saved
+                        .iter()
+                        .find(|s| s.id == a)
+                        .unwrap()
+                        .work_item
+                        .is_none()
+                );
+            })
+            .unwrap();
     }
 
     #[gpui::test]

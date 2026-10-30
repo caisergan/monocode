@@ -400,6 +400,12 @@ pub(crate) const INDEX: &[(&str, Section, &str, &str)] = &[
         "effort thinking reasoning fast service tier model picker composer",
     ),
     (
+        "confirm-expired-cache-send",
+        Section::Chat,
+        "Confirm send after cache expires",
+        "prompt cache expired ttl re-read context tokens warning",
+    ),
+    (
         "composer-autocorrect",
         Section::Chat,
         "Autocorrect",

@@ -181,15 +181,7 @@ impl GitPicker {
                 .worktrees
                 .iter()
                 .filter(|tree| !self.existing_only || (!tree.main && !tree.missing))
-                .filter(|tree| {
-                    format!(
-                        "{} {}",
-                        tree.branch.as_deref().unwrap_or("detached"),
-                        tree.path
-                    )
-                    .to_lowercase()
-                    .contains(&needle)
-                })
+                .filter(|tree| tree.matches(&query))
                 .cloned()
                 .map(Choice::Worktree)
                 .collect();

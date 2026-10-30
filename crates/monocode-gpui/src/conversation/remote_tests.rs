@@ -42,12 +42,13 @@ fn offline_pending_and_busy_guards_preserve_typed_message(cx: &mut TestAppContex
                 ),
                 (true, false, false, false, "machine is offline"),
                 (true, true, true, false, "command needs confirmation"),
-                (true, true, false, true, "remote turn to finish"),
+                (true, true, false, true, "remote turn to stop"),
             ] {
                 view.loaded = loaded;
                 view.remote_state.online = online;
                 view.remote_state.pending = pending;
                 view.busy = busy;
+                view.stopping = busy;
                 view.send(cx);
                 assert!(view.status.contains(expected), "{}", view.status);
                 assert_eq!(view.input.read(cx).content, "Keep this next message");
@@ -55,6 +56,37 @@ fn offline_pending_and_busy_guards_preserve_typed_message(cx: &mut TestAppContex
                 assert!(view.transcript.read(cx).source_rows().is_empty());
             }
             view.busy = false;
+            view.stopping = false;
+        })
+    });
+}
+
+#[gpui::test]
+fn a_running_remote_turn_takes_messages_by_steer_or_queue(cx: &mut TestAppContext) {
+    let view = conversation(cx);
+    cx.update(|cx| {
+        // Without saved preferences, follow-ups steer.
+        view.update(cx, |view, cx| {
+            view.summary.has_messages = true;
+            view.busy = true;
+            // A host without sessions.steer keeps the message for after the turn.
+            view.send(cx);
+            let messages = &view.follow_ups.state.messages;
+            assert_eq!(messages.len(), 1);
+            assert!(!messages[0].steer, "{}", view.status);
+            // One that steers this provider hands the next message to the turn.
+            view.remote_state
+                .capabilities
+                .insert("sessions.steer".into());
+            view.remote_state.steer_providers.insert("codex".into());
+            view.input
+                .update(cx, |input, cx| input.set_text("change course".into(), cx));
+            assert_eq!(
+                view.follow_up_action(false, cx),
+                Some(("Steer", "queue-steer"))
+            );
+            view.send(cx);
+            assert!(view.follow_ups.state.messages[1].steer);
         })
     });
 }
