@@ -10,13 +10,13 @@ use gpui::{
 use std::time::{Duration, Instant};
 
 /// How close to the window's left edge the pointer peeks the sidebar out.
-const PEEK_EDGE: f32 = 6.;
+pub(super) const PEEK_EDGE: f32 = 6.;
 /// Grace before a peek closes, so the pointer can cross a gap to the panel.
-const PEEK_CLOSE_DELAY: Duration = Duration::from_millis(180);
+pub(super) const PEEK_CLOSE_DELAY: Duration = Duration::from_millis(180);
 /// The panel's inset from the window's left and bottom edges (`left-1.5`).
-const PEEK_INSET: f32 = 6.;
+pub(super) const PEEK_INSET: f32 = 6.;
 /// How far the panel drifts in from the edge.
-const PEEK_DRIFT: f32 = 12.;
+pub(super) const PEEK_DRIFT: f32 = 12.;
 
 /// A fade between hidden (0) and shown (1). A reversal midway starts from
 /// wherever the last one had got to.
@@ -27,7 +27,7 @@ pub(super) struct SidebarPeek {
 }
 
 impl SidebarPeek {
-    fn new(open: bool, from: f32, reduce_motion: bool) -> Self {
+    pub(super) fn new(open: bool, from: f32, reduce_motion: bool) -> Self {
         Self {
             open,
             from: if reduce_motion {
@@ -40,7 +40,7 @@ impl SidebarPeek {
     }
 
     /// The progress now, and whether it has settled.
-    fn at(&self, now: Instant) -> (f32, bool) {
+    pub(super) fn at(&self, now: Instant) -> (f32, bool) {
         let to = if self.open { 1. } else { 0. };
         let (duration, curve) = if self.open {
             (240., (0.16, 1., 0.3, 1.))
@@ -240,7 +240,7 @@ impl Shell {
 
     /// The rest of the window dims behind the panel. It takes no hitbox, so
     /// the pointer still reaches the toggle beneath it.
-    fn peek_backdrop(&self, progress: f32, cx: &mut Context<Self>) -> gpui::Div {
+    pub(super) fn peek_backdrop(&self, progress: f32, cx: &mut Context<Self>) -> gpui::Div {
         let p = &self.workspace.preferences;
         let light = p.theme == "light"
             || (p.theme == "system"
@@ -254,10 +254,6 @@ impl Shell {
     }
 
     fn peek_panel(&self, progress: f32, window: &mut Window) -> gpui::Stateful<gpui::Div> {
-        // Glass blurs the dimmed workspace under a faint wash; otherwise the
-        // panel takes the window's own surface.
-        let glass = self.window_glass == Some(true) && !is_light();
-        let scale = window.scale_factor();
         let sidebar = if self.sidebar_uncached() {
             self.sidebar_frame.clone().into_any_element()
         } else {
@@ -270,16 +266,33 @@ impl Shell {
                 )
                 .into_any_element()
         };
-        div()
-            .id("sidebar-peek")
-            .debug_selector(|| "sidebar-peek".into())
-            // Closing, it lets the pointer through to the workspace.
-            .when(self.peek_open(), |d| d.occlude())
-            .absolute()
+        self.peek_card("sidebar-peek", self.peek_open(), progress, sidebar, window)
             .left(px(PEEK_INSET - PEEK_DRIFT * (1. - progress)))
+            .w(px(self.workspace.sidebar_width))
+    }
+
+    /// The floating card a peek shows its contents in, below the title bar
+    /// and inset from the window's bottom edge.
+    pub(super) fn peek_card(
+        &self,
+        id: &'static str,
+        open: bool,
+        progress: f32,
+        contents: AnyElement,
+        window: &mut Window,
+    ) -> gpui::Stateful<gpui::Div> {
+        // Glass blurs the dimmed workspace under a faint wash; otherwise the
+        // panel takes the window's own surface.
+        let glass = self.window_glass == Some(true) && !is_light();
+        let scale = window.scale_factor();
+        div()
+            .id(id)
+            .debug_selector(move || id.into())
+            // Closing, it lets the pointer through to the workspace.
+            .when(open, |d| d.occlude())
+            .absolute()
             .top(px(TITLE_BAR_HEIGHT))
             .bottom(px(PEEK_INSET))
-            .w(px(self.workspace.sidebar_width))
             .opacity(progress)
             .rounded(px(10.))
             .overflow_hidden()
@@ -310,7 +323,7 @@ impl Shell {
                     .size_full(),
                 )
             })
-            .child(sidebar)
+            .child(contents)
             // The border rides above the contents, inside the rounding.
             .child(
                 div()
