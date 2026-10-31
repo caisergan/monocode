@@ -1,6 +1,7 @@
 //! Native Inbox services. Provider adapters preserve the Tauri API's requests,
 //! validation, response parsers and credential file formats.
 mod avatar;
+mod excerpt;
 mod media;
 pub use media::png as media_png;
 pub mod azure_devops;
@@ -12,6 +13,7 @@ pub mod linear;
 
 use crate::{desktop_preferences::DesktopPreferences, session_groups::WorkItem, store::Store};
 use chrono::{Datelike, Local, TimeZone};
+pub use excerpt::{description_excerpt, DescriptionExcerpt};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},

@@ -1250,14 +1250,12 @@ impl Shell {
             }
             LinkedActivityEvent::OpenUrl(url) => cx.open_url(&url),
             LinkedActivityEvent::OpenDiscussion(id) => {
-                // A native threaded discussion pane is not implemented yet.
-                if let Some(item) = self
-                    .session_summaries
-                    .get(&id)
-                    .and_then(|s| s.work_item.as_ref())
-                {
-                    cx.open_url(&item.url);
-                }
+                cx.spawn(async move |this, cx| {
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        this.open_session_work_item(id, None, window, cx)
+                    });
+                })
+                .detach();
             }
             LinkedActivityEvent::AddToChat(id, prompt) => {
                 cx.spawn(async move |this, cx| {

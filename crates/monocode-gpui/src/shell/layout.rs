@@ -740,10 +740,12 @@ impl Shell {
             .right_panel
             .clone()
             .filter(|_| right_shown && self.settings.is_none());
+        let linked = self.linked_panel_frame(window, cx);
         div()
             .flex_1()
             .min_h_0()
             .overflow_hidden()
+            .relative()
             .flex()
             .child(self.background_card.probe())
             .child(
@@ -783,6 +785,7 @@ impl Shell {
                         }),
                 ),
             )
+            .children(linked)
             .when_some(panel, |d, panel| {
                 d.child(self.right_panel_frame(panel, right_width, full, window, cx))
             })

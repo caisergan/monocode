@@ -999,8 +999,9 @@ fn settings_back_and_sidebar_toggle_in_original_layout(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
-fn a_pull_request_clicked_in_changes_opens_in_the_inbox_detail(cx: &mut TestAppContext) {
+fn a_pull_request_clicked_in_changes_opens_beside_the_chat(cx: &mut TestAppContext) {
     let (window, _) = setup(cx, false, false);
+    let visual = &mut VisualTestContext::from_window(window.into(), cx);
     let item = monocode_core::inbox::Item {
         provider: "github".into(),
         kind: "pr".into(),
@@ -1008,22 +1009,109 @@ fn a_pull_request_clicked_in_changes_opens_in_the_inbox_detail(cx: &mut TestAppC
         title: "Show the diff stat on the peeked right panel".into(),
         repo: "acme/app".into(),
         number: 58,
+        project_path: "/work/monocode".into(),
         ..Default::default()
     };
     window
-        .update(cx, |shell, window, cx| {
+        .update(visual, |shell, window, cx| {
             shell.set_right_panel_open(true, window, cx);
             let changes = shell.right_panel.as_ref().unwrap().read(cx).changes.clone();
             let event = crate::changes::ChangesEvent::OpenPullRequest(Box::new(item.clone()));
             changes.update(cx, |_, cx| cx.emit(event));
         })
         .unwrap();
-    cx.run_until_parked();
+    visual.run_until_parked();
+    visual.refresh().unwrap();
     window
-        .read_with(cx, |shell, cx| {
-            assert_eq!(shell.active_app_view, Some(app_views::AppView::Inbox));
-            let inbox = shell.inbox.as_ref().unwrap().read(cx);
-            assert_eq!(inbox.selected_item(), Some(item));
+        .read_with(visual, |shell, cx| {
+            assert_eq!(shell.active_app_view, None, "the chat stays on screen");
+            let panel = shell.visible_linked_panel().unwrap();
+            assert_eq!(panel.read(cx).linked_item().unwrap().key(), item.key());
+        })
+        .unwrap();
+    let sheet = visual.debug_bounds("linked-work-panel").unwrap();
+    let right = visual.debug_bounds("right-panel-frame").unwrap();
+    assert_eq!(sheet.size.width, px(super::linked_panel::DEFAULT_WIDTH));
+    assert!(
+        sheet.right() <= right.left() + px(1.),
+        "the sheet sits between the chat and the right panel"
+    );
+    assert!(visual.debug_bounds("inbox-panel-identity").is_some());
+
+    // Dragging its edge widens it; Escape closes it.
+    let edge = visual.debug_bounds("linked-panel-resize").unwrap().center();
+    visual.simulate_mouse_down(edge, MouseButton::Left, Default::default());
+    visual.simulate_mouse_move(
+        edge - gpui::point(px(80.), px(0.)),
+        MouseButton::Left,
+        Default::default(),
+    );
+    visual.simulate_mouse_up(
+        edge - gpui::point(px(80.), px(0.)),
+        MouseButton::Left,
+        Default::default(),
+    );
+    visual.run_until_parked();
+    visual.refresh().unwrap();
+    let wider = visual.debug_bounds("linked-work-panel").unwrap();
+    assert_eq!(
+        wider.size.width,
+        px(super::linked_panel::DEFAULT_WIDTH + 80.)
+    );
+    visual.simulate_keystrokes("escape");
+    visual.run_until_parked();
+    window
+        .read_with(visual, |shell, _| {
+            assert!(shell.visible_linked_panel().is_none())
+        })
+        .unwrap();
+}
+
+#[gpui::test]
+fn a_sessions_linked_work_opens_beside_it_and_follows_the_session(cx: &mut TestAppContext) {
+    cx.update(|cx| cx.set_reduce_motion(true));
+    let (window, a, b) = super::tests::window(cx);
+    cx.simulate_window_resize(window.into(), gpui::size(px(1500.), px(900.)));
+    let link = |number: u64| monocode_core::session_groups::WorkItem {
+        kind: "pr".into(),
+        repo: "acme/app".into(),
+        number,
+        url: format!("https://github.com/acme/app/pull/{number}"),
+        more: vec![],
+    };
+    let shown = |shell: &Shell, cx: &App| {
+        shell
+            .visible_linked_panel()
+            .and_then(|panel| panel.read(cx).linked_item())
+            .map(|item| item.number)
+    };
+    window
+        .update(cx, |shell, window, cx| {
+            shell.ensure_session(a, cx);
+            let mut work = link(2);
+            work.more = vec![link(1)];
+            shell.sessions[&a].update(cx, |s, _| s.summary.work_item = Some(work));
+            shell.open(b, window, cx);
+            shell.open_session_work_item(a, None, window, cx);
+            assert_eq!(shell.workspace.active, Some(a), "the session opens too");
+            assert_eq!(shown(shell, cx), Some(2), "the newest link");
+
+            // The badge menu's row opens that link in the same panel.
+            shell.run_menu(
+                MenuTarget::WorkItems(a),
+                "https://github.com/acme/app/pull/1",
+                None,
+                window,
+                cx,
+            );
+            assert_eq!(shown(shell, cx), Some(1));
+
+            shell.open(b, window, cx);
+            assert_eq!(shown(shell, cx), None, "another session hides it");
+            shell.open(a, window, cx);
+            assert_eq!(shown(shell, cx), Some(1), "and coming back shows it");
+            shell.open_inbox(window, cx);
+            assert_eq!(shown(shell, cx), None, "app views cover it");
         })
         .unwrap();
 }

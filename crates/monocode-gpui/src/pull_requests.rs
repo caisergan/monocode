@@ -3,7 +3,7 @@
 //! status, title, number, branch, author (unless it is you), review decision,
 //! a CI dot for open PRs, and when each was updated, merged or closed. The
 //! checked-out branch's PR leads the Open list. Clicking a row opens the PR
-//! in the Inbox's detail view.
+//! in the linked-work panel beside the chat.
 use crate::{
     popover::{Align, Anchor, Menu, MenuAction, MenuEvent, MenuItem, MenuStyle, menu_popover},
     theme::*,

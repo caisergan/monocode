@@ -279,6 +279,8 @@ impl Shell {
                     inbox::Event::ItemsChanged(items) => {
                         this.inbox_automation_events(items.clone(), cx)
                     }
+                    // Only the side panel's detail expands.
+                    inbox::Event::Expand(_) => {}
                 },
             ));
             self.app_view_events

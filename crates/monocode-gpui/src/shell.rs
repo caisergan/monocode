@@ -12,6 +12,7 @@ mod idle_agents;
 #[cfg(test)]
 mod image_lightbox_tests;
 mod layout;
+mod linked_panel;
 mod live_agents;
 mod mobile_host;
 mod mono_panes;
@@ -770,6 +771,8 @@ pub(crate) struct Shell {
     /// Either right-panel handle is hovered; both of its hairlines light up.
     right_resize_hovered: bool,
     right_slide: Option<PaneSlide>,
+    /// LinkedWorkItemPanel sheets beside the chat.
+    linked: linked_panel::LinkedPanels,
     reviews: HashMap<i64, Entity<crate::review::ReviewPane>>,
     /// A review sliding in or out: its session and pane.
     review_slide: Option<(i64, PaneSlide, Entity<crate::review::ReviewPane>)>,
@@ -1124,6 +1127,7 @@ impl Shell {
             right_resize: None,
             right_resize_hovered: false,
             right_slide: None,
+            linked: Default::default(),
             reviews: HashMap::new(),
             review_slide: None,
             pending_review: None,
@@ -1223,11 +1227,11 @@ impl Shell {
         ));
         this.observations.push(cx.subscribe(
             &monos,
-            |_, _, request: &crate::monos::OpenInboxItem, cx| {
+            |_, _, request: &crate::monos::OpenPullRequest, cx| {
                 let item = request.0.clone();
                 cx.spawn(async move |this, cx| {
                     let _ = this.update_in(cx, |this, window, cx| {
-                        this.open_inbox_item(item, window, cx)
+                        this.open_project_pull_request(item, window, cx)
                     });
                 })
                 .detach();
@@ -1866,7 +1870,7 @@ impl Shell {
                     );
                 }
                 crate::changes::ChangesEvent::OpenPullRequest(item) => {
-                    this.open_inbox_item(item.as_ref().clone(), window, cx);
+                    this.open_project_pull_request(item.as_ref().clone(), window, cx);
                 }
             },
         ));
@@ -5720,7 +5724,7 @@ impl Shell {
                 self.run_title_tab_menu(TitleTab::App(view), action, window, cx)
             }
             MenuTarget::Session(id) => self.run_session_menu(id, action, window, cx),
-            MenuTarget::WorkItems(_) => cx.open_url(action),
+            MenuTarget::WorkItems(id) => self.open_session_work_item(id, Some(action), window, cx),
             MenuTarget::Folder(folder) => self.run_folder_menu(folder, action, window, cx),
             MenuTarget::ProjectRailAdd => match action {
                 "open-project" => self.open_project(cx),
@@ -8394,6 +8398,14 @@ impl Render for Shell {
             .aria_label("Monocode Native")
             .key_context("Workspace")
             .track_focus(&self.focus)
+            .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape"
+                    && event.keystroke.modifiers.number_of_modifiers() == 0
+                    && this.escape_linked_panel(cx)
+                {
+                    cx.stop_propagation();
+                }
+            }))
             .capture_key_up(cx.listener(|this, _, _, _| this.archive_shortcut_held = false))
             .on_action(cx.listener(|this, _: &ArchiveSession, window, cx| {
                 this.archive_active_session(window, cx)
