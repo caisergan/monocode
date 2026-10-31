@@ -60,6 +60,9 @@ pub(crate) struct Inbox {
     summary_rows: std::cell::RefCell<ui::SummaryRows>,
     focus_comment: bool,
     selected: Option<String>,
+    /// An item opened from elsewhere, such as the Changes panel's pull
+    /// requests. It stays selected even when the list does not include it.
+    opened: Option<Item>,
     details: Option<Details>,
     thread: Option<Thread>,
     document: Option<Entity<document::InboxDocument>>,
@@ -244,6 +247,7 @@ impl Inbox {
             summary_rows: Default::default(),
             focus_comment: false,
             selected: None,
+            opened: None,
             details: None,
             thread: None,
             document: None,
@@ -520,12 +524,35 @@ impl Inbox {
         self.snapshot
             .items
             .iter()
+            .chain(&self.opened)
             .find(|item| Some(item.key()) == self.selected)
             .cloned()
+    }
+    #[cfg(test)]
+    pub(crate) fn selected_item(&self) -> Option<Item> {
+        self.item()
+    }
+    /// Shows one item's detail, switching to its provider. The item is kept
+    /// so the detail stays up when the list does not include it.
+    pub(crate) fn open_item(&mut self, item: Item, cx: &mut Context<Self>) {
+        if self.state.source != item.provider {
+            self.state.source = item.provider.clone();
+            self.save();
+        }
+        let key = item.key();
+        self.opened = Some(item);
+        if self.selected.as_ref() == Some(&key) {
+            cx.notify();
+            return;
+        }
+        self.select(key, cx);
     }
     fn select(&mut self, key: String, cx: &mut Context<Self>) {
         if self.selected.as_ref() == Some(&key) {
             return;
+        }
+        if self.opened.as_ref().is_some_and(|item| item.key() != key) {
+            self.opened = None;
         }
         self.selected = Some(key);
         self.reset_detail(cx);
@@ -543,6 +570,7 @@ impl Inbox {
     }
     fn deselect(&mut self, cx: &mut Context<Self>) {
         self.selected = None;
+        self.opened = None;
         self.reset_detail(cx);
         cx.notify();
     }
@@ -583,6 +611,7 @@ impl Inbox {
     fn change_source(&mut self, source: String, cx: &mut Context<Self>) {
         self.state.source = source;
         self.selected = None;
+        self.opened = None;
         self.details = None;
         self.document = None;
         self.comments.clear();
@@ -919,7 +948,13 @@ impl Inbox {
                         this.action_notice = (merging
                             && !item.state.eq_ignore_ascii_case("merged"))
                         .then(|| "Merge queued or auto-merge enabled.".into());
-                        if let Some(old) = this.snapshot.items.iter_mut().find(|i| i.key() == key) {
+                        if let Some(old) = this
+                            .snapshot
+                            .items
+                            .iter_mut()
+                            .chain(&mut this.opened)
+                            .find(|i| i.key() == key)
+                        {
                             *old = item;
                         }
                         this.confirm_action = None;

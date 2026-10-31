@@ -360,6 +360,9 @@ impl Monos {
                     crate::changes::ChangesEvent::OpenDiff { cwd, path, staged } => {
                         this.open_change_review(&event_key, cwd, path.as_deref(), *staged, cx)
                     }
+                    crate::changes::ChangesEvent::OpenPullRequest(item) => {
+                        cx.emit(crate::monos::OpenInboxItem(item.as_ref().clone()))
+                    }
                 },
             );
             let summary_id = mono.id.clone();

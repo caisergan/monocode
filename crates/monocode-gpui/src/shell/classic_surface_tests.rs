@@ -997,3 +997,33 @@ fn settings_back_and_sidebar_toggle_in_new_layout(cx: &mut TestAppContext) {
 fn settings_back_and_sidebar_toggle_in_original_layout(cx: &mut TestAppContext) {
     assert_settings_navigation(true, cx);
 }
+
+#[gpui::test]
+fn a_pull_request_clicked_in_changes_opens_in_the_inbox_detail(cx: &mut TestAppContext) {
+    let (window, _) = setup(cx, false, false);
+    let item = monocode_core::inbox::Item {
+        provider: "github".into(),
+        kind: "pr".into(),
+        state: "open".into(),
+        title: "Show the diff stat on the peeked right panel".into(),
+        repo: "acme/app".into(),
+        number: 58,
+        ..Default::default()
+    };
+    window
+        .update(cx, |shell, window, cx| {
+            shell.set_right_panel_open(true, window, cx);
+            let changes = shell.right_panel.as_ref().unwrap().read(cx).changes.clone();
+            let event = crate::changes::ChangesEvent::OpenPullRequest(Box::new(item.clone()));
+            changes.update(cx, |_, cx| cx.emit(event));
+        })
+        .unwrap();
+    cx.run_until_parked();
+    window
+        .read_with(cx, |shell, cx| {
+            assert_eq!(shell.active_app_view, Some(app_views::AppView::Inbox));
+            let inbox = shell.inbox.as_ref().unwrap().read(cx);
+            assert_eq!(inbox.selected_item(), Some(item));
+        })
+        .unwrap();
+}

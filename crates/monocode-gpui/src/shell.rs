@@ -1221,6 +1221,18 @@ impl Shell {
                 .detach();
             },
         ));
+        this.observations.push(cx.subscribe(
+            &monos,
+            |_, _, request: &crate::monos::OpenInboxItem, cx| {
+                let item = request.0.clone();
+                cx.spawn(async move |this, cx| {
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        this.open_inbox_item(item, window, cx)
+                    });
+                })
+                .detach();
+            },
+        ));
         let mut mono_chrome = monos.read(cx).overview_chrome();
         let mut mono_error = monos.read(cx).error.clone();
         this.observations
@@ -1852,6 +1864,9 @@ impl Shell {
                         window,
                         cx,
                     );
+                }
+                crate::changes::ChangesEvent::OpenPullRequest(item) => {
+                    this.open_inbox_item(item.as_ref().clone(), window, cx);
                 }
             },
         ));
