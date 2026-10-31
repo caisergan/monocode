@@ -95,6 +95,7 @@ const YELLOW_300: u32 = 0xffdf20;
 const SKY_300: u32 = 0x74d4ff;
 const FUCHSIA_300: u32 = 0xf4a8ff;
 const AMBER_400: u32 = 0xffb900;
+const AMBER_500: u32 = 0xfe9a00;
 fn tint(color: u32, alpha: f32) -> gpui::Hsla {
     let mut c: gpui::Hsla = gpui::rgb(color).into();
     c.a = alpha;
@@ -895,6 +896,11 @@ impl Conversation {
             return;
         }
         if self.handle_local_command(cx) {
+            return;
+        }
+        // Enter on an open question means "Send anyway".
+        if self.prompt_cache.confirming.is_some() {
+            self.answer_cache_confirm(true, cx);
             return;
         }
         if self.confirms_expired_cache(cx) {
@@ -2708,6 +2714,10 @@ impl Conversation {
     }
     /// `Session: Stop` on Escape: cancels a running turn.
     pub(crate) fn stop_if_busy(&mut self, cx: &mut Context<Self>) {
+        if self.prompt_cache.confirming.is_some() {
+            self.answer_cache_confirm(false, cx);
+            return;
+        }
         if self.cancel_edit_last_turn(cx) {
             return;
         }
@@ -3045,8 +3055,18 @@ impl Conversation {
                                             .child(icon("chevron-down", 12.)),
                                     ),
                             )
-                            .children(self.prompt_cache_mark(cx))
-                            .child(self.action(has_value, window, cx)),
+                            .child(
+                                div()
+                                    .relative()
+                                    .flex()
+                                    .flex_shrink_0()
+                                    .items_center()
+                                    .gap_1()
+                                    .child(self.prompt_cache.send_area.probe())
+                                    .children(self.prompt_cache_mark(cx))
+                                    .child(self.action(has_value, window, cx))
+                                    .children(self.prompt_cache_confirm(cx)),
+                            ),
                     )
                     .children(self.attachment_drop_overlay(12.)),
             )
