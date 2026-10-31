@@ -1452,6 +1452,7 @@ impl Shell {
         let session = view.read(cx);
         let busy = session.responding();
         let focused = !self.app_view_open() && self.workspace.active == Some(id);
+        let mut finished = false;
         if busy {
             self.busy_sessions.insert(id);
             self.unseen_finished.remove(&id);
@@ -1460,8 +1461,17 @@ impl Shell {
             // only finishing its save, so it must not announce a completed turn.
             self.busy_sessions.remove(&id);
             self.unseen_finished.remove(&id);
-        } else if self.busy_sessions.remove(&id) && !focused && !session.summary.archived {
-            self.unseen_finished.insert(id);
+        } else if self.busy_sessions.remove(&id) && !session.summary.archived {
+            let (_, _, duration_ms) = session.transcript.read(cx).live_turn(&session.summary.cwd);
+            self.workspace.record_done(crate::workspace::DoneTurn {
+                id,
+                finished_at: monocode_core::time::now_ms(),
+                duration_ms,
+            });
+            finished = true;
+            if !focused {
+                self.unseen_finished.insert(id);
+            }
         }
         if focused || session.summary.archived {
             self.unseen_finished.remove(&id);
@@ -1483,6 +1493,9 @@ impl Shell {
         let provider = session.summary.provider.clone();
         self.session_marks[&id].update(cx, |mark, cx| mark.set(&provider, state, cx));
         self.tab_marks[&id].update(cx, |mark, cx| mark.set(&provider, tab_state, cx));
+        if finished {
+            self.save_state(cx);
+        }
     }
     fn toggle_archive(&mut self, id: i64, cx: &mut Context<Self>) {
         if !self.archiving.insert(id) {
