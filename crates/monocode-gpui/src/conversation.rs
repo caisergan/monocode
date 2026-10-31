@@ -2837,13 +2837,6 @@ impl Conversation {
                 self.settings
                     .handoff
                     .clone()
-                    .filter(|handoff| handoff.continued.is_some()),
-                |d, handoff| d.child(self.continued_chat_card(handoff, cx)),
-            )
-            .when_some(
-                self.settings
-                    .handoff
-                    .clone()
                     .filter(|handoff| handoff.continued.is_none()),
                 |d, handoff| {
                 d.child(
@@ -2925,6 +2918,13 @@ impl Conversation {
                     .child(self.btw_home.0.probe())
                     .child(composer_surface(radius))
                     .children(self.attachment_chips(cx))
+                    .when_some(
+                        self.settings
+                            .handoff
+                            .clone()
+                            .filter(|handoff| handoff.continued.is_some()),
+                        |d, handoff| d.child(self.continued_chat_card(handoff, cx)),
+                    )
                     .child(
                         div()
                             .px_3()
