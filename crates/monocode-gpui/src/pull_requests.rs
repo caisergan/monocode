@@ -294,10 +294,11 @@ impl PullRequests {
             .pb_1()
             .flex()
             .gap_1()
-            .children(STATES.map(|(id, label)| {
+            .children(STATES.iter().enumerate().map(|(ix, &(id, label))| {
                 let selected = self.tab == id;
                 div()
-                    .id(("pull-requests-tab", id.len() + label.len()))
+                    .id(("pull-requests-tab", ix))
+                    .debug_selector(move || format!("pull-requests-tab-{id}"))
                     .role(Role::Tab)
                     .aria_selected(selected)
                     .px_2()
@@ -542,5 +543,28 @@ mod tests {
         };
         assert_eq!(item.key(), listed.key());
         assert_eq!(item.project_path, "/work/app");
+    }
+
+    #[gpui::test]
+    fn each_tab_selects_its_own_state(cx: &mut gpui::TestAppContext) {
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |_, cx| cx.new(|_| PullRequests::new()))
+                .unwrap()
+        });
+        let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        for (state, selector) in [
+            ("closed", "pull-requests-tab-closed"),
+            ("merged", "pull-requests-tab-merged"),
+            ("open", "pull-requests-tab-open"),
+            ("closed", "pull-requests-tab-closed"),
+        ] {
+            let tab = visual.debug_bounds(selector).unwrap();
+            visual.simulate_click(tab.center(), Default::default());
+            visual.run_until_parked();
+            window
+                .read_with(visual, |prs, _| assert_eq!(prs.tab, state))
+                .unwrap();
+        }
     }
 }

@@ -1213,6 +1213,29 @@ impl Shell {
         let extra = item.links().len().saturating_sub(1);
         let noun = if item.kind == "pr" { "PR" } else { "issue" };
         let url = item.url.clone();
+        let tint = |alpha: f32| {
+            let mut color: gpui::Hsla = rgb(ACCENT).into();
+            color.a = alpha;
+            color
+        };
+        let menu_open = self.menu_open(&MenuTarget::WorkItems(id));
+        let mark = div()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap(px(2.))
+            .child(
+                icon(
+                    if item.kind == "pr" {
+                        "git-pull-request"
+                    } else {
+                        "circle-dot"
+                    },
+                    12.,
+                )
+                .text_color(rgb(ACCENT)),
+            )
+            .when(!compact, |d| d.child(format!("#{}", item.number)));
         Some(
             div()
                 .id(("work-item", id as usize))
@@ -1225,33 +1248,40 @@ impl Shell {
                 .flex_shrink_0()
                 .flex()
                 .items_center()
-                .gap(px(2.))
-                .px(px(2.))
                 .rounded_sm()
                 .text_size(px(11.))
                 .text_color(rgb(ACCENT))
-                .child(
-                    icon(
-                        if item.kind == "pr" {
-                            "git-pull-request"
-                        } else {
-                            "circle-dot"
-                        },
-                        12.,
-                    )
-                    .text_color(rgb(ACCENT)),
-                )
-                .when(!compact, |d| d.child(format!("#{}", item.number)))
-                .when(!compact && extra > 0, |d| {
-                    d.child(div().text_color(content(0.5)).child(format!("+{extra}")))
-                })
                 .cursor_pointer()
-                .when(compact, |d| {
-                    d.border_b_1()
-                        .border_color(gpui::transparent_black())
-                        .hover(|s| s.border_color(rgb(ACCENT)))
+                .child(mark)
+                .when(extra == 0, |d| {
+                    d.px(px(2.))
+                        .when(compact, |d| {
+                            d.border_b_1()
+                                .border_color(gpui::transparent_black())
+                                .hover(|s| s.border_color(rgb(ACCENT)))
+                        })
+                        .when(!compact, |d| d.hover(|s| s.underline()))
                 })
-                .when(!compact, |d| d.hover(|s| s.underline()))
+                // Several links: the newest plus a tinted `+N` pill, filled on
+                // hover and while the menu is open, like the Tauri app.
+                .when(extra > 0, |d| {
+                    d.aria_expanded(menu_open)
+                        .gap(px(4.))
+                        .px(px(4.))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .rounded(px(4.))
+                                .bg(tint(0.15))
+                                .px(px(4.))
+                                .text_size(px(10.))
+                                .font_weight(FontWeight::MEDIUM)
+                                .line_height(px(14.))
+                                .child(format!("+{extra}")),
+                        )
+                        .when(menu_open, |d| d.bg(tint(0.1)))
+                        .hover(move |s| s.bg(tint(0.1)))
+                })
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation())
                 .on_mouse_up(MouseButton::Middle, {
