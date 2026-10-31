@@ -249,6 +249,7 @@ impl Shell {
                 .into_any_element()
             }
         };
+        let stat = self.panel_peek_diff_stat(cx);
         let panel = self.right_panel.clone().unwrap();
         let content = self.right_panel_content(panel, !self.panel_peek_animating, window, cx);
         let contents = div()
@@ -263,7 +264,8 @@ impl Shell {
                     .items_center()
                     .pl(px(super::CORNER_TABS_LEAD))
                     .pr(px(6.))
-                    .child(header),
+                    .child(header)
+                    .when_some(stat, |d, stat| d.child(div().flex_1()).child(stat)),
             )
             .child(
                 div()
@@ -283,5 +285,30 @@ impl Shell {
         )
         .right(px(PEEK_INSET - PEEK_DRIFT * (1. - progress)))
         .w(px(width))
+    }
+
+    /// The title bar's diff stat, repeated at the end of the card's tabs. It
+    /// switches the peek to Changes rather than opening the panel.
+    fn panel_peek_diff_stat(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let width = self.diff_stat_room(cx);
+        let panel = self.right_panel.clone()?;
+        let changes = crate::right_panel::RightTab::Changes;
+        let selected = panel.read(cx).tab() == changes;
+        (width > 0.).then(|| {
+            crate::right_panel::diff_stat(self.git.read(cx).stats.as_ref(), width)
+                .id("peek-diff-stat")
+                .debug_selector(|| "peek-diff-stat".into())
+                .when(selected, |d| d.bg(content(0.1)))
+                .cursor_pointer()
+                .hover(|s| s.bg(content(0.1)))
+                .on_click(cx.listener(move |_, _, window, cx| {
+                    panel.update(cx, |panel, cx| {
+                        panel.select(changes, cx);
+                        panel.focus_pane(window, cx);
+                    });
+                    cx.notify();
+                }))
+                .into_any_element()
+        })
     }
 }
