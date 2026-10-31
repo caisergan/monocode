@@ -12,7 +12,11 @@ pub(super) struct PromptCacheWarning {
     confirmed: bool,
     /// The user turned the question off for this chat. In memory only.
     skipped: bool,
+    /// The confirm's "Don't ask again for this chat" box.
+    skip_checked: bool,
     anchor: AnchorSlot,
+    /// The mark and Send together, which the confirm opens against.
+    pub(super) send_area: AnchorSlot,
     /// Repaints when the cache lapses: its moment and the waiting task.
     timer: Option<(u64, gpui::Task<()>)>,
 }
@@ -41,11 +45,13 @@ impl Conversation {
             && !self.draft_active(cx)
             && self.expired_prompt_cache(cx).is_some()
     }
-    fn answer_cache_confirm(&mut self, send: bool, skip: bool, cx: &mut Context<Self>) {
+    /// Answers the open question; the checkbox only counts for a send.
+    pub(super) fn answer_cache_confirm(&mut self, send: bool, cx: &mut Context<Self>) {
         let Some(invert) = self.prompt_cache.confirming.take() else {
             return;
         };
-        self.prompt_cache.skipped |= skip;
+        let skip = std::mem::take(&mut self.prompt_cache.skip_checked);
+        self.prompt_cache.skipped |= send && skip;
         if send {
             self.prompt_cache.confirmed = true;
             self.send_follow_up(invert, cx);
@@ -88,46 +94,26 @@ impl Conversation {
             monocode_core::time::now_ms(),
             self.context.map(|usage| usage.used),
         );
-        let confirming = self.prompt_cache.confirming.is_some();
-        let amber = tint(AMBER_400, 0.9);
-        let text = div()
-            .flex()
-            .flex_col()
-            .gap_1()
-            .text_size(px(12.))
-            .line_height(px(16.))
-            .text_color(content(1.))
-            .child(headline.clone())
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(content(0.5))
-                    .child(detail),
-            )
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(content(0.7))
-                    .child(consequence.clone()),
-            );
+        let hovered = self.prompt_cache.hovered && self.prompt_cache.confirming.is_none();
+        let amber = tint(AMBER_400, 1.);
         Some(
             div()
                 .id("prompt-cache-mark")
                 .debug_selector(|| "prompt-cache-mark".into())
                 .role(Role::Image)
-                .aria_label(format!("{headline}. {consequence}"))
+                .aria_label(format!("{headline}. {detail} {consequence}"))
                 .flex_shrink_0()
-                .size(px(24.))
+                .size(px(26.))
                 .flex()
                 .items_center()
                 .justify_center()
                 .child(self.prompt_cache.anchor.probe())
-                .child(icon("alert-circle", 15.).text_color(amber))
+                .child(icon("alert-circle", 14.).text_color(amber))
                 .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                     this.prompt_cache.hovered = *hovered;
                     cx.notify();
                 }))
-                .when(self.prompt_cache.hovered || confirming, |d| {
+                .when(hovered, |d| {
                     d.child(
                         popover(
                             "prompt-cache-tooltip",
@@ -135,59 +121,154 @@ impl Conversation {
                         )
                         .side(Side::Top)
                         .align(Align::End)
-                        .max_width(300.)
-                        .padding(10.)
-                        .child(text)
-                        .when(confirming, |p| {
-                            p.child(
-                                div()
-                                    .id("prompt-cache-confirm")
-                                    .debug_selector(|| "prompt-cache-confirm".into())
-                                    .role(Role::Dialog)
-                                    .aria_label("Send with an expired prompt cache?")
-                                    .pt_2()
-                                    .flex()
-                                    .items_center()
-                                    .gap_2()
-                                    .child(
-                                        div()
-                                            .id("prompt-cache-skip")
-                                            .role(Role::Button)
-                                            .cursor_pointer()
-                                            .text_size(px(11.))
-                                            .text_color(content(0.55))
-                                            .hover(|s| s.text_color(content(0.9)))
-                                            .child("Don't ask in this chat")
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.answer_cache_confirm(true, true, cx)
-                                            })),
-                                    )
-                                    .child(div().flex_1())
-                                    .child(
-                                        crate::modal::ghost_button("prompt-cache-cancel", "Cancel")
-                                            .cursor_pointer()
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.answer_cache_confirm(false, false, cx)
-                                            })),
-                                    )
-                                    .child(
-                                        crate::modal::primary_button(
-                                            "prompt-cache-send",
-                                            "Send anyway",
-                                        )
-                                        .debug_selector(|| "prompt-cache-send".into())
-                                        .cursor_pointer()
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| {
-                                                this.answer_cache_confirm(true, false, cx)
-                                            }),
-                                        ),
-                                    ),
-                            )
-                        }),
+                        .width(288.)
+                        .allow_outside_press()
+                        .child(
+                            div()
+                                .px(px(10.))
+                                .py(px(6.))
+                                .text_size(px(11.))
+                                .line_height(px(16.))
+                                .text_color(content(0.5))
+                                .child(div().text_size(px(12.)).text_color(amber).child(headline))
+                                .child(div().mt(px(2.)).child(detail))
+                                .child(div().mt_1().child(consequence)),
+                        ),
                     )
                 })
                 .into_any_element(),
+        )
+    }
+    /// PromptCacheSendConfirm: asks before a send re-reads the whole context.
+    /// Enter sends anyway; Escape or a press outside cancels.
+    pub(super) fn prompt_cache_confirm(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        self.prompt_cache.confirming?;
+        let state = self.expired_prompt_cache(cx)?;
+        let (_, detail, consequence) = state.tooltip(
+            monocode_core::time::now_ms(),
+            self.context.map(|usage| usage.used),
+        );
+        let skip = self.prompt_cache.skip_checked;
+        let accent = crate::theme::accent_color();
+        let this = cx.entity().downgrade();
+        Some(
+            popover(
+                "prompt-cache-confirm",
+                Anchor::Slot(self.prompt_cache.send_area.clone()),
+            )
+            .side(Side::Top)
+            .align(Align::End)
+            .width(300.)
+            .padding(12.)
+            .on_dismiss(move |_, cx| {
+                let _ = this.update(cx, |this, cx| this.answer_cache_confirm(false, cx));
+            })
+            .child(
+                div()
+                    .id("prompt-cache-confirm")
+                    .debug_selector(|| "prompt-cache-confirm".into())
+                    .role(Role::AlertDialog)
+                    .aria_label("Prompt cache expired")
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .text_size(px(12.))
+                    .line_height(px(16.))
+                    .text_color(content(1.))
+                    .child(
+                        div()
+                            .child(
+                                div()
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .child("Re-read the whole chat?"),
+                            )
+                            .child(
+                                div()
+                                    .mt_1()
+                                    .text_size(px(11.))
+                                    .text_color(content(0.55))
+                                    .child(format!("{detail} {consequence}")),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("prompt-cache-skip")
+                            .debug_selector(|| "prompt-cache-skip".into())
+                            .role(Role::CheckBox)
+                            .aria_label("Don't ask again for this chat")
+                            .aria_toggled(skip.into())
+                            .cursor_pointer()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .text_size(px(11.))
+                            .text_color(content(0.7))
+                            .child(
+                                div()
+                                    .size(px(13.))
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .rounded(px(3.))
+                                    .border_1()
+                                    .map(|d| {
+                                        if skip {
+                                            d.bg(accent)
+                                                .border_color(accent)
+                                                .child(icon("check", 10.).text_color(gpui::white()))
+                                        } else {
+                                            d.border_color(content(0.35))
+                                        }
+                                    }),
+                            )
+                            .child("Don't ask again for this chat")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.prompt_cache.skip_checked ^= true;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .justify_end()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .id("prompt-cache-cancel")
+                                    .role(Role::Button)
+                                    .cursor_pointer()
+                                    .rounded(px(6.))
+                                    .px(px(10.))
+                                    .py_1()
+                                    .hover(|s| s.bg(content(0.08)))
+                                    .child("Cancel")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.answer_cache_confirm(false, cx)
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id("prompt-cache-send")
+                                    .debug_selector(|| "prompt-cache-send".into())
+                                    .role(Role::Button)
+                                    .cursor_pointer()
+                                    .rounded(px(6.))
+                                    .px(px(10.))
+                                    .py_1()
+                                    .border_1()
+                                    .border_color(tint(AMBER_400, 1.))
+                                    .bg(tint(AMBER_500, 0.2))
+                                    .hover(|s| s.bg(tint(AMBER_500, 0.3)))
+                                    .font_weight(gpui::FontWeight::MEDIUM)
+                                    .text_color(tint(AMBER_400, 1.))
+                                    .child("Send anyway")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.answer_cache_confirm(true, cx)
+                                    })),
+                            ),
+                    ),
+            )
+            .into_any_element(),
         )
     }
 }
@@ -235,10 +316,15 @@ mod tests {
             assert!(v.confirms_expired_cache(cx));
             v.prompt_cache.confirming = Some(false);
             // Cancel keeps the message.
-            v.answer_cache_confirm(false, false, cx);
+            v.answer_cache_confirm(false, cx);
             assert_eq!(v.input.read(cx).content.as_ref(), "next question");
             assert!(v.confirms_expired_cache(cx));
-            // "Don't ask in this chat" stops asking.
+            // A ticked box only counts when the message is sent.
+            v.prompt_cache.confirming = Some(false);
+            v.prompt_cache.skip_checked = true;
+            v.answer_cache_confirm(false, cx);
+            assert!(v.confirms_expired_cache(cx));
+            // "Don't ask again for this chat" stops asking.
             v.prompt_cache.skipped = true;
             assert!(!v.confirms_expired_cache(cx));
             // A small context is not worth a warning.
