@@ -2937,6 +2937,37 @@ mod tests {
             .unwrap();
     }
     #[gpui::test]
+    fn an_item_opened_from_elsewhere_stays_selected_until_another_is_picked(
+        cx: &mut TestAppContext,
+    ) {
+        let window = fixture(cx);
+        window
+            .update(cx, |fixture, _, cx| {
+                fixture.inbox.update(cx, |inbox, cx| {
+                    let listed = fixture.item.clone();
+                    let opened = Item {
+                        provider: "github".into(),
+                        kind: "pr".into(),
+                        state: "open".into(),
+                        repo: "acme/app".into(),
+                        number: 58,
+                        ..Default::default()
+                    };
+                    inbox.state.source = "linear".into();
+                    inbox.open_item(opened.clone(), cx);
+                    assert_eq!(inbox.state.source, "github");
+                    assert_eq!(inbox.selected, Some(opened.key()));
+                    assert_eq!(inbox.item(), Some(opened.clone()));
+                    assert!(!inbox.snapshot.items.contains(&opened));
+
+                    inbox.select(listed.key(), cx);
+                    assert_eq!(inbox.item(), Some(listed));
+                    assert!(inbox.opened.is_none());
+                });
+            })
+            .unwrap();
+    }
+    #[gpui::test]
     fn switching_projects_drops_the_previous_projects_selection_and_detail(
         cx: &mut TestAppContext,
     ) {

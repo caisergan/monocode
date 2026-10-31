@@ -52,6 +52,8 @@ use std::{
 pub(crate) struct Changed;
 pub(crate) struct TabOpened(pub String);
 pub(crate) struct ShowDetails(pub String);
+/// A pull request clicked in a Mono's Changes panel, for the Inbox to show.
+pub(crate) struct OpenInboxItem(pub monocode_core::inbox::Item);
 pub(crate) use notifications::{NotificationChanged, NotificationFinished};
 #[derive(Clone, PartialEq)]
 pub(crate) struct OverviewChrome {
@@ -153,6 +155,7 @@ pub(crate) struct Monos {
 impl EventEmitter<Changed> for Monos {}
 impl EventEmitter<TabOpened> for Monos {}
 impl EventEmitter<ShowDetails> for Monos {}
+impl EventEmitter<OpenInboxItem> for Monos {}
 impl Monos {
     pub(crate) fn resource_sessions(
         &self,

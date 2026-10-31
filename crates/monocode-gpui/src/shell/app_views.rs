@@ -248,6 +248,20 @@ impl Shell {
         self.show_app_view(AppView::Inbox, window, cx);
     }
 
+    /// Opens the Inbox on one item, such as a pull request clicked in the
+    /// Changes panel, whether or not the Inbox lists it.
+    pub(super) fn open_inbox_item(
+        &mut self,
+        item: monocode_core::inbox::Item,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_inbox(window, cx);
+        if let Some(inbox) = &self.inbox {
+            inbox.update(cx, |inbox, cx| inbox.open_item(item, cx));
+        }
+    }
+
     pub(super) fn ensure_background_inbox(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.inbox.is_none() {
             let projects = self.workspace.projects.iter().map(Into::into).collect();

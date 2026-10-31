@@ -54,6 +54,8 @@ pub(crate) enum ChangesEvent {
         path: Option<String>,
         staged: bool,
     },
+    /// A pull request row was clicked; the Inbox shows its detail.
+    OpenPullRequest(Box<monocode_core::inbox::Item>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -246,10 +248,17 @@ impl EventEmitter<ChangesEvent> for Changes {}
 impl Changes {
     pub(crate) fn new(git: Entity<ProjectGit>, _: &mut Window, cx: &mut Context<Self>) -> Self {
         let message = cx.new(Input::commit_message);
+        let pull_requests = cx.new(|_| crate::pull_requests::PullRequests::new());
         let subscriptions = vec![
             cx.observe(&git, |this, _, cx| this.index_changed(cx)),
             cx.subscribe(&git, |this, _, _: &GitChanged, cx| this.index_changed(cx)),
             cx.subscribe(&message, |_, _, _: &input::Changed, cx| cx.notify()),
+            cx.subscribe(
+                &pull_requests,
+                |_, _, event: &crate::pull_requests::OpenPullRequest, cx| {
+                    cx.emit(ChangesEvent::OpenPullRequest(Box::new(event.0.clone())))
+                },
+            ),
         ];
         let mut this = Self {
             git,
@@ -275,7 +284,7 @@ impl Changes {
             menu: None,
             branch_anchor: AnchorSlot::default(),
             commit_anchor: AnchorSlot::default(),
-            pull_requests: cx.new(|_| crate::pull_requests::PullRequests::new()),
+            pull_requests: pull_requests.clone(),
             _subscriptions: subscriptions,
         };
         this.rebuild(cx);

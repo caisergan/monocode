@@ -2,16 +2,20 @@
 //! header with the open count, and Open, Merged and Closed tabs. Rows show the
 //! status, title, number, branch, author (unless it is you), review decision,
 //! a CI dot for open PRs, and when each was updated, merged or closed. The
-//! checked-out branch's PR leads the Open list.
+//! checked-out branch's PR leads the Open list. Clicking a row opens the PR
+//! in the Inbox's detail view.
 use crate::{
     popover::{Align, Anchor, Menu, MenuAction, MenuEvent, MenuItem, MenuStyle, menu_popover},
     theme::*,
 };
 use gpui::{
-    AnyElement, App, ClickEvent, ClipboardItem, Context, Entity, Hsla, MouseButton, Pixels, Point,
-    Role, Subscription, Window, div, prelude::*, px, rgb,
+    AnyElement, ClickEvent, ClipboardItem, Context, Entity, EventEmitter, Hsla, MouseButton,
+    Pixels, Point, Role, Subscription, Window, div, prelude::*, px, rgb,
 };
-use monocode_core::scm::{self, PullRequest, PullRequestList};
+use monocode_core::{
+    inbox::Item,
+    scm::{self, PullRequest, PullRequestList},
+};
 use std::{collections::HashMap, path::PathBuf};
 
 const STATES: [(&str, &str); 3] = [("open", "Open"), ("merged", "Merged"), ("closed", "Closed")];
@@ -23,6 +27,9 @@ struct RowMenu {
     menu: Entity<Menu>,
     _events: Subscription,
 }
+
+/// A row was clicked: show this pull request's detail.
+pub(crate) struct OpenPullRequest(pub Item);
 
 pub(crate) struct PullRequests {
     cwd: String,
@@ -37,6 +44,8 @@ pub(crate) struct PullRequests {
     status: Option<String>,
     menu: Option<RowMenu>,
 }
+
+impl EventEmitter<OpenPullRequest> for PullRequests {}
 
 impl PullRequests {
     pub(crate) fn new() -> Self {
@@ -129,6 +138,27 @@ impl PullRequests {
             rows.insert(0, current);
         }
         rows
+    }
+    /// The pull request as the Inbox lists GitHub PRs, so its detail view
+    /// can load it from this project's checkout.
+    fn inbox_item(&self, pr: &PullRequest) -> Item {
+        let repo = match self.lists.get(self.tab) {
+            Some(Ok(list)) => list.repo.clone(),
+            _ => String::new(),
+        };
+        Item {
+            provider: "github".into(),
+            kind: "pr".into(),
+            number: pr.number as i64,
+            title: pr.title.clone(),
+            url: pr.url.clone(),
+            state: pr.state.clone(),
+            updated_at: pr.changed_at().to_owned(),
+            draft: pr.draft,
+            repo,
+            project_path: self.cwd.clone(),
+            ..Default::default()
+        }
     }
     fn open_menu(
         &mut self,
@@ -311,7 +341,7 @@ impl PullRequests {
             _ => None,
         };
         let when = monocode_core::inbox::relative_time(pr.changed_at());
-        let url = pr.url.clone();
+        let item = self.inbox_item(&pr);
         div()
             .id(("pull-request", ix))
             .role(Role::Link)
@@ -369,7 +399,9 @@ impl PullRequests {
                             .child(div().flex_shrink_0().child(when)),
                     ),
             )
-            .on_click(move |_: &ClickEvent, _, cx: &mut App| cx.open_url(&url))
+            .on_click(
+                cx.listener(move |_, _: &ClickEvent, _, cx| cx.emit(OpenPullRequest(item.clone()))),
+            )
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
@@ -486,5 +518,29 @@ mod tests {
         assert_eq!(numbers(&view), vec![2, 3, 1]);
         view.tab = "merged";
         assert!(view.rows().is_empty());
+    }
+
+    #[test]
+    fn a_row_opens_as_the_inbox_lists_the_same_github_pr() {
+        let mut view = PullRequests::new();
+        view.cwd = "/work/app".into();
+        view.lists.insert(
+            "open",
+            Ok(PullRequestList {
+                repo: "Acme/App".into(),
+                items: vec![pr(58, "feat/a")],
+                ..Default::default()
+            }),
+        );
+        let item = view.inbox_item(&view.rows()[0]);
+        let listed = Item {
+            provider: "github".into(),
+            kind: "pr".into(),
+            repo: "acme/app".into(),
+            number: 58,
+            ..Default::default()
+        };
+        assert_eq!(item.key(), listed.key());
+        assert_eq!(item.project_path, "/work/app");
     }
 }
