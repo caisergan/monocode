@@ -24,6 +24,7 @@ mod picker_preferences;
 mod project_rail;
 mod project_removal;
 mod project_settings;
+mod project_spaces;
 mod quick_composer;
 mod quick_open;
 mod rail_chats;
@@ -160,7 +161,7 @@ impl Render for Chrome {
             .update(cx, |shell, cx| match kind {
                 ChromeKind::Sidebar => {
                     let sidebar = shell.sidebar(cx);
-                    if shell.spaces_nudge.is_some() || shell.classic_tabs.animating() {
+                    if shell.spaces_animating() || shell.classic_tabs.animating() {
                         window.request_animation_frame();
                     }
                     sidebar
@@ -755,9 +756,7 @@ pub(crate) struct Shell {
     tab_shifts: HashMap<TitleTab, TabShift>,
     pane_ticks: HashMap<i64, PaneTick>,
     skip_tab_click: bool,
-    spaces_start: usize,
-    /// The spaces bar's short nudge after a chevron pages it.
-    spaces_nudge: Option<(f32, std::time::Instant)>,
+    spaces: project_spaces::SpacesStrip,
     /// The space under the pointer, whose name and shortcuts show above it.
     hovered_space: Option<String>,
     space_anchor: AnchorSlot,
@@ -1114,8 +1113,7 @@ impl Shell {
             tab_shifts: HashMap::new(),
             pane_ticks: HashMap::new(),
             skip_tab_click: false,
-            spaces_start: 0,
-            spaces_nudge: None,
+            spaces: Default::default(),
             hovered_space: None,
             space_anchor: AnchorSlot::default(),
             error: None,
@@ -4278,11 +4276,7 @@ impl Shell {
         self.workspace.project = path.clone();
         self.workspace.active = None;
         if let Some(ix) = self.workspace.projects.iter().position(|p| p == &path) {
-            if ix < self.spaces_start {
-                self.spaces_start = ix;
-            } else if ix >= self.spaces_start + 5 {
-                self.spaces_start = ix - 4;
-            }
+            self.reveal_space(ix, cx);
         }
         self.workspace.collapsed.remove(&path);
         // Original-layout project buttons leave the standalone Mono/app view.
@@ -6809,186 +6803,6 @@ impl Shell {
             .into_any()
     }
 
-    fn project_spaces(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        // Sidebar.tsx's ProjectSpacesBar: five equal spaces, paged by chevrons.
-        let shown = self.workspace.projects.len().min(5);
-        let last = self.workspace.projects.len().saturating_sub(shown);
-        self.spaces_start = self.spaces_start.min(last);
-        let first = self.spaces_start;
-        let projects: Vec<_> = self
-            .workspace
-            .projects
-            .iter()
-            .enumerate()
-            .skip(first)
-            .take(shown)
-            .map(|(ix, p)| (ix, p.clone()))
-            .collect();
-        if self
-            .hovered_space
-            .as_ref()
-            .is_some_and(|hovered| !projects.iter().any(|(_, path)| path == hovered))
-        {
-            self.hovered_space = None;
-        }
-        let prefs = &self.workspace.preferences;
-        let shortcuts = ["Project: Previous", "Project: Next"]
-            .into_iter()
-            .filter_map(|command| crate::settings::command_shortcut(prefs, command))
-            .collect::<Vec<_>>()
-            .join(" / ");
-        // A short slide in from the side the new spaces come from.
-        let (nudge_x, nudge_opacity) = match self.spaces_nudge {
-            Some((direction, start)) => {
-                let t = start.elapsed().as_secs_f32() / 0.2;
-                if t >= 1. {
-                    self.spaces_nudge = None;
-                    (0., 1.)
-                } else {
-                    let eased = crate::reveal::bezier(t, 0.32, 0.72, 0., 1.);
-                    (direction * 12. * (1. - eased), 0.4 + 0.6 * eased)
-                }
-            }
-            None => (0., 1.),
-        };
-        let tooltip = self.hovered_space.clone().map(|path| {
-            popover(
-                "project-space-tooltip",
-                Anchor::Slot(self.space_anchor.clone()),
-            )
-            .side(Side::Top)
-            .align(Align::Center)
-            .gap(8.)
-            .padding(8.)
-            .without_animation()
-            .allow_outside_press()
-            .child(
-                div()
-                    .id("project-space-tip")
-                    .role(Role::Tooltip)
-                    .flex()
-                    .items_center()
-                    .gap(px(6.))
-                    .whitespace_nowrap()
-                    .text_size(px(12.))
-                    .line_height(px(15.))
-                    .child(
-                        div()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(content(1.))
-                            .child(self.project_label(&path)),
-                    )
-                    .when(!shortcuts.is_empty(), |d| {
-                        d.child(div().text_color(content(0.55)).child(shortcuts.clone()))
-                    }),
-            )
-        });
-        div()
-            .h(px(30.))
-            .flex_shrink_0()
-            .px_2()
-            .pb_0p5()
-            .flex()
-            .items_center()
-            .gap_1()
-            .child(
-                icon_button("previous-projects", "Previous projects", "chevron-left")
-                    .size(px(20.))
-                    .opacity(if first == 0 { 0.3 } else { 1. })
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        if this.spaces_start > 0 {
-                            this.spaces_start -= 1;
-                            this.nudge_spaces(-1., cx);
-                        }
-                    })),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .relative()
-                    .left(px(nudge_x))
-                    .opacity(nudge_opacity)
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .children(projects.into_iter().map(|(ix, path)| {
-                        let active = path == self.workspace.project;
-                        let hovered = self.hovered_space.as_ref() == Some(&path);
-                        div()
-                            .id(("project-space", ix))
-                            .debug_selector(move || format!("project-space-{ix}"))
-                            .group("project-space")
-                            .role(Role::Tab)
-                            .aria_label(format!("Project {}", self.project_label(&path)))
-                            .aria_description(path.clone())
-                            .aria_selected(active)
-                            .cursor_pointer()
-                            .flex_1()
-                            .min_w_0()
-                            .h(px(20.))
-                            .rounded_md()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .opacity(if active { 1. } else { 0.45 })
-                            .when(active, |d| d.bg(content(0.1)))
-                            .hover(|s| s.opacity(1.).bg(content(if active { 0.1 } else { 0.05 })))
-                            .child(self.project_mark(&path, 12.))
-                            .when(hovered, |d| d.child(self.space_anchor.probe()))
-                            .on_hover({
-                                let path = path.clone();
-                                cx.listener(move |this, hovered: &bool, _, cx| {
-                                    if *hovered {
-                                        this.hovered_space = Some(path.clone());
-                                    } else if this.hovered_space.as_ref() == Some(&path) {
-                                        this.hovered_space = None;
-                                    } else {
-                                        return;
-                                    }
-                                    this.invalidate_chrome(cx);
-                                })
-                            })
-                            .on_mouse_down(MouseButton::Right, {
-                                let path = path.clone();
-                                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                                    let anchor = Anchor::Point(event.position);
-                                    let target = MenuTarget::Project {
-                                        path: path.clone(),
-                                        rail: true,
-                                    };
-                                    this.open_menu(target, anchor, window, cx);
-                                })
-                            })
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                // The tip steps aside once a space is clicked.
-                                this.hovered_space = None;
-                                this.select_project(path.clone(), window, cx)
-                            }))
-                    })),
-            )
-            .child(
-                icon_button("more-projects", "More projects", "chevron-right")
-                    .size(px(20.))
-                    .opacity(if first >= last { 0.3 } else { 1. })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if this.spaces_start < last {
-                            this.spaces_start += 1;
-                            this.nudge_spaces(1., cx);
-                        }
-                    })),
-            )
-            .children(tooltip)
-            .into_any()
-    }
-
-    fn nudge_spaces(&mut self, direction: f32, cx: &mut Context<Self>) {
-        if !cx.reduce_motion() {
-            self.spaces_nudge = Some((direction, std::time::Instant::now()));
-        }
-        self.invalidate_chrome(cx);
-    }
-
     /// App.tsx's toTitleTab with TitleBar's tabCopy: a split tab, or a chat
     /// with a file beside it, heads with the focused pane and names the rest
     /// on a second line.
@@ -8602,7 +8416,7 @@ impl Render for Shell {
                 }
             }))
             .on_action(cx.listener(|this, _: &DismissMenu, window, cx| {
-                if this.cancel_project_rail_drag(cx) {
+                if this.cancel_project_rail_drag(cx) || this.cancel_space_drag(cx) {
                     return;
                 }
                 if this.cancel_classic_sidebar_tab(cx) {
@@ -8766,6 +8580,7 @@ impl Render for Shell {
                 this.move_pane_drag(event, cx);
                 this.move_folder_drag(event, cx);
                 this.move_project_rail_drag(event, cx);
+                this.move_space_drag(event, cx);
                 this.move_classic_sidebar_tab(event, cx);
                 this.drag_sash(event, cx);
                 this.drag_dock(event, cx);
@@ -8798,6 +8613,7 @@ impl Render for Shell {
                     this.finish_pane_drag(window, cx);
                     this.finish_folder_drag(cx);
                     this.finish_project_rail_drag(cx);
+                    this.finish_space_drag(cx);
                     this.end_classic_sidebar_tab(cx);
                     if let Some(m) = this.monos.clone() {
                         m.update(cx, |m, cx| m.finish_reorder(cx));
