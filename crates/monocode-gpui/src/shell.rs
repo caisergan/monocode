@@ -10673,6 +10673,22 @@ mod tests {
         assert!(tabs.left() > panel.left() && tabs.right() <= panel.right());
         assert_eq!(tabs.top(), panel.top());
         assert_eq!(tabs.bottom(), panel.top() + px(TITLE_BAR_HEIGHT));
+        // So does the diff stat, at the header's far end; it switches the
+        // peek to Changes without opening the panel.
+        let stat = cx.debug_bounds("peek-diff-stat").unwrap();
+        assert!(stat.left() >= tabs.right());
+        assert_eq!(stat.right(), panel.right() - px(6.));
+        assert!(stat.top() > panel.top() && stat.bottom() < tabs.bottom());
+        cx.simulate_click(stat.center(), Default::default());
+        cx.run_until_parked();
+        assert!(open(cx));
+        window
+            .update(cx, |shell, _, cx| {
+                assert!(!shell.workspace.right_panel_open);
+                let panel = shell.right_panel.as_ref().unwrap().read(cx);
+                assert_eq!(panel.tab(), crate::right_panel::RightTab::Changes);
+            })
+            .unwrap();
         // Peeking, its panes read as if it were open.
         window
             .update(cx, |shell, _, cx| {
