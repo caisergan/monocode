@@ -1268,7 +1268,7 @@ impl Shell {
                             let anchor = Anchor::Point(event.position());
                             this.open_menu(MenuTarget::WorkItems(id), anchor, window, cx);
                         } else {
-                            cx.open_url(&url);
+                            this.open_session_work_item(id, None, window, cx);
                         }
                     }),
                 )

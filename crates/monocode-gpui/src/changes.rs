@@ -54,7 +54,7 @@ pub(crate) enum ChangesEvent {
         path: Option<String>,
         staged: bool,
     },
-    /// A pull request row was clicked; the Inbox shows its detail.
+    /// A pull request row was clicked; the linked-work panel shows it.
     OpenPullRequest(Box<monocode_core::inbox::Item>),
 }
 

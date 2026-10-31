@@ -30,8 +30,13 @@ use std::{
 pub(crate) enum Event {
     Close,
     OpenSession(i64),
-    StartSession { item: Box<Item>, prompt: String },
+    StartSession {
+        item: Box<Item>,
+        prompt: String,
+    },
     ItemsChanged(Vec<Item>),
+    /// The side panel's item, to show in the full Inbox instead.
+    Expand(Box<Item>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -63,6 +68,22 @@ pub(crate) struct Inbox {
     /// An item opened from elsewhere, such as the Changes panel's pull
     /// requests. It stays selected even when the list does not include it.
     opened: Option<Item>,
+    /// LinkedWorkItemPanel: one GitHub issue or PR beside a chat, in the
+    /// detail's compact panel layout, with no list or provider rail.
+    panel: bool,
+    /// The panel's item was fetched, or arrived complete enough to show.
+    linked_ready: bool,
+    linked_loading: bool,
+    linked_error: Option<String>,
+    /// The panel's description lead and whether it is expanded.
+    excerpt: Option<model::DescriptionExcerpt>,
+    description_expanded: bool,
+    /// The panel's changed-files glance, loaded beside the Summary.
+    glance_loading: bool,
+    glance_error: Option<String>,
+    panel_width: std::rc::Rc<std::cell::Cell<Pixels>>,
+    /// Tests drive a panel's data by hand instead of running `gh`.
+    offline: bool,
     details: Option<Details>,
     thread: Option<Thread>,
     document: Option<Entity<document::InboxDocument>>,
@@ -140,6 +161,145 @@ impl Inbox {
         Self::new_inner(store, projects, cwd, true, cx)
     }
 
+    /// LinkedWorkItemPanel's detail: `item` is a GitHub issue or PR with at
+    /// least its repo, kind and number; the rest is fetched from `cwd`.
+    pub(crate) fn linked(
+        store: Database,
+        cwd: PathBuf,
+        item: Item,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let mut this = Self::new_inner(store, vec![], cwd, !cfg!(test), cx);
+        this.panel = true;
+        this.offline = cfg!(test);
+        this.active = true;
+        this.set_linked_item(item, cx);
+        this
+    }
+
+    /// Shows another item in the panel, as a new click on the same panel.
+    pub(crate) fn set_linked_item(&mut self, mut item: Item, cx: &mut Context<Self>) {
+        item.provider = "github".into();
+        if item.project_path.is_empty() {
+            item.project_path = self.service.cwd.to_string_lossy().into_owned();
+        }
+        let key = item.key();
+        if self.selected.as_ref() == Some(&key) {
+            return;
+        }
+        self.linked_ready = !item.title.trim().is_empty();
+        self.linked_error = None;
+        self.opened = Some(item);
+        self.selected = None;
+        self.select(key, cx);
+        self.load_linked_item(cx);
+    }
+
+    pub(crate) fn linked_item(&self) -> Option<Item> {
+        self.opened.clone()
+    }
+
+    /// The panel shows its item or why it failed, not its spinner.
+    pub(crate) fn linked_shown(&self) -> bool {
+        self.linked_ready || self.linked_error.is_some()
+    }
+
+    /// Escape closes the panel unless one of its own menus is open.
+    pub(crate) fn has_overlay(&self) -> bool {
+        self.confirm_action.is_some() || self.action_menu || self.project_picker
+    }
+
+    /// useLinkedWorkItem: the panel item's current title, state and labels.
+    fn load_linked_item(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.opened.clone().filter(|_| !self.offline) else {
+            return;
+        };
+        self.linked_loading = true;
+        self.last_refresh = Instant::now();
+        let key = target.key();
+        let cwd = PathBuf::from(&target.project_path);
+        let task = cx.background_executor().spawn(async move {
+            model::github_work_item(&cwd, &target.repo, &target.kind, target.number)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                let Some(opened) = this.opened.as_mut().filter(|item| item.key() == key) else {
+                    return;
+                };
+                this.linked_loading = false;
+                match result {
+                    Ok(mut item) => {
+                        item.project_path = opened.project_path.clone();
+                        *opened = item;
+                        this.linked_ready = true;
+                        this.linked_error = None;
+                    }
+                    Err(error) if !this.linked_ready => this.linked_error = Some(error),
+                    Err(_) => {}
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// InboxPrChangesGlance: the PR's files for the Summary, without leaving it.
+    fn load_glance(&mut self, cx: &mut Context<Self>) {
+        let Some(item) = self.item().filter(|item| item.kind == "pr") else {
+            return;
+        };
+        if self.diff.is_some() || self.glance_loading || self.offline {
+            return;
+        }
+        self.glance_loading = true;
+        self.glance_error = None;
+        let key = item.key();
+        let service = self.service.clone();
+        let task = cx.background_executor().spawn(async move {
+            service.diff(&item).map(|diff| {
+                let files = diff::models(&diff);
+                (diff, files)
+            })
+        });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.selected.as_ref() != Some(&key) {
+                    return;
+                }
+                this.glance_loading = false;
+                match result {
+                    Ok((diff, files)) if this.diff.is_none() => {
+                        this.diff_view.update(cx, |view, cx| {
+                            view.file_count = Some(diff.files.len());
+                            view.totals = Some((
+                                diff.additions.max(0).min(u32::MAX as i64) as u32,
+                                diff.deletions.max(0).min(u32::MAX as i64) as u32,
+                            ));
+                            view.set_files(files, cx);
+                        });
+                        this.diff = Some(diff);
+                    }
+                    Ok(_) => {}
+                    Err(error) => this.glance_error = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// A glance row: the Code tab, scrolled to that file.
+    fn open_diff_file(&mut self, path: Option<String>, cx: &mut Context<Self>) {
+        self.set_tab(Tab::Code, cx);
+        let id = path.map(|path| gpui::SharedString::from(format!("inbox-diff-{path}")));
+        self.diff_view
+            .update(cx, |view, cx| view.focus_file(id, cx));
+    }
+
     fn new_inner(
         store: Database,
         mut projects: Vec<PathBuf>,
@@ -192,7 +352,13 @@ impl Inbox {
         ];
         if poll {
             cx.spawn(async move |this, cx| {
-                if this.update(cx, |this, cx| this.refresh(cx)).is_err() {
+                // The panel fetched its item as it opened.
+                let first = this.update(cx, |this, cx| {
+                    if !this.panel {
+                        this.refresh(cx)
+                    }
+                });
+                if first.is_err() {
                     return;
                 }
                 loop {
@@ -248,6 +414,16 @@ impl Inbox {
             focus_comment: false,
             selected: None,
             opened: None,
+            panel: false,
+            linked_ready: false,
+            linked_loading: false,
+            linked_error: None,
+            excerpt: None,
+            description_expanded: false,
+            glance_loading: false,
+            glance_error: None,
+            panel_width: std::rc::Rc::new(std::cell::Cell::new(px(520.))),
+            offline: false,
             details: None,
             thread: None,
             document: None,
@@ -356,6 +532,10 @@ impl Inbox {
             return;
         }
         self.active = active;
+        if self.panel {
+            cx.notify();
+            return;
+        }
         if active {
             if let Some(item) = self.item() {
                 self.state.seen.mark(&item);
@@ -404,6 +584,10 @@ impl Inbox {
     }
 
     pub(crate) fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.panel {
+            self.load_linked_item(cx);
+            return;
+        }
         if self.loading {
             self.refresh_queued = true;
             return;
@@ -507,6 +691,10 @@ impl Inbox {
         )
     }
     fn save(&mut self) {
+        // The panel shares the Inbox's store but not its filters or source.
+        if self.panel {
+            return;
+        }
         if let Err(error) = locked(&self.store).and_then(|db| self.state.save(&db)) {
             self.error = Some(error);
         }
@@ -527,10 +715,6 @@ impl Inbox {
             .chain(&self.opened)
             .find(|item| Some(item.key()) == self.selected)
             .cloned()
-    }
-    #[cfg(test)]
-    pub(crate) fn selected_item(&self) -> Option<Item> {
-        self.item()
     }
     /// Shows one item's detail, switching to its provider. The item is kept
     /// so the detail stays up when the list does not include it.
@@ -566,6 +750,9 @@ impl Inbox {
             }
         }
         self.load_detail(true, cx);
+        if self.panel {
+            self.load_glance(cx);
+        }
         cx.notify();
     }
     fn deselect(&mut self, cx: &mut Context<Self>) {
@@ -590,6 +777,10 @@ impl Inbox {
         self.diff_view
             .update(cx, |view, cx| view.set_files(vec![], cx));
         self.checks = None;
+        self.excerpt = None;
+        self.description_expanded = false;
+        self.glance_loading = false;
+        self.glance_error = None;
         self.extra_loading = false;
         self.extra_error = None;
         self.details = None;
@@ -624,7 +815,7 @@ impl Inbox {
         cx.notify();
     }
     fn load_detail(&mut self, clear: bool, cx: &mut Context<Self>) {
-        let Some(item) = self.item() else {
+        let Some(item) = self.item().filter(|_| !self.offline) else {
             return;
         };
         self.detail_generation += 1;
@@ -661,6 +852,9 @@ impl Inbox {
                                     cx,
                                 )
                             }));
+                            if this.panel {
+                                this.excerpt = Some(model::description_excerpt(&details.body));
+                            }
                         }
                         this.details = Some(details);
                     }
@@ -718,7 +912,8 @@ impl Inbox {
     fn set_tab(&mut self, tab: Tab, cx: &mut Context<Self>) {
         self.tab = tab;
         self.extra_error = None;
-        let Some(item) = self.item() else {
+        let Some(item) = self.item().filter(|_| !self.offline) else {
+            cx.notify();
             return;
         };
         if tab == Tab::Summary

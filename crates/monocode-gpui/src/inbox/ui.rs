@@ -682,6 +682,232 @@ impl Inbox {
                 .child(message("Select an inbox item").text_size(px(13.)))
                 .into_any_element();
         };
+        if self.panel {
+            return self.panel_detail(&item, window, cx);
+        }
+        let body = match self.tab {
+            Tab::Summary => self.summary_view(&item, window, cx),
+            Tab::Code => self.diff_view(),
+            Tab::Checks => self.checks_view(cx),
+        };
+        div()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(self.detail_header(&item, window, cx))
+            .when_some(self.detail_error.clone(), |d, text| d.child(error(text)))
+            .child(body)
+            .into_any_element()
+    }
+
+    /// LinkedWorkItemPanel: a spinner until the item is fetched, then the
+    /// identity strip over the detail. On Summary the header scrolls away
+    /// with the description and discussion, as the panel's one scroll does.
+    fn panel_detail(&self, item: &Item, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if !self.linked_ready {
+            return match self.linked_error.clone() {
+                Some(text) => self.linked_error_view(item, text),
+                None => div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(crate::right_panel::spinner(
+                        "inbox-panel-loading",
+                        "loader",
+                        16.,
+                    ))
+                    .into_any_element(),
+            };
+        }
+        let summary = self.tab == Tab::Summary;
+        let body = match self.tab {
+            Tab::Summary => self.summary_view(item, window, cx),
+            Tab::Code => self.diff_view(),
+            Tab::Checks => self.checks_view(cx),
+        };
+        div()
+            .size_full()
+            .min_w_0()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .child(self.identity_row(item, cx))
+            .when(!summary, |d| {
+                d.child(self.detail_header(item, window, cx))
+                    .when_some(self.detail_error.clone(), |d, text| d.child(error(text)))
+            })
+            .child(body)
+            .into_any_element()
+    }
+
+    /// LinkedWorkItemError: why the item could not load, and a way out.
+    fn linked_error_view(&self, item: &Item, text: String) -> AnyElement {
+        let url = item.url.clone();
+        div()
+            .size_full()
+            .px(px(32.))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(12.))
+            .child(icon("circle-x", 20.).text_color(Hsla::from(rgb(0xfb7185)).opacity(0.9)))
+            .child(
+                div()
+                    .id("inbox-panel-error")
+                    .role(Role::Alert)
+                    .max_w(px(384.))
+                    .text_center()
+                    .text_size(px(12.))
+                    .text_color(content(0.55))
+                    .child(text),
+            )
+            .child(
+                icon_action("inbox-panel-open-github", "Open on GitHub", "external-link")
+                    .border_1()
+                    .border_color(content(0.1))
+                    .when(url.is_empty(), |d| d.opacity(0.4))
+                    .on_click(move |_, _, cx| {
+                        if !url.is_empty() {
+                            cx.open_url(&url);
+                        }
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn external_label(item: &Item) -> String {
+        format!(
+            "{} {}",
+            if item.kind == "pr" {
+                "Review on"
+            } else {
+                "Open in"
+            },
+            model::provider_label(&item.provider)
+        )
+    }
+
+    /// The kind, number, status and source line. The panel pins it as a
+    /// 36px strip with the external link and Open in Inbox at its end,
+    /// leaving room on the right for the panel's close button.
+    fn identity_row(&self, item: &Item, cx: &mut Context<Self>) -> AnyElement {
+        let is_pr = item.kind == "pr";
+        let row = div()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .text_size(px(12.))
+            .text_color(content(0.5))
+            .child(provider_mark(&item.provider))
+            .child(div().flex_shrink_0().child(if is_pr {
+                if item.provider == "gitlab" {
+                    "Merge request"
+                } else {
+                    "Pull request"
+                }
+            } else {
+                "Issue"
+            }))
+            .child(div().flex_shrink_0().child(item.reference()))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .text_color(status_color(item))
+                    .child(icon(status_icon(item), 14.).text_color(status_color(item)))
+                    .child(item.status()),
+            )
+            .when(!item.attention_reason.is_empty(), |d| {
+                d.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(accent_color())
+                        .child(attention_label(&item.attention_reason)),
+                )
+            })
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .child(if item.team_name.is_empty() {
+                        item.repo.clone()
+                    } else {
+                        item.team_name.clone()
+                    }),
+            );
+        if !self.panel {
+            return row.into_any_element();
+        }
+        let width = self.panel_width.clone();
+        let wide = self.panel_width.get() >= px(420.);
+        let label = Self::external_label(item);
+        let url = item.url.clone();
+        row.id("inbox-panel-identity")
+            .debug_selector(|| "inbox-panel-identity".into())
+            .relative()
+            .w_full()
+            .h(px(36.))
+            .flex_shrink_0()
+            .border_b_1()
+            .border_color(content(0.07))
+            .pl(px(16.))
+            .pr(px(34.))
+            .child(
+                canvas(
+                    move |bounds, _, _| width.set(bounds.size.width),
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full(),
+            )
+            .child(div().flex_1())
+            .child(
+                div()
+                    .id("inbox-panel-external")
+                    .role(Role::Link)
+                    .aria_label(label.clone())
+                    .flex_shrink_0()
+                    .h(px(26.))
+                    .px(px(8.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .rounded(px(6.))
+                    .text_color(content(0.7))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(content(0.1)).text_color(content(1.)))
+                    .when(url.is_empty(), |d| d.opacity(0.4))
+                    .child(icon("external-link", 14.).text_color(content(0.7)))
+                    .when(wide, |d| d.child(label))
+                    .on_click(move |_, _, cx| {
+                        if !url.is_empty() {
+                            cx.open_url(&url);
+                        }
+                    }),
+            )
+            .child(
+                icon_button("inbox-panel-expand", "Open in Inbox", "maximize-2")
+                    .size(px(26.))
+                    .flex_shrink_0()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        if let Some(item) = this.item() {
+                            cx.emit(Event::Expand(Box::new(item)));
+                        }
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// The title, people, actions and PR tabs above the detail's body.
+    fn detail_header(&self, item: &Item, window: &mut Window, cx: &mut Context<Self>) -> Div {
+        let panel = self.panel;
         let is_pr = item.kind == "pr";
         let details = self.details.clone().unwrap_or_default();
         let assignees = item
@@ -710,7 +936,13 @@ impl Inbox {
         } else {
             &details.head_ref_name
         };
-        let title = div()
+        let related = if panel {
+            Vec::new()
+        } else {
+            self.related_sessions(item)
+        };
+        let actions = !panel || (is_pr && item.provider == "github");
+        div()
             .w_full()
             .flex_shrink_0()
             .border_b_1()
@@ -718,63 +950,22 @@ impl Inbox {
             .child(
                 div()
                     .w_full()
-                    .px(px(12.))
-                    .pt(px(20.))
-                    .pb(px(if is_pr { 0. } else { 20. }))
+                    .px(px(if panel { 16. } else { 12. }))
+                    .pt(px(if panel { 16. } else { 20. }))
+                    .pb(px(match (is_pr, panel) {
+                        (true, _) => 0.,
+                        (false, true) => 16.,
+                        (false, false) => 20.,
+                    }))
                     .flex()
                     .flex_col()
-                    .gap(px(10.))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .text_size(px(12.))
-                            .text_color(content(0.5))
-                            .child(provider_mark(&item.provider))
-                            .child(if is_pr {
-                                if item.provider == "gitlab" {
-                                    "Merge request"
-                                } else {
-                                    "Pull request"
-                                }
-                            } else {
-                                "Issue"
-                            })
-                            .child(item.reference())
-                            .child(
-                                div()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(4.))
-                                    .text_color(status_color(&item))
-                                    .child(
-                                        icon(status_icon(&item), 14.)
-                                            .text_color(status_color(&item)),
-                                    )
-                                    .child(item.status()),
-                            )
-                            .when(!item.attention_reason.is_empty(), |d| {
-                                d.child(
-                                    div()
-                                        .text_color(accent_color())
-                                        .child(attention_label(&item.attention_reason)),
-                                )
-                            })
-                            .child(div().min_w_0().truncate().child(
-                                if item.team_name.is_empty() {
-                                    item.repo.clone()
-                                } else {
-                                    item.team_name.clone()
-                                },
-                            )),
-                    )
+                    .gap(px(if panel { 8. } else { 10. }))
+                    .when(!panel, |d| d.child(self.identity_row(item, cx)))
                     .child(
                         div()
                             .line_clamp(2)
-                            .text_size(px(20.))
-                            .line_height(px(25.))
+                            .text_size(px(if panel { 18. } else { 20. }))
+                            .line_height(px(if panel { 22.5 } else { 25. }))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(content(1.))
                             .child(item.title.clone()),
@@ -788,26 +979,27 @@ impl Inbox {
                             .overflow_hidden()
                             .text_size(px(12.))
                             .text_color(content(0.5))
+                            // People keep their names; the branch truncates first.
                             .when(!details.author.is_empty(), |d| {
-                                d.child(avatar::person(
+                                d.child(div().flex_shrink_0().child(avatar::person(
                                     &item.provider,
                                     &details.author,
                                     &details.author_avatar_url,
                                     16.,
                                     window,
                                     cx,
-                                ))
+                                )))
                             })
                             .when(!assignees.is_empty(), |d| {
                                 d.child("·").children(assignees.iter().map(|person| {
-                                    avatar::person(
+                                    div().flex_shrink_0().child(avatar::person(
                                         &item.provider,
                                         &person.login,
                                         &person.avatar_url,
                                         16.,
                                         window,
                                         cx,
-                                    )
+                                    ))
                                 }))
                             })
                             .when(
@@ -862,7 +1054,7 @@ impl Inbox {
                                 d.child("·").child(review_label(&details.review_decision))
                             }),
                     )
-                    .when(!self.related_sessions(&item).is_empty(), |d| {
+                    .when(!related.is_empty(), |d| {
                         d.child(
                             div()
                                 .min_w_0()
@@ -877,173 +1069,158 @@ impl Inbox {
                                         .text_color(content(0.45))
                                         .child("Related threads"),
                                 )
-                                .children(self.related_sessions(&item).into_iter().map(
-                                    |session| {
-                                        action(
-                                            format!("inbox-session-{}", session.id),
-                                            session.title,
-                                        )
+                                .children(related.into_iter().map(|session| {
+                                    action(format!("inbox-session-{}", session.id), session.title)
                                         .h(px(24.))
                                         .bg(content(0.05))
                                         .max_w(px(256.))
                                         .truncate()
-                                        .on_click(
-                                            cx.listener(move |_, _, _, cx| {
-                                                cx.emit(Event::OpenSession(session.id))
-                                            }),
-                                        )
-                                    },
-                                )),
+                                        .on_click(cx.listener(move |_, _, _, cx| {
+                                            cx.emit(Event::OpenSession(session.id))
+                                        }))
+                                })),
                         )
                     })
-                    .child(
-                        div()
-                            .pt(px(2.))
-                            .flex()
-                            .flex_wrap()
-                            .items_center()
-                            .gap(px(8.))
-                            .when(!is_pr, |d| {
-                                d.child(
-                                    action("inbox-send-agent", "Send to agent")
-                                        .px(px(12.))
-                                        .bg(content(1.))
-                                        .text_color(shell_fill())
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .when(self.detail_loading || self.details.is_none(), |d| {
-                                            d.opacity(0.4)
-                                        })
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            if !this.detail_loading && this.details.is_some() {
-                                                this.start(cx);
-                                            }
-                                        })),
-                                )
-                            })
-                            .when(!is_pr && item.project_path.is_empty(), |d| {
-                                d.child(
-                                    icon_action(
-                                        "inbox-choose-project",
-                                        &self.project_label(&self.start_project.to_string_lossy()),
-                                        "folder",
-                                    )
-                                    .relative()
-                                    .border_1()
-                                    .border_color(content(0.1))
-                                    .child(icon("chevron-down", 12.))
-                                    .child(self.project_anchor.probe())
-                                    .on_click(cx.listener(
-                                        |this, _, _, cx| {
-                                            this.project_picker = !this.project_picker;
-                                            cx.notify();
-                                        },
-                                    )),
-                                )
-                            })
-                            .when(is_pr && item.provider == "github", |d| {
-                                d.child(self.pr_actions(&item, cx))
-                            })
-                            .child(
-                                icon_action(
-                                    "inbox-open-external",
-                                    &format!(
-                                        "{} {}",
-                                        if is_pr { "Review on" } else { "Open in" },
-                                        model::provider_label(&item.provider)
-                                    ),
-                                    "external-link",
-                                )
-                                .when(item.url.is_empty(), |d| d.opacity(0.4))
-                                .on_click({
-                                    let url = item.url.clone();
-                                    move |_, _, cx| {
-                                        if !url.is_empty() {
-                                            cx.open_url(&url);
-                                        }
-                                    }
-                                }),
-                            ),
-                    )
-                    .when(is_pr, |d| {
+                    .when(actions, |d| {
                         d.child(
                             div()
-                                .id("inbox-pr-tabs")
-                                .role(Role::TabList)
-                                .aria_label("Pull request details")
-                                .h(px(36.))
+                                .pt(px(2.))
                                 .flex()
-                                .items_stretch()
-                                .gap(px(16.))
-                                .children(
-                                    [
-                                        (Tab::Summary, "Summary"),
-                                        (Tab::Code, "Code"),
-                                        (Tab::Checks, "Checks"),
-                                    ]
-                                    .into_iter()
-                                    .filter(|(tab, _)| {
-                                        *tab != Tab::Checks || item.provider == "github"
-                                    })
-                                    .map(|(tab, label)| {
-                                        plain_action(format!("inbox-tab-{label}"), label)
-                                            .role(Role::Tab)
-                                            .h_full()
-                                            .px_0()
-                                            .rounded_none()
-                                            .hover(|s| s.text_color(content(1.)))
-                                            .when(self.tab == tab, |d| {
-                                                d.border_b_2()
-                                                    .border_color(content(1.))
-                                                    .text_color(content(1.))
-                                            })
-                                            .when(tab == Tab::Checks, |d| {
-                                                let failed = self
-                                                    .checks
-                                                    .as_ref()
-                                                    .map(|checks| {
-                                                        checks
-                                                            .checks
-                                                            .iter()
-                                                            .filter(|check| {
-                                                                failed_check(&check.state)
-                                                            })
-                                                            .count()
-                                                    })
-                                                    .unwrap_or(0);
-                                                d.when(failed > 0, |d| {
-                                                    d.child(
-                                                        icon("circle-x", 13.)
-                                                            .text_color(rgb(0xf87171)),
-                                                    )
-                                                    .child(
-                                                        div()
-                                                            .text_color(rgb(0xf87171))
-                                                            .child(failed.to_string()),
-                                                    )
-                                                })
-                                            })
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.set_tab(tab, cx)
-                                            }))
-                                    }),
-                                ),
+                                .flex_wrap()
+                                .items_center()
+                                .gap(px(8.))
+                                .when(!is_pr && !panel, |d| {
+                                    d.child(
+                                        action("inbox-send-agent", "Send to agent")
+                                            .px(px(12.))
+                                            .bg(content(1.))
+                                            .text_color(shell_fill())
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .when(
+                                                self.detail_loading || self.details.is_none(),
+                                                |d| d.opacity(0.4),
+                                            )
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                if !this.detail_loading && this.details.is_some() {
+                                                    this.start(cx);
+                                                }
+                                            })),
+                                    )
+                                })
+                                .when(!is_pr && !panel && item.project_path.is_empty(), |d| {
+                                    d.child(
+                                        icon_action(
+                                            "inbox-choose-project",
+                                            &self.project_label(
+                                                &self.start_project.to_string_lossy(),
+                                            ),
+                                            "folder",
+                                        )
+                                        .relative()
+                                        .border_1()
+                                        .border_color(content(0.1))
+                                        .child(icon("chevron-down", 12.))
+                                        .child(self.project_anchor.probe())
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.project_picker = !this.project_picker;
+                                                cx.notify();
+                                            }),
+                                        ),
+                                    )
+                                })
+                                .when(is_pr && item.provider == "github", |d| {
+                                    d.child(self.pr_actions(item, cx))
+                                })
+                                .when(!panel, |d| {
+                                    d.child(
+                                        icon_action(
+                                            "inbox-open-external",
+                                            &Self::external_label(item),
+                                            "external-link",
+                                        )
+                                        .when(item.url.is_empty(), |d| d.opacity(0.4))
+                                        .on_click({
+                                            let url = item.url.clone();
+                                            move |_, _, cx| {
+                                                if !url.is_empty() {
+                                                    cx.open_url(&url);
+                                                }
+                                            }
+                                        }),
+                                    )
+                                }),
                         )
-                    }),
-            );
-        let body = match self.tab {
-            Tab::Summary => self.summary_view(&item, window, cx),
-            Tab::Code => self.diff_view(),
-            Tab::Checks => self.checks_view(cx),
-        };
+                    })
+                    .when(is_pr, |d| d.child(self.detail_tabs(item, cx))),
+            )
+    }
+
+    fn detail_tabs(&self, item: &Item, cx: &mut Context<Self>) -> AnyElement {
+        let files = self
+            .panel
+            .then(|| self.diff.as_ref().map(|diff| diff.files.len()))
+            .flatten();
         div()
-            .size_full()
-            .min_w_0()
-            .min_h_0()
+            .id("inbox-pr-tabs")
+            .role(Role::TabList)
+            .aria_label("Pull request details")
+            .h(px(36.))
             .flex()
-            .flex_col()
-            .child(title)
-            .when_some(self.detail_error.clone(), |d, text| d.child(error(text)))
-            .child(body)
+            .items_stretch()
+            .gap(px(16.))
+            .children(
+                [
+                    (Tab::Summary, "Summary"),
+                    (Tab::Code, "Code"),
+                    (Tab::Checks, "Checks"),
+                ]
+                .into_iter()
+                .filter(|(tab, _)| *tab != Tab::Checks || item.provider == "github")
+                .map(|(tab, label)| {
+                    plain_action(format!("inbox-tab-{label}"), label)
+                        .role(Role::Tab)
+                        .h_full()
+                        .px_0()
+                        .rounded_none()
+                        .hover(|s| s.text_color(content(1.)))
+                        .when(self.tab == tab, |d| {
+                            d.border_b_2()
+                                .border_color(content(1.))
+                                .text_color(content(1.))
+                        })
+                        .when(tab == Tab::Code, |d| {
+                            d.when_some(files, |d, files| {
+                                d.child(
+                                    div()
+                                        .text_color(content(0.4))
+                                        .font_features(crate::right_panel::tabular())
+                                        .child(files.to_string()),
+                                )
+                            })
+                        })
+                        .when(tab == Tab::Checks, |d| {
+                            let failed = self
+                                .checks
+                                .as_ref()
+                                .map(|checks| {
+                                    checks
+                                        .checks
+                                        .iter()
+                                        .filter(|check| failed_check(&check.state))
+                                        .count()
+                                })
+                                .unwrap_or(0);
+                            d.when(failed > 0, |d| {
+                                d.child(icon("circle-x", 13.).text_color(rgb(0xf87171)))
+                                    .child(
+                                        div().text_color(rgb(0xf87171)).child(failed.to_string()),
+                                    )
+                            })
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| this.set_tab(tab, cx)))
+                }),
+            )
             .into_any_element()
     }
 
@@ -1747,7 +1924,8 @@ impl Inbox {
     }
 
     fn summary_body_width(&self) -> Pixels {
-        (self.summary_width.get().min(px(1024.)) - px(24.)).max(px(1.))
+        let inset = if self.panel { 32. } else { 24. };
+        (self.summary_width.get().min(px(1024.)) - px(inset)).max(px(1.))
     }
 
     fn summary_view(&self, item: &Item, _: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -1839,6 +2017,15 @@ impl Inbox {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let can_post = !self.posting && !self.comment.read(cx).content.trim().is_empty();
+        if ix == 0 && self.panel {
+            return div()
+                .id(("inbox-summary-row", ix))
+                .w_full()
+                .child(self.detail_header(item, window, cx))
+                .when_some(self.detail_error.clone(), |d, text| d.child(error(text)))
+                .child(div().px(px(16.)).child(self.panel_intro(item, cx)))
+                .into_any_element();
+        }
         let body = if ix == 0 {
             div()
                 .pt(px(20.))
@@ -1979,8 +2166,373 @@ impl Inbox {
         div()
             .id(("inbox-summary-row", ix))
             .w_full()
-            .px(px(12.))
+            .px(px(if self.panel { 16. } else { 12. }))
             .child(body)
+            .into_any_element()
+    }
+
+    /// The panel's first Summary row: labels, InboxDescriptionSummary and,
+    /// for a PR, InboxPrChangesGlance.
+    fn panel_intro(&self, item: &Item, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .pt(px(20.))
+            .pb(px(20.))
+            .flex()
+            .flex_col()
+            .gap(px(24.))
+            .when(!item.labels.is_empty(), |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .gap(px(4.))
+                        .children(item.labels.iter().map(|label| label_badge(label, false))),
+                )
+            })
+            .child(self.description_summary(cx))
+            .when(item.kind == "pr", |d| d.child(self.changes_glance(cx)))
+            .when(self.thread.is_none(), |d| {
+                d.when_some(self.thread_error.clone(), |d, text| d.child(error(text)))
+            })
+            .into_any_element()
+    }
+
+    /// InboxDescriptionSummary: a few plain lines of a long or media-heavy
+    /// description, expanding to the full render in place.
+    fn description_summary(&self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(details) = &self.details else {
+            return if self.detail_loading {
+                message("Loading description…").into_any_element()
+            } else {
+                div().into_any_element()
+            };
+        };
+        let none = || {
+            div()
+                .text_size(px(13.))
+                .text_color(content(0.45))
+                .child("No description")
+                .into_any_element()
+        };
+        if details.body.trim().is_empty() {
+            return none();
+        }
+        let Some(document) = self.document.clone() else {
+            return none();
+        };
+        let excerpt = self.excerpt.clone().unwrap_or_default();
+        if !excerpt.truncated {
+            return div()
+                .w_full()
+                .child(document::DocumentElement::new(
+                    document,
+                    self.summary_body_width(),
+                    None,
+                ))
+                .into_any_element();
+        }
+        let expanded = self.description_expanded;
+        div()
+            .debug_selector(|| "inbox-description-summary".into())
+            .w_full()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .rounded(px(8.))
+            .border_1()
+            .border_color(content(0.07))
+            .bg(content(0.02))
+            .px(px(14.))
+            .py(px(12.))
+            .map(|d| {
+                if expanded {
+                    d.child(document::DocumentElement::new(
+                        document,
+                        self.summary_body_width() - px(30.),
+                        None,
+                    ))
+                } else if excerpt.text.is_empty() {
+                    d.child(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(content(0.45))
+                            .child("Description is media only"),
+                    )
+                } else {
+                    d.child(
+                        div()
+                            .line_clamp(4)
+                            .text_size(px(13.))
+                            .line_height(px(21.))
+                            .text_color(content(0.75))
+                            .child(excerpt.text.clone()),
+                    )
+                }
+            })
+            .child(
+                div()
+                    .id("inbox-description-toggle")
+                    .role(Role::Button)
+                    .aria_expanded(expanded)
+                    .flex()
+                    .items_center()
+                    .gap(px(4.))
+                    .text_size(px(12.))
+                    .text_color(content(0.5))
+                    .cursor_pointer()
+                    .hover(|s| s.text_color(content(1.)))
+                    .child(icon(
+                        if expanded {
+                            "chevron-up"
+                        } else {
+                            "chevron-down"
+                        },
+                        14.,
+                    ))
+                    .child(if expanded {
+                        "Show less"
+                    } else {
+                        "Show full description"
+                    })
+                    .when(!expanded && excerpt.images > 0, |d| {
+                        d.child(div().text_color(content(0.35)).child(format!(
+                            "· {} {}",
+                            excerpt.images,
+                            if excerpt.images == 1 {
+                                "image"
+                            } else {
+                                "images"
+                            }
+                        )))
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.description_expanded = !this.description_expanded;
+                        this.summary_scroll.remeasure_items(0..1);
+                        cx.notify();
+                    })),
+            )
+            .into_any_element()
+    }
+
+    /// InboxPrChangesGlance: the first six changed files with their churn,
+    /// each opening the Code tab on that file.
+    fn changes_glance(&self, cx: &mut Context<Self>) -> AnyElement {
+        const GLANCE_FILES: usize = 6;
+        let files = self
+            .diff
+            .as_ref()
+            .map(|diff| diff.files.as_slice())
+            .unwrap_or(&[]);
+        let max_churn = files
+            .iter()
+            .map(|file| file.additions + file.deletions)
+            .max()
+            .unwrap_or(0)
+            .max(1);
+        let wide = self.panel_width.get() >= px(420.);
+        let count = |n: i64| crate::right_panel::format_integer(n);
+        div()
+            .debug_selector(|| "inbox-pr-glance".into())
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .text_size(px(12.))
+                    .text_color(content(0.5))
+                    .child(div().text_color(content(0.7)).child("Changed files"))
+                    .when_some(self.diff.as_ref(), |d, diff| {
+                        d.child(
+                            div()
+                                .font_features(crate::right_panel::tabular())
+                                .child(format!(
+                                    "{} {}",
+                                    diff.files.len(),
+                                    if diff.files.len() == 1 {
+                                        "file"
+                                    } else {
+                                        "files"
+                                    }
+                                )),
+                        )
+                        .child(crate::diff_view::diff_counts(
+                            diff.additions.max(0).min(u32::MAX as i64) as u32,
+                            diff.deletions.max(0).min(u32::MAX as i64) as u32,
+                        ))
+                    })
+                    .when(self.glance_loading, |d| {
+                        d.child(crate::right_panel::spinner(
+                            "inbox-glance-loading",
+                            "loader",
+                            12.,
+                        ))
+                    })
+                    .child(div().flex_1())
+                    .when(!files.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .id("inbox-glance-all")
+                                .role(Role::Button)
+                                .flex()
+                                .items_center()
+                                .gap(px(2.))
+                                .cursor_pointer()
+                                .hover(|s| s.text_color(content(1.)))
+                                .child(if files.len() > GLANCE_FILES {
+                                    format!("View all {}", files.len())
+                                } else {
+                                    "View diff".into()
+                                })
+                                .child(icon("chevron-right", 14.))
+                                .on_click(
+                                    cx.listener(|this, _, _, cx| this.open_diff_file(None, cx)),
+                                ),
+                        )
+                    }),
+            )
+            .map(|d| {
+                if let (Some(text), None) = (self.glance_error.clone(), self.diff.as_ref()) {
+                    d.child(message(text).text_size(px(12.)))
+                } else if self.diff.is_some() && files.is_empty() {
+                    d.child(message("No file changes").text_size(px(12.)))
+                } else if files.is_empty() {
+                    d
+                } else {
+                    d.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .overflow_hidden()
+                            .rounded(px(8.))
+                            .border_1()
+                            .border_color(content(0.07))
+                            .children(files.iter().take(GLANCE_FILES).enumerate().map(
+                                |(ix, file)| {
+                                    let (dir, name) = match file.path.rfind('/') {
+                                        Some(slash) => file.path.split_at(slash + 1),
+                                        None => ("", file.path.as_str()),
+                                    };
+                                    let churn = file.additions + file.deletions;
+                                    let width =
+                                        (((churn as f32 / max_churn as f32) * 48.).round()).max(8.);
+                                    let added = if churn > 0 {
+                                        file.additions as f32 / churn as f32 * width
+                                    } else {
+                                        0.
+                                    };
+                                    let path = file.path.clone();
+                                    div()
+                                        .id(("inbox-glance-file", ix))
+                                        .role(Role::Button)
+                                        .aria_label(file.path.clone())
+                                        .w_full()
+                                        .min_w_0()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(8.))
+                                        .px(px(12.))
+                                        .py(px(6.))
+                                        .bg(content(0.02))
+                                        .when(ix > 0, |d| {
+                                            d.border_t_1().border_color(content(0.07))
+                                        })
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(content(0.05)))
+                                        .child(crate::file_icons::file_type_icon(
+                                            name, false, false, 16.,
+                                        ))
+                                        .child(
+                                            div()
+                                                .min_w_0()
+                                                .flex_1()
+                                                .flex()
+                                                .font_family(crate::fonts::mono())
+                                                .text_size(px(12.))
+                                                .child(
+                                                    div()
+                                                        .min_w_0()
+                                                        .truncate()
+                                                        .text_color(content(0.4))
+                                                        .child(dir.to_owned()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex_shrink_0()
+                                                        .text_color(content(0.85))
+                                                        .child(name.to_owned()),
+                                                ),
+                                        )
+                                        .when(wide, |d| {
+                                            d.child(
+                                                div()
+                                                    .flex_shrink_0()
+                                                    .w(px(width))
+                                                    .h(px(6.))
+                                                    .flex()
+                                                    .overflow_hidden()
+                                                    .rounded_full()
+                                                    .child(
+                                                        div().flex_shrink_0().w(px(added)).bg(
+                                                            Hsla::from(rgb(
+                                                                crate::right_panel::DIFF_ADD,
+                                                            ))
+                                                            .opacity(0.8),
+                                                        ),
+                                                    )
+                                                    .child(
+                                                        div().flex_1().bg(Hsla::from(rgb(
+                                                            crate::right_panel::DIFF_DEL,
+                                                        ))
+                                                        .opacity(0.8)),
+                                                    ),
+                                            )
+                                        })
+                                        .child(
+                                            div()
+                                                .w(px(80.))
+                                                .flex_shrink_0()
+                                                .flex()
+                                                .justify_end()
+                                                .gap(px(6.))
+                                                .text_size(px(11.))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .font_features(crate::right_panel::tabular())
+                                                .when(file.additions > 0, |d| {
+                                                    d.child(
+                                                        div()
+                                                            .text_color(rgb(
+                                                                crate::right_panel::DIFF_ADD,
+                                                            ))
+                                                            .child(format!(
+                                                                "+{}",
+                                                                count(file.additions)
+                                                            )),
+                                                    )
+                                                })
+                                                .when(file.deletions > 0, |d| {
+                                                    d.child(
+                                                        div()
+                                                            .text_color(rgb(
+                                                                crate::right_panel::DIFF_DEL,
+                                                            ))
+                                                            .child(format!(
+                                                                "-{}",
+                                                                count(file.deletions)
+                                                            )),
+                                                    )
+                                                }),
+                                        )
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.open_diff_file(Some(path.clone()), cx)
+                                        }))
+                                },
+                            )),
+                    )
+                }
+            })
             .into_any_element()
     }
 
@@ -2767,6 +3319,9 @@ impl gpui::Render for Inbox {
             self.focus_comment = false;
             window.focus(&self.comment.focus_handle(cx), cx);
         }
+        if self.panel {
+            return self.panel_view(window, cx).into_any_element();
+        }
         let list = self.list_view(cx);
         let detail = self.detail_view(window, cx);
         div()
@@ -2849,6 +3404,42 @@ impl gpui::Render for Inbox {
                     self.connection_dialog(cx),
                 ))
             })
+            .when(self.confirm_action.is_some(), |d| {
+                d.child(self.action_confirmation(cx))
+            })
+            .into_any_element()
+    }
+}
+
+impl Inbox {
+    /// LinkedWorkItemPanel's contents: the detail alone, with the menus its
+    /// PR actions open. Escape is the shell's, so it works from anywhere.
+    fn panel_view(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::Stateful<Div> {
+        let detail = self.detail_view(window, cx);
+        div()
+            .id("inbox-panel")
+            .debug_selector(|| "inbox-panel".into())
+            .role(Role::Group)
+            .aria_label("Linked work item")
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, _, cx| {
+                if event.keystroke.key == "escape" && this.has_overlay() {
+                    if this.confirm_action.is_some() && !this.acting {
+                        this.confirm_action = None;
+                    }
+                    this.action_menu = false;
+                    this.project_picker = false;
+                    cx.stop_propagation();
+                    cx.notify();
+                }
+            }))
+            .relative()
+            .size_full()
+            .min_w_0()
+            .flex()
+            .flex_col()
+            .child(detail)
+            .when(self.action_menu, |d| d.child(self.action_menu_view(cx)))
             .when(self.confirm_action.is_some(), |d| {
                 d.child(self.action_confirmation(cx))
             })
@@ -2966,6 +3557,94 @@ mod tests {
                 });
             })
             .unwrap();
+    }
+    #[gpui::test]
+    fn the_linked_panel_shows_a_compact_detail_with_a_description_lead_and_changed_files(
+        cx: &mut TestAppContext,
+    ) {
+        let item = Item {
+            provider: "github".into(),
+            kind: "pr".into(),
+            state: "open".into(),
+            title: "Show the diff stat on the peeked right panel".into(),
+            repo: "acme/app".into(),
+            number: 58,
+            ..Default::default()
+        };
+        let body = "Follow-up to #57.\n\n![shot](a.png)\n\n- one\n- two\n- three\n- four";
+        let window = cx.update(|cx| {
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        point(px(0.), px(0.)),
+                        size(px(520.), px(800.)),
+                    ))),
+                    ..Default::default()
+                },
+                |_, cx| {
+                    cx.new(|cx| {
+                        let store = Arc::new(Mutex::new(
+                            monocode_core::store::Store::open(std::path::Path::new(":memory:"))
+                                .unwrap(),
+                        ));
+                        let mut inbox =
+                            Inbox::linked(store, PathBuf::from("/repo"), item.clone(), cx);
+                        inbox.details = Some(Details {
+                            body: body.into(),
+                            author: "octocat".into(),
+                            ..Default::default()
+                        });
+                        inbox.document = Some(cx.new(|cx| {
+                            document::InboxDocument::new(body.into(), PathBuf::from("/repo"), cx)
+                        }));
+                        inbox.excerpt = Some(model::description_excerpt(body));
+                        inbox.diff = Some(Diff {
+                            additions: 40,
+                            deletions: 8,
+                            files: (0..8)
+                                .map(|ix| model::DiffFile {
+                                    path: format!("crates/app/src/file_{ix}.rs"),
+                                    additions: 5,
+                                    deletions: 1,
+                                })
+                                .collect(),
+                            ..Default::default()
+                        });
+                        inbox
+                    })
+                },
+            )
+            .unwrap()
+        });
+        let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        visual.refresh().unwrap();
+        for selector in [
+            "inbox-panel",
+            "inbox-panel-identity",
+            "inbox-description-summary",
+            "inbox-pr-glance",
+        ] {
+            assert!(
+                visual.debug_bounds(selector).is_some(),
+                "{selector} is shown"
+            );
+        }
+        let strip = visual.debug_bounds("inbox-panel-identity").unwrap();
+        assert_eq!(strip.size.height, px(36.));
+        window
+            .update(visual, |inbox, _, cx| {
+                assert!(inbox.excerpt.as_ref().unwrap().truncated);
+                assert_eq!(inbox.item().unwrap().key(), item.key());
+                // A glance row opens the Code tab on that file.
+                inbox.open_diff_file(Some("crates/app/src/file_2.rs".into()), cx);
+                assert!(inbox.tab == Tab::Code);
+            })
+            .unwrap();
+        visual.run_until_parked();
+        visual.refresh().unwrap();
+        assert!(visual.debug_bounds("inbox-panel-identity").is_some());
+        assert!(visual.debug_bounds("inbox-pr-glance").is_none());
     }
     #[gpui::test]
     fn switching_projects_drops_the_previous_projects_selection_and_detail(
