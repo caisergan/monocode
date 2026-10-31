@@ -63,6 +63,27 @@ pub(crate) struct ProjectRailGroup {
     pub mascot: Option<String>,
 }
 
+/// How many finished turns the activity card remembers.
+pub(crate) const DONE_KEEP: usize = 20;
+
+/// A session's latest finished turn, for the activity card's Done list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DoneTurn {
+    pub id: i64,
+    /// Unix milliseconds.
+    pub finished_at: u64,
+    pub duration_ms: Option<u64>,
+}
+
+impl Workspace {
+    /// Moves a session's finished turn to the top of the Done list.
+    pub(crate) fn record_done(&mut self, turn: DoneTurn) {
+        self.recent_done.retain(|done| done.id != turn.id);
+        self.recent_done.insert(0, turn);
+        self.recent_done.truncate(DONE_KEEP);
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub(crate) struct Workspace {
@@ -96,6 +117,10 @@ pub(crate) struct Workspace {
     pub sidebar_automations_visible: bool,
     pub sidebar_inbox_visible: bool,
     pub sidebar_activity_visible: bool,
+    /// The activity card's Done list stays folded until it is opened.
+    pub sidebar_done_open: bool,
+    /// Finished turns for the activity card's Done list, newest first.
+    pub recent_done: Vec<DoneTurn>,
     /// The inset right panel: open state, tab, width and tab order.
     pub right_panel_open: bool,
     pub right_panel_tab: crate::right_panel::RightTab,
@@ -312,6 +337,8 @@ impl Default for Workspace {
             sidebar_automations_visible: true,
             sidebar_inbox_visible: true,
             sidebar_activity_visible: true,
+            sidebar_done_open: false,
+            recent_done: Vec::new(),
             right_panel_open: false,
             right_panel_tab: Default::default(),
             right_panel_width: crate::right_panel::WIDTH_DEFAULT,
@@ -444,6 +471,8 @@ impl Workspace {
             appearance.normalize();
         }
         let mut known: HashSet<_> = sessions.iter().map(|s| s.0).collect();
+        state.recent_done.retain(|turn| known.contains(&turn.id));
+        state.recent_done.truncate(DONE_KEEP);
         state.review_owners.retain(|id, owner| {
             *id < 0
                 && known.contains(owner)
