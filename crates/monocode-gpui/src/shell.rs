@@ -11189,6 +11189,80 @@ mod tests {
         draw(cx);
     }
     #[gpui::test]
+    fn a_view_painted_uncached_after_cached_frames_renders_its_cached_children_afresh(
+        cx: &mut TestAppContext,
+    ) {
+        // The right panel's peek paints the panel cached once it settles and
+        // uncached while it fades, with its panes cached inside it.
+        struct Pane;
+        impl Render for Pane {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().occlude()
+            }
+        }
+        struct Panel(Entity<Pane>);
+        impl Render for Panel {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(
+                    self.0
+                        .clone()
+                        .cached(StyleRefinement::default().size_full()),
+                )
+            }
+        }
+        struct Root {
+            panel: Entity<Panel>,
+            cached: bool,
+            filler: usize,
+        }
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let panel = if self.cached {
+                    self.panel
+                        .clone()
+                        .cached(StyleRefinement::default().size_full())
+                        .into_any_element()
+                } else {
+                    self.panel.clone().into_any_element()
+                };
+                div()
+                    .size_full()
+                    .children((0..self.filler).map(|_| div().absolute().size(px(1.)).occlude()))
+                    .child(div().absolute().size(px(100.)).child(panel))
+            }
+        }
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |_, cx| {
+                let pane = cx.new(|_| Pane);
+                let panel = cx.new(|_| Panel(pane));
+                cx.new(|_| Root {
+                    panel,
+                    cached: true,
+                    filler: 50,
+                })
+            })
+            .unwrap()
+        });
+        let draw = |cx: &mut TestAppContext, change: fn(&mut Root)| {
+            window
+                .update(cx, |root, _, cx| {
+                    change(root);
+                    cx.notify();
+                })
+                .unwrap();
+            cx.update_window(window.into(), |_, w, cx| w.draw(cx).clear(cx))
+                .unwrap();
+        };
+        // The pane records its paint behind the filler.
+        draw(cx, |_| {});
+        // The filler goes while the panel replays its cached frame.
+        draw(cx, |root| root.filler = 0);
+        // Painted uncached, the panel's pane must not replay the indices it
+        // recorded two frames ago.
+        draw(cx, |root| root.cached = false);
+        draw(cx, |_| {});
+    }
+    #[gpui::test]
     fn main_pane_covers_a_fixed_sidebar_with_a_clipped_fade(cx: &mut TestAppContext) {
         use std::time::Duration;
         let (window, _, active) = window(cx);
