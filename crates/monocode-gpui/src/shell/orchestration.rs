@@ -928,6 +928,11 @@ impl Shell {
                     let model = settings.model.clone();
                     let effort = settings.effort.clone();
                     let access = settings.access.id();
+                    // Delegating from an ordinary thread makes it the lead.
+                    let became_lead = this
+                        .sessions
+                        .get(&lead)
+                        .is_some_and(|view| view.update(cx, |v, cx| v.become_lead(cx)));
                     if fresh {
                         this.draft_sessions.insert(id);
                         this.sidebar_hidden_sessions.remove(&id);
@@ -960,7 +965,11 @@ impl Shell {
                         }
                         this.persist(cx);
                     }
-                    json!({"name":name,"sessionId":id,"checkout":checkout,"branch":branch,"harness":harness,"model":model,"effort":effort,"runtimeMode":access,"state":"starting"})
+                    let mut started = json!({"name":name,"sessionId":id,"checkout":checkout,"branch":branch,"harness":harness,"model":model,"effort":effort,"runtimeMode":access,"state":"starting"});
+                    if became_lead {
+                        started["lead"] = orch::BECAME_LEAD.into();
+                    }
+                    started
                 });
                 this.invalidate_chrome(cx);
                 cx.notify();

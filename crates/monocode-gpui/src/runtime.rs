@@ -533,7 +533,14 @@ fn run_turn_using(
                     settings.orchestrator,
                 )
             );
-        } else if !raw_native_command && settings.operator_enabled {
+        } else if !raw_native_command && offers_delegation(&settings, &summary.cwd) {
+            let cli = std::env::current_exe().map_err(|e| e.to_string())?;
+            prompt = format!(
+                "{}\n\n{prompt}",
+                monocode_core::orchestration::delegation_hint(&shlex_quote(&cli.to_string_lossy()))
+            );
+        }
+        if !raw_native_command && settings.operator_enabled && !settings.orchestrator_enabled {
             let cli = std::env::current_exe().map_err(|e| e.to_string())?;
             prompt = format!(
                 "You have MonoCode app access for this project. Use the CLI: {} app ACTION --json JSON. Supported actions: models.list {{}}, sessions.list {{}}, sessions.read {{sessionId}}, sessions.start {{prompt,harness?,model?,title?,draft?,reveal?}}, sessions.send/draft {{sessionId,prompt}}, sessions.stop {{sessionId}}, folders.list {{}}, folders.move {{sessionId,folderId?,newFolderName?}}, notes.list {{}}, notes.read {{id}}, notes.write {{id?,title,body}}, worktrees.list {{}}. Scope is this thread's project. App credentials are in the environment; never print them. Respect the user’s request and selected access policy.\n\n{prompt}",
@@ -1135,6 +1142,56 @@ fn shlex_quote(text: &str) -> String {
             .replace('$', "\\$")
             .replace('`', "\\`")
     )
+}
+
+/// A thread that is not a lead yet can still hand work to agents when the
+/// user asks, if this turn may change things and the thread has app access.
+fn offers_delegation(settings: &monocode_core::agent::Settings, cwd: &str) -> bool {
+    settings.mono.is_none()
+        && !settings.text_only
+        && !settings.plan
+        && settings.access != monocode_core::agent::AccessMode::ReadOnly
+        && !cwd.starts_with("remote://")
+        && settings
+            .environment
+            .contains_key(monocode_core::mono::bridge::SESSION_ENV)
+}
+
+#[cfg(test)]
+mod delegation_tests {
+    use super::offers_delegation;
+    use monocode_core::agent::{AccessMode, Settings};
+
+    #[test]
+    fn only_local_threads_with_app_access_that_may_change_things_offer_delegation() {
+        let thread = Settings {
+            environment: [(
+                monocode_core::mono::bridge::SESSION_ENV.to_owned(),
+                "7".to_owned(),
+            )]
+            .into(),
+            ..Default::default()
+        };
+        assert!(offers_delegation(&thread, "/repo"));
+        // Agents and background jobs get no app credentials.
+        assert!(!offers_delegation(&Settings::default(), "/repo"));
+        assert!(!offers_delegation(&thread, "remote://host/repo"));
+        let plan = Settings {
+            plan: true,
+            ..thread.clone()
+        };
+        assert!(!offers_delegation(&plan, "/repo"));
+        let read_only = Settings {
+            access: AccessMode::ReadOnly,
+            ..thread.clone()
+        };
+        assert!(!offers_delegation(&read_only, "/repo"));
+        let text = Settings {
+            text_only: true,
+            ..thread
+        };
+        assert!(!offers_delegation(&text, "/repo"));
+    }
 }
 
 #[cfg(test)]

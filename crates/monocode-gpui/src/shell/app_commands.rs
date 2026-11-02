@@ -153,10 +153,24 @@ impl Shell {
             .sessions
             .get(&call.session)
             .map(|v| v.read(cx))
-            .filter(|v| v.settings.operator_enabled || v.settings.orchestrator_enabled)
             .ok_or("Operator is not enabled for this thread.")?;
-        if agents && !caller.settings.orchestrator_enabled {
-            return Err("agents.* actions belong to Orchestrator threads. Turn on /orchestrator in this thread first.".into());
+        if self.orchestration_worker(call.session) {
+            return Err(
+                "Agents cannot use MonoCode app actions or start agents of their own; report back to your lead instead."
+                    .into(),
+            );
+        }
+        // Any thread may hand work to agents when the user asks; its first
+        // agents.start makes it their lead. The catalog helps it brief them.
+        let delegation = (agents
+            || matches!(call.action.as_str(), "models.list" | "worktrees.list"))
+            && !self
+                .monos
+                .as_ref()
+                .is_some_and(|m| m.read(cx).is_mono_session(call.session));
+        if !delegation && !caller.settings.operator_enabled && !caller.settings.orchestrator_enabled
+        {
+            return Err("Operator is not enabled for this thread.".into());
         }
         if caller.summary.cwd.starts_with("remote://") {
             return Err("Operator is not available on remote projects".into());

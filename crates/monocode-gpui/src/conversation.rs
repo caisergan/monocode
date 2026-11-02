@@ -3105,6 +3105,30 @@ impl Conversation {
                 monocode_core::context::format_tokens(usage.window.unwrap_or(0))
             )
         });
+        // A lead keeps Orchestrator after its first message; show it as long
+        // as the mode is selected or the thread leads agents.
+        let lead = self.settings.orchestrator_enabled;
+        let orchestrator = (lead || self.settings.orchestrator).then(|| {
+            let color = input::Command::Orchestrator.color();
+            div()
+                .id("composer-orchestrator")
+                .debug_selector(|| "composer-orchestrator".into())
+                .role(Role::Status)
+                .aria_label(if lead {
+                    "Orchestrator: this thread leads agents in their own sessions"
+                } else {
+                    "Orchestrator: sending makes this thread lead agents in their own sessions"
+                })
+                .flex_shrink_0()
+                .h(px(24.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .text_size(px(12.))
+                .text_color(color)
+                .child(icon("share", 14.).text_color(color))
+                .child("Orchestrator")
+        });
         div()
             .min_w_0()
             .flex()
@@ -3141,6 +3165,7 @@ impl Conversation {
                         })),
                 )
             })
+            .children(orchestrator)
             .child(
                 div()
                     .ml_auto()
@@ -4266,6 +4291,43 @@ mod menu_tests {
             .unwrap();
         visual.refresh().unwrap();
         assert!(visual.debug_bounds("provider-status").is_some());
+    }
+
+    #[gpui::test]
+    fn the_composer_shows_orchestrator_while_selected_and_once_the_thread_leads(
+        cx: &mut TestAppContext,
+    ) {
+        let store = Store::open(Path::new(":memory:")).unwrap();
+        let summary = store.create("codex", "/work").unwrap();
+        let store = Arc::new(Mutex::new(store));
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |_, cx| {
+                cx.new(|cx| Conversation::new(summary, store, cx))
+            })
+            .unwrap()
+        });
+        let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.refresh().unwrap();
+        assert!(visual.debug_bounds("composer-orchestrator").is_none());
+        // Selected for the next message.
+        window
+            .update(visual, |c, _, cx| {
+                c.settings.orchestrator = true;
+                cx.notify();
+            })
+            .unwrap();
+        visual.refresh().unwrap();
+        assert!(visual.debug_bounds("composer-orchestrator").is_some());
+        // Sending clears the selection; the thread stays a lead.
+        window
+            .update(visual, |c, _, cx| {
+                c.settings.orchestrator = false;
+                c.settings.orchestrator_enabled = true;
+                cx.notify();
+            })
+            .unwrap();
+        visual.refresh().unwrap();
+        assert!(visual.debug_bounds("composer-orchestrator").is_some());
     }
 
     #[gpui::test]

@@ -74,32 +74,103 @@ fn wake_ups(window: WindowHandle<Shell>, lead: i64, cx: &mut TestAppContext) -> 
 }
 
 #[gpui::test]
-fn agents_actions_belong_to_orchestrator_threads(cx: &mut TestAppContext) {
+fn an_ordinary_thread_delegates_and_its_first_agent_makes_it_the_lead(cx: &mut TestAppContext) {
+    let (window, _, caller) = crate::shell::tests::window(cx);
+    window
+        .update(cx, |shell, _, cx| {
+            shell.sessions[&caller].update(cx, |v, _| v.summary.provider = "fixture".into());
+        })
+        .unwrap();
+    cx.run_until_parked();
+    // Without Operator or Orchestrator a thread has only delegation.
+    assert_eq!(
+        call(window, caller, "sessions", "sessions.list", json!({}), cx).unwrap_err(),
+        "Operator is not enabled for this thread."
+    );
+    let list = call(window, caller, "list-1", "agents.list", json!({}), cx).unwrap();
+    assert_eq!(list["agents"], json!([]));
+    window
+        .update(cx, |shell, _, cx| {
+            assert!(
+                !shell.sessions[&caller]
+                    .read(cx)
+                    .settings
+                    .orchestrator_enabled
+            );
+        })
+        .unwrap();
+
+    let started = call(
+        window,
+        caller,
+        "start-api",
+        "agents.start",
+        json!({"name":"api","prompt":"Fix the login bug","workspace":"shared"}),
+        cx,
+    )
+    .unwrap();
+    assert!(
+        started["lead"]
+            .as_str()
+            .unwrap()
+            .starts_with("This thread now leads its agents")
+    );
+    let agent = started["sessionId"].as_i64().unwrap();
+    window
+        .update(cx, |shell, _, cx| {
+            let lead = shell.sessions[&caller].read(cx);
+            assert!(lead.settings.orchestrator_enabled && lead.settings.operator_enabled);
+            assert!(!lead.settings.orchestrator, "no composer mode was selected");
+            let saved = locked(&shell.store)
+                .unwrap()
+                .agent_settings(caller)
+                .unwrap()
+                .unwrap();
+            assert!(saved.orchestrator_enabled && saved.operator_enabled);
+            assert_eq!(shell.orchestration_summaries[&caller].tasks[0].name, "api");
+        })
+        .unwrap();
+    // The new lead hears about its agent like any lead.
+    let updates = wake_ups(window, caller, cx);
+    assert_eq!(updates.len(), 1);
+    assert!(updates[0].contains("api failed"));
+    // A lead keeps Operator's actions, and later starts carry no lead note.
+    assert!(call(window, caller, "sessions-2", "sessions.list", json!({}), cx).is_ok());
+    let second = call(
+        window,
+        caller,
+        "start-docs",
+        "agents.start",
+        json!({"name":"docs","prompt":"Write the README","workspace":"shared"}),
+        cx,
+    )
+    .unwrap();
+    assert!(second.get("lead").is_none());
+
+    // An agent cannot start agents of its own, nor use other app actions.
+    for (request, action, input) in [
+        (
+            "nested",
+            "agents.start",
+            json!({"name":"sub","prompt":"Help"}),
+        ),
+        ("models", "models.list", json!({})),
+    ] {
+        assert!(
+            call(window, agent, request, action, input, cx)
+                .unwrap_err()
+                .starts_with("Agents cannot use MonoCode app actions")
+        );
+    }
+}
+
+#[gpui::test]
+fn sending_with_orchestrator_selected_makes_a_lead(cx: &mut TestAppContext) {
     let (window, _, caller) = crate::shell::tests::window(cx);
     window
         .update(cx, |shell, _, cx| {
             shell.sessions[&caller].update(cx, |v, cx| {
                 v.summary.provider = "fixture".into();
-                v.install_transfer(
-                    Settings {
-                        operator_enabled: true,
-                        ..Default::default()
-                    },
-                    None,
-                    cx,
-                )
-            });
-        })
-        .unwrap();
-    cx.run_until_parked();
-    assert!(
-        call(window, caller, "list-1", "agents.list", json!({}), cx)
-            .unwrap_err()
-            .contains("Orchestrator threads")
-    );
-    window
-        .update(cx, |shell, _, cx| {
-            shell.sessions[&caller].update(cx, |v, cx| {
                 v.quick_submit(
                     "/orchestrator Lead this work".into(),
                     v.settings.clone(),
