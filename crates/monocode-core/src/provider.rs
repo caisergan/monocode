@@ -1533,31 +1533,10 @@ fn run_operation(
                 config["alwaysThinkingEnabled"] = true.into();
             }
             if let Some(effort) = settings.effort.as_deref().filter(|e| *e != "ultrathink") {
-                let effort = if effort == "ultracode" {
+                if effort == "ultracode" {
                     config["ultracode"] = true.into();
-                    "xhigh"
-                } else if effort == "xhigh"
-                    && request.model.as_deref().is_some_and(|m| {
-                        matches!(
-                            m,
-                            "claude-opus-4-6"
-                                | "claude-sonnet-4-6"
-                                | "claude-opus-4-5"
-                                | "claude-haiku-4-5"
-                                | "claude-opus-4-1"
-                                | "claude-opus-4-0"
-                                | "claude-sonnet-4-0"
-                                | "claude-sonnet-4-5"
-                        )
-                    })
-                {
-                    "max"
-                } else if effort == "max" && request.model.as_deref() == Some("claude-sonnet-4-6") {
-                    "high"
-                } else {
-                    effort
-                };
-                command.args(["--effort", effort]);
+                }
+                command.args(["--effort", claude_effort(effort, request.model.as_deref())]);
             }
             command.args(["--settings", &config.to_string()]);
             if !settings.text_only {
@@ -1896,9 +1875,59 @@ fn run_operation(
     result
 }
 
+/// The `--effort` level Claude Code takes for `effort` on `model`: ultracode
+/// runs xhigh, models without xhigh run max, and Sonnet 4.6 tops out at high.
+/// A dated ID such as claude-haiku-4-5-20251001 counts as its family's model.
+fn claude_effort<'a>(effort: &'a str, model: Option<&str>) -> &'a str {
+    let model = model.map(|m| match m.rsplit_once('-') {
+        Some((family, date)) if date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()) => {
+            family
+        }
+        _ => m,
+    });
+    match effort {
+        "ultracode" => "xhigh",
+        "xhigh"
+            if model.is_some_and(|m| {
+                matches!(
+                    m,
+                    "claude-opus-4-6"
+                        | "claude-sonnet-4-6"
+                        | "claude-opus-4-5"
+                        | "claude-haiku-4-5"
+                        | "claude-opus-4-1"
+                        | "claude-opus-4-0"
+                        | "claude-sonnet-4-0"
+                        | "claude-sonnet-4-5"
+                )
+            }) =>
+        {
+            "max"
+        }
+        "max" if model == Some("claude-sonnet-4-6") => "high",
+        _ => effort,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn claude_effort_fits_the_level_to_the_model_also_for_dated_ids() {
+        assert_eq!(claude_effort("ultracode", Some("opus")), "xhigh");
+        assert_eq!(claude_effort("xhigh", Some("claude-opus-5-5")), "xhigh");
+        assert_eq!(claude_effort("xhigh", Some("claude-haiku-4-5")), "max");
+        assert_eq!(
+            claude_effort("xhigh", Some("claude-haiku-4-5-20251001")),
+            "max"
+        );
+        assert_eq!(claude_effort("max", Some("claude-sonnet-4-6")), "high");
+        assert_eq!(
+            claude_effort("high", Some("claude-haiku-4-5-20251001")),
+            "high"
+        );
+        assert_eq!(claude_effort("medium", None), "medium");
+    }
     fn protocol(kind: Kind) -> Protocol {
         Protocol::new(Request {
             kind,

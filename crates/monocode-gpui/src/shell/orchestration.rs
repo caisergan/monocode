@@ -212,9 +212,41 @@ impl Shell {
         self.deliver_agent_events(lead, cx);
     }
 
+    /// Drop "needs input" events whose request was decided meanwhile, by the
+    /// lead or by the user in the agent's chat or an approval toast.
+    fn drop_answered(&mut self, lead: i64, cx: &App) {
+        let Some(entry) = self.orchestrations.leads.get(&lead) else {
+            return;
+        };
+        let pending: Vec<bool> = entry
+            .mailbox
+            .iter()
+            .map(|event| match &event.kind {
+                EventKind::Blocked(request) => {
+                    self.sessions.get(&event.session).is_none_or(|view| {
+                        view.read(cx)
+                            .agent_observation(cx)
+                            .requests
+                            .iter()
+                            .any(|r| r.id == request.id)
+                    })
+                }
+                _ => true,
+            })
+            .collect();
+        if pending.iter().all(|keep| *keep) {
+            return;
+        }
+        if let Some(entry) = self.orchestrations.leads.get_mut(&lead) {
+            let mut keep = pending.into_iter();
+            entry.mailbox.retain(|_| keep.next().unwrap_or(true));
+        }
+    }
+
     /// Hand `agents.wait` callers the events they asked for; those events are
     /// then not sent again as a wake-up.
     fn answer_waits(&mut self, lead: i64, cx: &mut Context<Self>) {
+        self.drop_answered(lead, cx);
         let Some(entry) = self.orchestrations.leads.get_mut(&lead) else {
             return;
         };
@@ -252,6 +284,7 @@ impl Shell {
         let Some(view) = self.ensure_session(lead, cx) else {
             return;
         };
+        self.drop_answered(lead, cx);
         let Some(entry) = self.orchestrations.leads.get(&lead) else {
             return;
         };
@@ -386,6 +419,7 @@ impl Shell {
     }
 
     fn list_agents(&mut self, lead: i64, cx: &mut Context<Self>) -> Value {
+        self.drop_answered(lead, cx);
         let tasks = self
             .orchestration_summaries
             .get(&lead)
@@ -431,6 +465,9 @@ impl Shell {
                     let observation = chat.agent_observation(cx);
                     if let Some(branch) = chat.agent_branch() {
                         value["branch"] = json!(branch);
+                    }
+                    if let Value::Object(launch) = chat.agent_launch() {
+                        value.as_object_mut().unwrap().extend(launch);
                     }
                     if !observation.requests.is_empty() {
                         value["needsInput"] = json!(
@@ -483,6 +520,7 @@ impl Shell {
         .to_owned();
         // Reading a settled agent's final message is hearing about its turn:
         // that turn's update is not sent again. Pending requests still are.
+        self.drop_answered(call.session, cx);
         if mode == "last"
             && state.settled()
             && let Some(entry) = self.orchestrations.leads.get_mut(&call.session)
@@ -780,21 +818,31 @@ impl Shell {
                     launch[key] = value.clone();
                 }
             }
+            let cached = || {
+                monocode_core::catalog::cached_models_for(kind, &settings.account)
+                    .unwrap_or_default()
+            };
             let models = if ["model", "modelSettings", "effort"]
                 .iter()
                 .any(|key| input.get(*key).is_some())
             {
-                monocode_core::catalog::models_for(kind, &settings.account)?
+                match monocode_core::catalog::models_for(kind, &settings.account) {
+                    Ok(models) => models,
+                    // These CLIs resolve a named model themselves; the catalog
+                    // only adds defaults.
+                    Err(_) if matches!(kind, Kind::Claude | Kind::Codex) => cached(),
+                    Err(e) => return Err(e),
+                }
             } else {
-                monocode_core::catalog::cached_models_for(kind, &settings.account)
-                    .unwrap_or_default()
+                cached()
             };
             let source = if harness == provider {
                 kind.id()
             } else {
                 provider.as_str()
             };
-            let mut settings = app::launch_settings(&launch, source, settings, kind, &models)?;
+            let mut settings =
+                app::launch_settings_for(&launch, source, settings, kind, &models, true)?;
             settings.revision = 0;
             let prompt = app::prompt(&input)?;
             let title = app::optional_text(&input, "title", 160)?.unwrap_or_else(|| {
@@ -869,6 +917,8 @@ impl Shell {
                     let id = summary.id;
                     let checkout = settings.worktree_cwd.clone().unwrap_or_else(|| summary.cwd.clone());
                     let model = settings.model.clone();
+                    let effort = settings.effort.clone();
+                    let access = settings.access.id();
                     if fresh {
                         this.draft_sessions.insert(id);
                         this.sidebar_hidden_sessions.remove(&id);
@@ -901,7 +951,7 @@ impl Shell {
                         }
                         this.persist(cx);
                     }
-                    json!({"name":name,"sessionId":id,"checkout":checkout,"branch":branch,"harness":harness,"model":model,"state":"starting"})
+                    json!({"name":name,"sessionId":id,"checkout":checkout,"branch":branch,"harness":harness,"model":model,"effort":effort,"runtimeMode":access,"state":"starting"})
                 });
                 this.invalidate_chrome(cx);
                 cx.notify();
