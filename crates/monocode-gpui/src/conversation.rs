@@ -1,4 +1,5 @@
 mod accounts;
+pub(crate) mod agents;
 mod approvals;
 mod attachment_drop;
 mod background_tasks;
@@ -166,10 +167,6 @@ pub(crate) struct Conversation {
     app_environment: std::collections::HashMap<String, String>,
     /// The running turn's policy, independent of the next composer's mode.
     pub(crate) app_read_only: bool,
-    planning_orchestration: bool,
-    pub(crate) orchestration_plan: Option<monocode_core::orchestration::Plan>,
-    orchestration_error: Option<String>,
-    pub(crate) orchestration_progress: Option<String>,
     status: String,
     loaded: bool,
     history_unloaded: bool,
@@ -614,10 +611,6 @@ impl Conversation {
             attachment_error: None,
             app_environment: Default::default(),
             app_read_only: false,
-            planning_orchestration: false,
-            orchestration_plan: None,
-            orchestration_error: None,
-            orchestration_progress: None,
             status: "Loading conversation…".into(),
             loaded: false,
             history_unloaded: false,
@@ -1010,9 +1003,6 @@ impl Conversation {
             }
             return;
         }
-        self.planning_orchestration = self.settings.orchestrator;
-        self.orchestration_plan = None;
-        self.orchestration_error = None;
         self.launch_prompt(prompt, cx);
         if self.busy && mode.is_some() {
             self.clear_submitted_mode(cx);
@@ -1118,9 +1108,10 @@ impl Conversation {
         // Composer modes reset after Send; the thread grant and running turn's
         // access policy must outlive that reset and edits to the next draft.
         self.settings.operator_enabled |= self.settings.operator;
-        self.app_read_only = self.settings.plan
-            || self.settings.orchestrator
-            || self.settings.access == AccessMode::ReadOnly;
+        // An orchestrator lead keeps app access and its agents across turns.
+        self.settings.orchestrator_enabled |= self.settings.orchestrator;
+        self.settings.operator_enabled |= self.settings.orchestrator_enabled;
+        self.app_read_only = self.settings.plan || self.settings.access == AccessMode::ReadOnly;
         let mut settings = self.settings.clone();
         if let Some(model) = self.model_info() {
             for control in &model.controls {
@@ -1183,8 +1174,6 @@ impl Conversation {
                 .update(cx, |view, cx| view.submit_prompt(&prompt, &settings, cx));
         }
         if settings.orchestrator {
-            settings.plan = true;
-            settings.operator = false;
             self.settings.orchestrator = false;
         }
         if self.settings.handoff.take().is_some() {
@@ -1389,47 +1378,8 @@ impl Conversation {
                             let events = cx.subscribe(
                                 &card,
                                 |this, _, reply: &crate::questions::Answered, cx| {
-                                    if this
-                                        .questions
-                                        .front()
-                                        .is_none_or(|(card, _)| card.read(cx).id() != reply.id)
-                                    {
-                                        return;
-                                    }
-                                    let before = this.needs_approval();
-                                    let decision = reply
-                                        .answers
-                                        .clone()
-                                        .map_or(Decision::Deny, Decision::Answer);
-                                    if this.controls.as_ref().is_none_or(|controls| {
-                                        controls
-                                            .send(Control {
-                                                id: reply.id.clone(),
-                                                decision,
-                                            })
-                                            .is_err()
-                                    }) {
-                                        this.status =
-                                            "The provider is no longer waiting for this answer"
-                                                .into();
-                                        cx.notify();
-                                        return;
-                                    }
-                                    if let Some((card, _)) = this.questions.pop_front() {
-                                        this.question_overlay.release(card, cx);
-                                    }
-                                    this.status = if !this.approvals.is_empty() {
-                                        "Waiting for approval"
-                                    } else if !this.questions.is_empty() {
-                                        "Waiting for your answer"
-                                    } else {
-                                        "Working…"
-                                    }
-                                    .into();
-                                    if before != this.needs_approval() {
-                                        cx.emit(SessionChanged);
-                                    }
-                                    cx.notify();
+                                    let _ =
+                                        this.resolve_question(&reply.id, reply.answers.clone(), cx);
                                 },
                             );
                             let keep_open = cx.subscribe(
@@ -1509,12 +1459,6 @@ impl Conversation {
                                     info.model_id = model_id;
                                 }
                             });
-                            if stopping {
-                                this.planning_orchestration = false;
-                                this.orchestration_progress = None;
-                            } else {
-                                this.finish_orchestration_plan(cx);
-                            }
                             this.settings.turns = this.transcript.read(cx).window_turns();
                             this.save_settings(cx);
                             this.link_created_pull_requests(cx);
@@ -1567,8 +1511,6 @@ impl EventEmitter<ChooseFolder> for Conversation {}
 impl EventEmitter<OpenSessionChanges> for Conversation {}
 impl EventEmitter<OpenSession> for Conversation {}
 impl EventEmitter<Transfer> for Conversation {}
-impl EventEmitter<composer_features::StartOrchestration> for Conversation {}
-impl EventEmitter<composer_features::StopOrchestration> for Conversation {}
 
 impl Conversation {
     pub(crate) fn install_transfer(
@@ -2549,8 +2491,7 @@ impl Conversation {
                             .disabled(self.is_remote())
                             .icon("share")
                             .icon_color(tint(FUCHSIA_300, 0.65))
-                            .badge("v1")
-                            .description("Plan and coordinate agent work"),
+                            .description("Lead agents in their own sessions"),
                         MenuAction::new("draft", "Draft")
                             .icon("circle-dashed-hi")
                             .description("Save this message without starting the agent")
@@ -2836,7 +2777,6 @@ impl Conversation {
             .child(self.composer_anchor.probe())
             .children(menu)
             .children(self.model_list_popover(cx))
-            .children(self.orchestration_card(cx))
             .children(if self.is_remote() { None } else { self.usage_notice(false, cx) })
             .child(self.background_shelf(window, cx))
             .children(self.subagent_dock(cx))

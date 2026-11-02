@@ -44,7 +44,7 @@ const COMMANDS: [(Command, &str); 4] = [
         Command::Operator,
         "Give this thread access to MonoCode sessions, folders, and notes.",
     ),
-    (Command::Orchestrator, "Plan and coordinate agent work."),
+    (Command::Orchestrator, "Lead agents in their own sessions."),
     (
         Command::Draft,
         "Save this message without starting the agent.",

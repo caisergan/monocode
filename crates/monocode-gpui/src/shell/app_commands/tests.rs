@@ -147,36 +147,34 @@ fn unsent_operator_selection_does_not_grant_app_access(cx: &mut TestAppContext) 
 
 #[gpui::test]
 fn operator_planning_turns_keep_read_only_app_access_after_submission(cx: &mut TestAppContext) {
-    for mode in ["plan", "orchestrator"] {
-        let (window, _, caller) = setup(cx);
-        window
-            .update(cx, |shell, _, cx| {
-                shell.sessions[&caller].update(cx, |view, cx| {
-                    view.summary.provider = "fixture".into();
-                    view.quick_submit(
-                        format!("/{mode} Inspect my sessions"),
-                        view.settings.clone(),
-                        cx,
-                    );
-                    assert!(view.busy);
-                    assert!(!view.settings.plan && !view.settings.orchestrator);
-                });
-            })
-            .unwrap();
-        assert!(call(window, caller, "plan-read", "sessions.list", json!({}), cx).is_ok());
-        assert!(
-            call(
-                window,
-                caller,
-                "plan-write",
-                "notes.write",
-                json!({"title":"Do not save", "body":"Plan only"}),
-                cx,
-            )
-            .unwrap_err()
-            .contains("read-only")
-        );
-    }
+    let (window, _, caller) = setup(cx);
+    window
+        .update(cx, |shell, _, cx| {
+            shell.sessions[&caller].update(cx, |view, cx| {
+                view.summary.provider = "fixture".into();
+                view.quick_submit(
+                    "/plan Inspect my sessions".into(),
+                    view.settings.clone(),
+                    cx,
+                );
+                assert!(view.busy);
+                assert!(!view.settings.plan);
+            });
+        })
+        .unwrap();
+    assert!(call(window, caller, "plan-read", "sessions.list", json!({}), cx).is_ok());
+    assert!(
+        call(
+            window,
+            caller,
+            "plan-write",
+            "notes.write",
+            json!({"title":"Do not save", "body":"Plan only"}),
+            cx,
+        )
+        .unwrap_err()
+        .contains("read-only")
+    );
 }
 
 #[gpui::test]

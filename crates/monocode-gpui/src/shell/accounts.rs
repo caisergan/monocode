@@ -125,6 +125,7 @@ impl Shell {
         settings.handoff = None;
         settings.turns.clear();
         settings.operator_enabled = false;
+        settings.orchestrator_enabled = false;
         settings.revision = 0;
         let cwd = current.summary.cwd.clone();
         let store = self.store.clone();

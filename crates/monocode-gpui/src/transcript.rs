@@ -146,6 +146,12 @@ enum Body {
     Visual(Arc<monocode_core::visual::VisualDocument>),
     Plain(SharedString),
     Interjection(monocode_core::transcript::Interjection),
+    /// An orchestrator lead's wake-up turn: one line, expanding to what the
+    /// lead was told.
+    AgentUpdate {
+        summary: SharedString,
+        detail: SharedString,
+    },
     MonoCard(serde_json::Value),
     /// A queued message's bubble, by its index in `pending`.
     Pending(usize),
@@ -690,6 +696,7 @@ impl TranscriptView {
                     Body::Markdown(md) => markdown::row_text(md),
                     Body::Plain(text) => text.to_string(),
                     Body::Interjection(note) => note.text.clone(),
+                    Body::AgentUpdate { summary, detail } => format!("{summary}\n{detail}"),
                     Body::Tool { .. } => query.to_owned(),
                     _ => String::new(),
                 };
@@ -3280,6 +3287,22 @@ impl TranscriptView {
                         thought_phase: None,
                     });
                 }
+            } else if role == "mono-system"
+                && let Some((summary, detail)) = monocode_core::orchestration::update_parts(&text)
+            {
+                self.rows.push(UiRow {
+                    key: (0, 0),
+                    body: Body::AgentUpdate {
+                        summary: summary.into(),
+                        detail: detail.into(),
+                    },
+                    message,
+                    first: false,
+                    last: false,
+                    work: false,
+                    work_tail: false,
+                    thought_phase: None,
+                });
             } else if role == "remote-plan" {
                 if let Ok(plan) = serde_json::from_str(&text) {
                     self.rows.push(UiRow {
@@ -4629,6 +4652,82 @@ impl TranscriptView {
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.toggle(message_start, cx);
                                 })),
+                        )
+                    })
+                    .into_any_element()
+            }
+            Body::AgentUpdate {
+                ref summary,
+                ref detail,
+            } => {
+                let open = self.expanded.contains(&message_start);
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .py_2()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(
+                        div()
+                            .id(("agent-update", message_start))
+                            .debug_selector(move || format!("agent-update-{message_start}"))
+                            .role(Role::Button)
+                            .aria_label(format!("Update from agents: {summary}"))
+                            .aria_expanded(open)
+                            .max_w_full()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .text_size(px(12.))
+                            .line_height(px(18.))
+                            .text_color(content(0.5))
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(content(0.75)))
+                            .child(
+                                icon("share", 13.)
+                                    .flex_shrink_0()
+                                    // The Orchestrator mode's fuchsia, at 70%.
+                                    .text_color(gpui::rgba(0xf4a8ffb3)),
+                            )
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_color(content(0.7))
+                                    .child("Update from agents"),
+                            )
+                            .when(!summary.is_empty(), |d| {
+                                d.child(div().min_w_0().truncate().child(format!("· {summary}")))
+                            })
+                            .when(!detail.is_empty(), |d| {
+                                d.child(
+                                    icon(
+                                        if open {
+                                            "chevron-down"
+                                        } else {
+                                            "chevron-right"
+                                        },
+                                        12.,
+                                    )
+                                    .flex_shrink_0()
+                                    .text_color(content(0.4)),
+                                )
+                            })
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.toggle(message_start, cx);
+                            })),
+                    )
+                    .when(open && !detail.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .w_full()
+                                .min_w_0()
+                                .pl(px(19.))
+                                .text_size(px(12.))
+                                .line_height(px(19.))
+                                .text_color(content(0.6))
+                                .child(detail.clone()),
                         )
                     })
                     .into_any_element()
@@ -6497,6 +6596,46 @@ mod scroll_tests {
             );
             assert!(!view.rows.iter().any(|r| matches!(r.body, Body::Pending(_))));
             assert_eq!(view.list.item_count(), view.rows.len() + 1);
+        });
+    }
+
+    #[gpui::test]
+    fn an_orchestration_update_turn_shows_as_one_line_that_expands(cx: &mut TestAppContext) {
+        let view = cx.new(|_| TranscriptView::new());
+        view.update(cx, |view, cx| {
+            view.patch(
+                0,
+                vec![
+                    row("user", "Add CSV export"),
+                    row("assistant", "Started three agents."),
+                    row(
+                        "mono-system",
+                        "[Orchestration update] api finished · docs needs input\n- api finished its turn.",
+                    ),
+                    row("assistant", "api landed."),
+                    // Other internal turns, such as a Mono's reports, stay hidden.
+                    row("mono-system", "[Delegated work completed]\nAll sessions stopped."),
+                    row("assistant", "All done."),
+                ],
+                cx,
+            );
+            let updates: Vec<_> = view
+                .rows
+                .iter()
+                .filter_map(|r| match &r.body {
+                    Body::AgentUpdate { summary, detail } => Some((summary.clone(), detail.clone())),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                updates,
+                vec![(
+                    "api finished · docs needs input".into(),
+                    "- api finished its turn.".into()
+                )]
+            );
+            assert!(!view.rows.iter().any(|r| matches!(&r.body,
+                Body::Plain(text) if text.contains("Delegated work") || text.contains("Orchestration update"))));
         });
     }
 

@@ -39,6 +39,7 @@ Ordinary Operator sessions are visible in project history. Mono launches follow 
 sessions.read returns up to three prose exchanges and nextBefore for older turns; pass that turn ID as before.
 notes.write requires body for a new note; existing notes accept title, body or tags independently.
 Artifacts, memory, soul, habits, cards and notifyOnComplete:true require a Mono.
+Orchestrator threads also have agents.*; run app help agents.
 The CLI returns {ok,result,requestId}. Retry uncertain mutations with the same request ID and identical input.
 Assigned projects alone may be addressed. Credentials are provided in the environment; never print them.
 "#;
@@ -185,6 +186,9 @@ pub fn client(args: &[String]) -> Result<Value, String> {
         .first()
         .is_none_or(|s| matches!(s.as_str(), "help" | "--help" | "-h"))
     {
+        if args.get(1).is_some_and(|topic| topic == "agents") {
+            return Ok(json!({"help":crate::orchestration::HELP}));
+        }
         return Ok(json!({"help":HELP}));
     }
     let action = args[0].clone();

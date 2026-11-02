@@ -1302,6 +1302,7 @@ mod tests {
         let summary = crate::orchestration::Summary {
             tasks: vec![crate::orchestration::SummaryTask {
                 session: Some(child),
+                name: "tests".into(),
                 title: "Tests".into(),
                 provider: "codex".into(),
                 model: None,

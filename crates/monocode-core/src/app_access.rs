@@ -245,6 +245,7 @@ pub fn launch_settings(
     settings.operator = false;
     settings.operator_enabled = false;
     settings.orchestrator = false;
+    settings.orchestrator_enabled = false;
     settings.plan = false;
     settings.environment.clear();
     settings.attachments.clear();
