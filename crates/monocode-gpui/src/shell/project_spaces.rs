@@ -8,7 +8,9 @@
 //! sending momentum events after the lift; the track ignores them, since the
 //! settle has already picked where to stop.
 use super::*;
-use gpui::{ScrollDelta, ScrollWheelEvent, TouchPhase, relative};
+use gpui::{
+    DispatchPhase, MouseUpEvent, ScrollDelta, ScrollWheelEvent, TouchPhase, canvas, relative,
+};
 use std::time::{Duration, Instant};
 
 /// Spaces in view at once.
@@ -427,6 +429,8 @@ impl Shell {
             pointer_x: event.position.x,
             active: false,
         });
+        // Paints the window-wide watch that follows the drag.
+        self.redraw_spaces(cx);
     }
 
     pub(super) fn move_space_drag(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
@@ -737,6 +741,31 @@ impl Shell {
             });
         let dragging = dragged.is_some();
         let moving = self.spaces.moving();
+        // A press on a space follows the pointer across the whole window.
+        // The shell's own mouse listeners can't: in the sidebar's peek the
+        // card above them blocks the pointer, so they never hear the drag.
+        let drag_watch = self.spaces.drag.is_some().then(|| {
+            let shell = cx.entity().downgrade();
+            canvas(
+                |_, _, _| {},
+                move |_, _, window, _| {
+                    let moves = shell.clone();
+                    window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                        if phase == DispatchPhase::Capture {
+                            let _ = moves.update(cx, |this, cx| this.move_space_drag(event, cx));
+                        }
+                    });
+                    let releases = shell.clone();
+                    window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                        if phase == DispatchPhase::Capture && event.button == MouseButton::Left {
+                            let _ = releases.update(cx, |this, cx| this.finish_space_drag(cx));
+                        }
+                    });
+                },
+            )
+            .absolute()
+            .size_0()
+        });
         div()
             .h(px(30.))
             .flex_shrink_0()
@@ -873,6 +902,7 @@ impl Shell {
                     .on_click(cx.listener(|this, _, _, cx| this.page_spaces(1., cx))),
             )
             .children(tooltip)
+            .children(drag_watch)
             .into_any()
     }
 }
@@ -970,6 +1000,62 @@ mod tests {
         window
             .read_with(visual, |shell, _| {
                 assert_eq!(shell.workspace.project, "/s/b")
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn a_space_drags_inside_the_sidebars_peek(cx: &mut TestAppContext) {
+        let (window, mut visual) = strip(cx);
+        let visual = &mut visual;
+        // The inset layout's collapsed sidebar, peeked out over the workspace.
+        window
+            .update(visual, |shell, _, cx| {
+                shell.workspace.new_layout_boxy = false;
+                shell.workspace.sidebar_visible = false;
+                shell.set_peek(true, cx);
+                shell.invalidate_chrome(cx);
+                cx.notify();
+            })
+            .unwrap();
+        visual.run_until_parked();
+        visual.refresh().unwrap();
+        assert!(visual.debug_bounds("sidebar-peek").is_some());
+        let a = visual.debug_bounds("project-space-0").unwrap();
+        let c = visual.debug_bounds("project-space-2").unwrap();
+        visual.simulate_mouse_move(a.center(), None, Default::default());
+        visual.simulate_mouse_down(a.center(), MouseButton::Left, Default::default());
+        visual.run_until_parked();
+        visual.refresh().unwrap();
+        let mut x = a.center().x;
+        while x < c.center().x {
+            x += px(3.);
+            let at = point(x, a.center().y);
+            visual.simulate_mouse_move(at, MouseButton::Left, Default::default());
+            visual.run_until_parked();
+            visual.refresh().unwrap();
+        }
+        window
+            .read_with(visual, |shell, _| {
+                let drag = shell.spaces.drag.as_ref().expect("the press is a drag");
+                assert!(drag.active, "the drag follows the pointer in the peek");
+                assert_eq!(drag.to, 2);
+            })
+            .unwrap();
+        visual.simulate_mouse_up(
+            point(x, a.center().y),
+            MouseButton::Left,
+            Default::default(),
+        );
+        visual.run_until_parked();
+        window
+            .read_with(visual, |shell, _| {
+                assert_eq!(
+                    shell.workspace.projects,
+                    ["/s/b", "/s/c", "/s/a", "/s/d", "/s/e", "/s/f", "/s/g"]
+                );
+                assert_eq!(shell.workspace.project, "/s/d", "the drop opens nothing");
+                assert!(shell.peek_open(), "the peek stays out after the drop");
             })
             .unwrap();
     }
