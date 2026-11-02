@@ -15,6 +15,8 @@ pub(crate) struct Rails {
     motions: HashMap<i64, Motion>,
     /// Agent rows opened to their details, by lead and task.
     open_tasks: HashSet<(i64, usize)>,
+    /// Leads whose past agents are unfolded.
+    open_past: HashSet<i64>,
     /// This frame's /operator groups, and the sessions they took from the list.
     pub(super) started: HashMap<i64, Vec<i64>>,
     pub(super) children: HashSet<i64>,
@@ -108,14 +110,14 @@ impl Shell {
             .any(|s| s.tasks.iter().any(|t| t.session == Some(id)))
     }
     fn rail(&self, id: i64, started: &HashMap<i64, Vec<i64>>) -> Option<Rail> {
-        // Closed agents leave the rail; their sessions are archived.
+        // A lead keeps its rail, and so its mark, after its run: closed agents
+        // (their sessions archived) fold under past agents.
         if let Some(summary) = self
             .orchestration_summaries
             .get(&id)
-            .map(|summary| summary.open_agents())
             .filter(|summary| !summary.tasks.is_empty())
         {
-            return Some(Rail::Agents(summary));
+            return Some(Rail::Agents(summary.clone()));
         }
         started
             .get(&id)
@@ -480,15 +482,37 @@ impl Shell {
                                 |d| d.child(icon("zap", 12.).text_color(rgb(0xfbbf24))),
                             )
                             .when_some(rail, |d, (rail, _)| {
+                                let (glyph, label) = match rail {
+                                    Rail::Agents(summary) => {
+                                        ("share", format!("Orchestrator, {}", summary.describe()))
+                                    }
+                                    Rail::Started(children) => (
+                                        "cursor-magic",
+                                        format!(
+                                            "Operator, started {} {}",
+                                            children.len(),
+                                            if children.len() == 1 {
+                                                "session"
+                                            } else {
+                                                "sessions"
+                                            }
+                                        ),
+                                    ),
+                                };
+                                let tip = label.clone();
                                 d.child(
-                                    icon(
-                                        match rail {
-                                            Rail::Agents(_) => "share",
-                                            Rail::Started(_) => "cursor-magic",
-                                        },
-                                        13.,
-                                    )
-                                    .text_color(content(0.5)),
+                                    div()
+                                        .id(("session-mode", id as usize))
+                                        .debug_selector(move || format!("session-mode-{id}"))
+                                        .role(Role::Image)
+                                        .aria_label(label)
+                                        .tooltip(move |_, cx| {
+                                            cx.new(|_| {
+                                                super::project_rail::ProjectTooltip(tip.clone())
+                                            })
+                                            .into()
+                                        })
+                                        .child(icon(glyph, 13.).text_color(content(0.5))),
                                 )
                             }),
                     ),
@@ -717,7 +741,9 @@ impl Shell {
                 .into_any_element()
         }
     }
-    /// OrchestrationSidebarAgents, `tree`.
+    /// OrchestrationSidebarAgents, `tree`: the agents the lead still
+    /// addresses, then its closed ones folded under "N past agents". A lead
+    /// keeps the rail after its run, so its past agents stay one click away.
     fn agents(
         &self,
         lead: i64,
@@ -725,6 +751,29 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let classic = self.workspace.classic_layout;
+        let (open, past): (Vec<usize>, Vec<usize>) =
+            (0..summary.tasks.len()).partition(|&ix| summary.tasks[ix].open());
+        let past_open = self.rails.open_past.contains(&lead);
+        let done = summary
+            .tasks
+            .iter()
+            .filter(|task| {
+                task.status == "completed" || task.outcome.as_deref() == Some("completed")
+            })
+            .count();
+        let mut rows = Vec::new();
+        for (pos, &ix) in open.iter().enumerate() {
+            let last = pos + 1 == open.len() && past.is_empty();
+            rows.push(self.agent_row(lead, summary, ix, last, cx));
+        }
+        if !past.is_empty() {
+            rows.push(self.past_agents_toggle(lead, past.len(), past_open, !past_open, cx));
+            if past_open {
+                for (pos, &ix) in past.iter().enumerate() {
+                    rows.push(self.agent_row(lead, summary, ix, pos + 1 == past.len(), cx));
+                }
+            }
+        }
         div()
             .when(!classic, |d| d.pt_1().pb_1())
             .when(classic, |d| {
@@ -747,15 +796,7 @@ impl Shell {
                                 "agents"
                             }
                         ))
-                        .child(format!(
-                            "{}/{} done",
-                            summary
-                                .tasks
-                                .iter()
-                                .filter(|task| task.status == "completed")
-                                .count(),
-                            summary.tasks.len()
-                        )),
+                        .child(format!("{done}/{} done", summary.tasks.len())),
                 )
             })
             .flex()
@@ -765,229 +806,324 @@ impl Shell {
                     .flex()
                     .flex_col()
                     .when(classic, |d| d.mx(px(-8.)).gap_px())
-                    .children(summary.tasks.iter().enumerate().map(|(ix, task)| {
-                        let needs_input = task.session.is_some_and(|s| {
-                            self.sessions
-                                .get(&s)
-                                .is_some_and(|v| v.read(cx).needs_approval())
-                        });
-                        let open = self.rails.open_tasks.contains(&(lead, ix)) || needs_input;
-                        let label = task.label(summary, needs_input);
-                        let working = summary.live && task.status == "running" && !needs_input;
-                        let alert =
-                            needs_input || matches!(task.status.as_str(), "failed" | "blocked");
-                        let done = task.status == "completed";
-                        let tone: gpui::Hsla = if alert {
-                            rgb(0xfbbf24).into()
-                        } else if working {
-                            accent_color()
-                        } else if done {
-                            rgb(0x34d399).into()
-                        } else {
-                            content(0.45)
-                        };
-                        let model = crate::pickers::model_name(
-                            Kind::from_id(&task.provider),
-                            task.model.as_deref(),
-                        )
-                        .to_string();
-                        let group: SharedString = format!("rail-agent-{lead}-{ix}").into();
-                        let header = div()
-                            .id(("rail-agent", (lead as usize) << 8 | ix))
-                            .debug_selector(move || format!("rail-agent-{lead}-{ix}"))
-                            .role(Role::Button)
-                            .aria_label(format!("Agent details: {}", task.title))
-                            .aria_expanded(open)
-                            .group(group.clone())
-                            .h(px(if classic { 28.5 } else { 28. }))
-                            .w_full()
-                            .min_w_0()
-                            .flex()
-                            .items_center()
-                            .gap(px(6.))
-                            .px(px(if classic { 8. } else { 6. }))
-                            .rounded_md()
-                            .cursor_pointer()
-                            .when(open && !classic, |d| d.bg(content(0.1)))
-                            .when(!open, |d| d.hover(|s| s.bg(content(0.1))))
-                            .child(
-                                div()
-                                    .size(px(14.))
-                                    .flex_shrink_0()
-                                    .relative()
-                                    .opacity(0.75)
-                                    .child(
-                                        div()
-                                            .when(classic && open, |d| d.invisible())
-                                            .when(classic, |d| {
-                                                d.group_hover(group.clone(), |s| s.invisible())
-                                            })
-                                            .child(provider_icon(&task.provider, 14.)),
-                                    )
-                                    .when(classic, |d| {
-                                        d.child(
-                                            div()
-                                                .absolute()
-                                                .top_0()
-                                                .left_0()
-                                                .size_full()
-                                                .flex()
-                                                .items_center()
-                                                .justify_center()
-                                                .invisible()
-                                                .when(open, |d| d.visible())
-                                                .group_hover(group.clone(), |s| s.visible())
-                                                .child(
-                                                    icon(
-                                                        if open {
-                                                            "chevron-down"
-                                                        } else {
-                                                            "chevron-right"
-                                                        },
-                                                        12.,
-                                                    )
-                                                    .text_color(content(0.45)),
-                                                ),
-                                        )
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex_1()
-                                    .truncate()
-                                    .text_size(px(if classic { 12. } else { 13. }))
-                                    .when(classic, |d| d.line_height(px(16.5)))
-                                    .text_color(content(if classic {
-                                        0.8
-                                    } else if open {
-                                        1.
-                                    } else {
-                                        0.55
-                                    }))
-                                    .when(!classic && !open, |d| {
-                                        d.group_hover(group.clone(), |s| s.text_color(content(0.8)))
-                                    })
-                                    .child(task.title.clone()),
-                            )
-                            .child(
-                                div()
-                                    .flex_shrink_0()
-                                    .flex()
-                                    .items_center()
-                                    .gap_1()
-                                    .text_size(px(11.))
-                                    .when(classic, |d| d.line_height(px(16.5)))
-                                    .text_color(tone)
-                                    .when(alert, |d| {
-                                        d.child(icon("circle-alert", 12.).text_color(tone))
-                                    })
-                                    .when(working, |d| {
-                                        d.child(crate::pulse::looping(
-                                            SharedString::from(format!("rail-spinner-{lead}-{ix}")),
-                                            crate::session_mark::SPINNER_PERIOD,
-                                            crate::pulse::Rate::Half,
-                                            crate::session_mark::spinner_at,
-                                        ))
-                                    })
-                                    .when(done && !alert, |d| {
-                                        d.child(icon("check", 12.).text_color(tone))
-                                    })
-                                    // On the rail the spinner says it on its own.
-                                    .when(classic || !working, |d| d.child(label)),
-                            )
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if !this.rails.open_tasks.remove(&(lead, ix)) {
-                                    this.rails.open_tasks.insert((lead, ix));
-                                }
-                                this.notify_sidebar(cx);
-                            }));
-                        let worker = task.session;
-                        let running = worker.is_some_and(|s| {
-                            summary.live
-                                && self
-                                    .sessions
-                                    .get(&s)
-                                    .is_some_and(|v| v.read(cx).responding())
-                        });
-                        let solid = |id: &'static str, label: &'static str| {
-                            div()
-                                .id((id, (lead as usize) << 8 | ix))
-                                .role(Role::Button)
-                                .aria_label(label)
-                                .rounded(px(4.))
-                                .bg(content(0.15))
-                                .px(px(6.))
-                                .py(px(2.))
-                                .text_size(px(11.))
-                                .text_color(content(0.75))
-                                .cursor_pointer()
-                                .hover(|s| s.bg(content(0.25)).text_color(content(1.)))
-                                .child(label)
-                        };
-                        let details = div()
-                            .pl(px(if classic { 26. } else { 6. }))
-                            .pt(px(if classic { 0. } else { 6. }))
-                            .pb_3()
-                            .pr_2()
-                            .flex()
-                            .flex_col()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .min_w_0()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(6.))
-                                    .text_size(px(11.))
-                                    .text_color(content(0.45))
-                                    .child(provider_icon(&task.provider, 14.))
-                                    .child(div().min_w_0().truncate().child(model)),
-                            )
-                            .when(worker.is_some() || running, |d| {
-                                d.child(
-                                    div()
-                                        .flex()
-                                        .flex_wrap()
-                                        .items_center()
-                                        .gap_1()
-                                        .when_some(worker, |d, worker| {
-                                            d.child(
-                                                solid("rail-agent-open", "See details").on_click(
-                                                    cx.listener(move |this, _, window, cx| {
-                                                        this.open(worker, window, cx)
-                                                    }),
-                                                ),
-                                            )
-                                        })
-                                        .when_some(worker.filter(|_| running), |d, worker| {
-                                            d.child(solid("rail-agent-stop", "Stop").on_click(
-                                                cx.listener(move |this, _, _, cx| {
-                                                    if let Some(view) = this.sessions.get(&worker) {
-                                                        view.update(cx, |v, cx| v.stop_if_busy(cx));
-                                                    }
-                                                }),
-                                            ))
-                                        }),
-                                )
-                            });
-                        let row = div()
-                            .flex()
-                            .flex_col()
-                            .when(classic, |d| {
-                                d.rounded_md().when(open, |d| d.bg(content(0.1)))
-                            })
-                            .child(header)
-                            .when(open, |d| d.child(details));
-                        if classic {
-                            row.into_any_element()
-                        } else {
-                            step(ix + 1 == summary.tasks.len(), row).into_any_element()
-                        }
-                    })),
+                    .children(rows),
             )
             .into_any_element()
+    }
+
+    /// The fold over a lead's closed agents.
+    fn past_agents_toggle(
+        &self,
+        lead: i64,
+        count: usize,
+        open: bool,
+        last: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let classic = self.workspace.classic_layout;
+        let toggle = div()
+            .id(("rail-past", lead as usize))
+            .debug_selector(move || format!("rail-past-{lead}"))
+            .role(Role::Button)
+            .aria_label("Past agents")
+            .aria_expanded(open)
+            .h(px(if classic { 24. } else { 26. }))
+            .w_full()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .px(px(if classic { 8. } else { 6. }))
+            .rounded_md()
+            .cursor_pointer()
+            .text_size(px(11.))
+            .text_color(content(0.45))
+            .hover(|s| s.bg(content(0.1)).text_color(content(0.7)))
+            .child(
+                div()
+                    .size(px(14.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(icon(
+                        if open {
+                            "chevron-down"
+                        } else {
+                            "chevron-right"
+                        },
+                        12.,
+                    )),
+            )
+            .child(format!(
+                "{count} past {}",
+                if count == 1 { "agent" } else { "agents" }
+            ))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !this.rails.open_past.remove(&lead) {
+                    this.rails.open_past.insert(lead);
+                }
+                this.notify_sidebar(cx);
+            }));
+        if classic {
+            toggle.into_any_element()
+        } else {
+            step(last, toggle).into_any_element()
+        }
+    }
+
+    /// One agent on its lead's rail. A closed agent says how its work ended
+    /// and still opens its chat, unless that chat was deleted.
+    fn agent_row(
+        &self,
+        lead: i64,
+        summary: &monocode_core::orchestration::Summary,
+        ix: usize,
+        last: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let classic = self.workspace.classic_layout;
+        let task = &summary.tasks[ix];
+        let past = !task.open();
+        let worker = task
+            .session
+            .filter(|s| !past || self.session_summaries.contains_key(s));
+        let needs_input = !past
+            && task.session.is_some_and(|s| {
+                self.sessions
+                    .get(&s)
+                    .is_some_and(|v| v.read(cx).needs_approval())
+            });
+        let open = self.rails.open_tasks.contains(&(lead, ix)) || needs_input;
+        let label = if !past {
+            task.label(summary, needs_input)
+        } else if worker.is_none() {
+            "Deleted"
+        } else {
+            task.past_label()
+        };
+        let working = !past && summary.live && task.status == "running" && !needs_input;
+        let alert = if past {
+            task.outcome.as_deref() == Some("failed")
+        } else {
+            needs_input || matches!(task.status.as_str(), "failed" | "blocked")
+        };
+        let done = if past {
+            task.outcome.as_deref() == Some("completed")
+        } else {
+            task.status == "completed"
+        };
+        let tone: gpui::Hsla = if alert {
+            rgb(0xfbbf24).into()
+        } else if working {
+            accent_color()
+        } else if done {
+            rgb(0x34d399).into()
+        } else {
+            content(0.45)
+        };
+        let model =
+            crate::pickers::model_name(Kind::from_id(&task.provider), task.model.as_deref())
+                .to_string();
+        let group: SharedString = format!("rail-agent-{lead}-{ix}").into();
+        let header = div()
+            .id(("rail-agent", (lead as usize) << 8 | ix))
+            .debug_selector(move || format!("rail-agent-{lead}-{ix}"))
+            .role(Role::Button)
+            .aria_label(format!("Agent details: {}", task.title))
+            .aria_expanded(open)
+            .group(group.clone())
+            .h(px(if classic { 28.5 } else { 28. }))
+            .w_full()
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .px(px(if classic { 8. } else { 6. }))
+            .rounded_md()
+            .cursor_pointer()
+            // A past agent is quieter until it is opened or pointed at.
+            .when(past && !open, |d| d.opacity(0.7))
+            .when(open && !classic, |d| d.bg(content(0.1)))
+            .when(!open, |d| {
+                d.hover(move |s| {
+                    let s = s.bg(content(0.1));
+                    if past { s.opacity(1.) } else { s }
+                })
+            })
+            .child(
+                div()
+                    .size(px(14.))
+                    .flex_shrink_0()
+                    .relative()
+                    .opacity(0.75)
+                    .child(
+                        div()
+                            .when(classic && open, |d| d.invisible())
+                            .when(classic, |d| d.group_hover(group.clone(), |s| s.invisible()))
+                            .child(provider_icon(&task.provider, 14.)),
+                    )
+                    .when(classic, |d| {
+                        d.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .size_full()
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .invisible()
+                                .when(open, |d| d.visible())
+                                .group_hover(group.clone(), |s| s.visible())
+                                .child(
+                                    icon(
+                                        if open {
+                                            "chevron-down"
+                                        } else {
+                                            "chevron-right"
+                                        },
+                                        12.,
+                                    )
+                                    .text_color(content(0.45)),
+                                ),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .truncate()
+                    .text_size(px(if classic { 12. } else { 13. }))
+                    .when(classic, |d| d.line_height(px(16.5)))
+                    .text_color(content(if classic {
+                        0.8
+                    } else if open {
+                        1.
+                    } else {
+                        0.55
+                    }))
+                    .when(!classic && !open, |d| {
+                        d.group_hover(group.clone(), |s| s.text_color(content(0.8)))
+                    })
+                    .child(task.title.clone()),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .text_size(px(11.))
+                    .when(classic, |d| d.line_height(px(16.5)))
+                    .text_color(tone)
+                    .when(alert, |d| {
+                        d.child(icon("circle-alert", 12.).text_color(tone))
+                    })
+                    .when(working, |d| {
+                        d.child(crate::pulse::looping(
+                            SharedString::from(format!("rail-spinner-{lead}-{ix}")),
+                            crate::session_mark::SPINNER_PERIOD,
+                            crate::pulse::Rate::Half,
+                            crate::session_mark::spinner_at,
+                        ))
+                    })
+                    .when(done && !alert, |d| {
+                        d.child(icon("check", 12.).text_color(tone))
+                    })
+                    // On the rail the spinner says it on its own.
+                    .when(classic || !working, |d| d.child(label)),
+            )
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if !this.rails.open_tasks.remove(&(lead, ix)) {
+                    this.rails.open_tasks.insert((lead, ix));
+                }
+                this.notify_sidebar(cx);
+            }));
+        let running = !past
+            && worker.is_some_and(|s| {
+                summary.live
+                    && self
+                        .sessions
+                        .get(&s)
+                        .is_some_and(|v| v.read(cx).responding())
+            });
+        let solid = |id: &'static str, label: &'static str| {
+            div()
+                .id((id, (lead as usize) << 8 | ix))
+                .debug_selector(move || format!("{id}-{lead}-{ix}"))
+                .role(Role::Button)
+                .aria_label(label)
+                .rounded(px(4.))
+                .bg(content(0.15))
+                .px(px(6.))
+                .py(px(2.))
+                .text_size(px(11.))
+                .text_color(content(0.75))
+                .cursor_pointer()
+                .hover(|s| s.bg(content(0.25)).text_color(content(1.)))
+                .child(label)
+        };
+        let details = div()
+            .pl(px(if classic { 26. } else { 6. }))
+            .pt(px(if classic { 0. } else { 6. }))
+            .pb_3()
+            .pr_2()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                div()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_size(px(11.))
+                    .text_color(content(0.45))
+                    .child(provider_icon(&task.provider, 14.))
+                    .child(div().min_w_0().truncate().child(model)),
+            )
+            .when(worker.is_some() || running, |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_wrap()
+                        .items_center()
+                        .gap_1()
+                        .when_some(worker, |d, worker| {
+                            d.child(
+                                solid("rail-agent-open", "See details").on_click(cx.listener(
+                                    move |this, _, window, cx| this.open(worker, window, cx),
+                                )),
+                            )
+                        })
+                        .when_some(worker.filter(|_| running), |d, worker| {
+                            d.child(solid("rail-agent-stop", "Stop").on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    if let Some(view) = this.sessions.get(&worker) {
+                                        view.update(cx, |v, cx| v.stop_if_busy(cx));
+                                    }
+                                },
+                            )))
+                        }),
+                )
+            });
+        let row = div()
+            .flex()
+            .flex_col()
+            .when(classic, |d| {
+                d.rounded_md().when(open, |d| d.bg(content(0.1)))
+            })
+            .child(header)
+            .when(open, |d| d.child(details));
+        if classic {
+            row.into_any_element()
+        } else {
+            step(last, row).into_any_element()
+        }
     }
 }
 
@@ -1046,6 +1182,7 @@ mod tests {
                             provider: "codex".into(),
                             model: None,
                             status: "completed".into(),
+                            outcome: None,
                         }],
                     },
                 );
@@ -1119,5 +1256,116 @@ mod tests {
             bounds(cx, format!("sidebar-session-{child}")).is_none(),
             "the operator rail folds away once its thread leaves play"
         );
+    }
+
+    #[gpui::test]
+    fn an_orchestrator_keeps_its_mark_and_folds_closed_agents_under_past_agents(
+        cx: &mut TestAppContext,
+    ) {
+        use monocode_core::orchestration::{Summary, SummaryTask};
+        let (window, _, lead) = crate::shell::tests::window(cx);
+        let cx = &mut VisualTestContext::from_window(window.into(), cx);
+        let deleted = 987_654_321;
+        let (orchestrator, ended, archived) = window
+            .update(cx, |shell, _, cx| {
+                let mut ids = Vec::new();
+                for archived in [false, false, false, true] {
+                    let mut summary = locked(&shell.store)
+                        .unwrap()
+                        .create("codex", &shell.workspace.project)
+                        .unwrap();
+                    summary.archived = archived;
+                    summary.has_messages = true;
+                    ids.push(summary.id);
+                    shell.add(summary, cx);
+                }
+                let (orchestrator, ended, live, archived) = (ids[0], ids[1], ids[2], ids[3]);
+                let task = |name: &str, session, status: &str, outcome: Option<&str>| SummaryTask {
+                    session,
+                    name: name.into(),
+                    title: format!("{name} work"),
+                    provider: "codex".into(),
+                    model: None,
+                    status: status.into(),
+                    outcome: outcome.map(Into::into),
+                };
+                shell.orchestration_summaries.insert(
+                    orchestrator,
+                    Summary {
+                        live: false,
+                        tasks: vec![
+                            task("api", Some(live), "completed", None),
+                            task("docs", Some(archived), "closed", Some("completed")),
+                            task("web", Some(deleted), "closed", Some("failed")),
+                        ],
+                    },
+                );
+                shell.orchestration_summaries.insert(
+                    ended,
+                    Summary {
+                        live: false,
+                        tasks: vec![task("old", None, "closed", Some("completed"))],
+                    },
+                );
+                shell.selected_sessions.clear();
+                shell.workspace.active = Some(lead);
+                shell.invalidate_chrome(cx);
+                (orchestrator, ended, archived)
+            })
+            .unwrap();
+        settle(window, cx);
+        assert!(
+            bounds(cx, format!("session-mode-{ended}")).is_some(),
+            "a lead whose agents all closed still shows it orchestrated"
+        );
+        assert!(bounds(cx, format!("session-mode-{orchestrator}")).is_some());
+        assert!(
+            bounds(cx, format!("rail-past-{orchestrator}")).is_none(),
+            "its rail stays folded while it is out of play"
+        );
+
+        let row = bounds(cx, format!("sidebar-session-{orchestrator}")).unwrap();
+        cx.simulate_click(row.center(), Default::default());
+        cx.run_until_parked();
+        settle(window, cx);
+        assert!(bounds(cx, format!("rail-agent-{orchestrator}-0")).is_some());
+        let past = bounds(cx, format!("rail-past-{orchestrator}"))
+            .expect("closed agents fold under past agents");
+        assert!(
+            bounds(cx, format!("rail-agent-{orchestrator}-1")).is_none(),
+            "folded until asked for"
+        );
+
+        cx.simulate_click(past.center(), Default::default());
+        cx.run_until_parked();
+        settle(window, cx);
+        window
+            .read_with(cx, |shell, _| {
+                assert_eq!(shell.workspace.active, Some(orchestrator));
+                assert!(shell.rails.open_past.contains(&orchestrator));
+            })
+            .unwrap();
+        let gone = bounds(cx, format!("rail-agent-{orchestrator}-2")).expect("past agents show");
+        cx.simulate_click(gone.center(), Default::default());
+        cx.run_until_parked();
+        settle(window, cx);
+        assert!(
+            bounds(cx, format!("rail-agent-open-{orchestrator}-2")).is_none(),
+            "a deleted agent has no chat to open"
+        );
+
+        let docs = bounds(cx, format!("rail-agent-{orchestrator}-1")).unwrap();
+        cx.simulate_click(docs.center(), Default::default());
+        cx.run_until_parked();
+        settle(window, cx);
+        let open = bounds(cx, format!("rail-agent-open-{orchestrator}-1"))
+            .expect("a past agent still opens its chat");
+        cx.simulate_click(open.center(), Default::default());
+        cx.run_until_parked();
+        window
+            .read_with(cx, |shell, _| {
+                assert_eq!(shell.workspace.active, Some(archived));
+            })
+            .unwrap();
     }
 }

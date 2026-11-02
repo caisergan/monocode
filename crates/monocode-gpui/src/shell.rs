@@ -5970,15 +5970,7 @@ impl Shell {
                 "share",
                 // fuchsia-200/90
                 gpui::Hsla::from(rgb(0xf5d0fe)).opacity(0.9),
-                format!(
-                    "Orchestrator, {} {}",
-                    summary.tasks.len(),
-                    if summary.tasks.len() == 1 {
-                        "agent"
-                    } else {
-                        "agents"
-                    }
-                ),
+                format!("Orchestrator, {}", summary.describe()),
             ),
             rails::Rail::Started(children) => (
                 "cursor-magic",
@@ -6148,10 +6140,15 @@ impl Shell {
             )
             // Marked on the right like a linked issue or PR, in its mode's colour.
             .when_some(mode, |d, (glyph, color, label)| {
+                let tip = label.clone();
                 d.child(
                     div()
                         .id(("session-mode", id as usize))
+                        .debug_selector(move || format!("session-mode-{id}"))
                         .role(Role::Image)
+                        .tooltip(move |_, cx| {
+                            cx.new(|_| project_rail::ProjectTooltip(tip.clone())).into()
+                        })
                         .aria_label(label)
                         .size(px(16.))
                         .flex_shrink_0()
