@@ -2,7 +2,7 @@
 //! its state, its rows, and the message, approval and answer paths the user's
 //! own composer and cards use.
 use super::*;
-use monocode_core::orchestration::{Observation, Request};
+use monocode_core::orchestration::{Observation, Request, names_request, public_request_id};
 use serde_json::{Value, json};
 
 /// How `agent_message` handed a prompt to the agent.
@@ -33,16 +33,18 @@ impl Conversation {
             .approvals
             .iter()
             .map(|approval| Request {
-                id: approval.id.clone(),
+                id: public_request_id(&approval.id),
                 kind: "approval",
                 title: approval.title.clone(),
                 detail: approval.detail.clone(),
                 items: Value::Null,
+                remember: approval.can_remember,
             })
             .chain(self.questions.iter().map(|(card, _)| {
                 let question = card.read(cx).request();
                 Request {
-                    id: question.id.clone(),
+                    id: public_request_id(&question.id),
+                    remember: false,
                     kind: "question",
                     title: question.title.clone(),
                     detail: String::new(),
@@ -98,6 +100,22 @@ impl Conversation {
     }
     pub(crate) fn agent_branch(&self) -> Option<String> {
         self.branch.clone()
+    }
+    /// What the agent runs on: its effort, access policy and, once its
+    /// provider reported it, the concrete model behind an alias.
+    pub(crate) fn agent_launch(&self) -> Value {
+        let mut value = json!({"runtimeMode": self.settings.access.id()});
+        if let Some(effort) = &self.settings.effort {
+            value["effort"] = json!(effort);
+        }
+        if let Some(resolved) = self
+            .resolved_model
+            .as_ref()
+            .filter(|id| self.model.as_ref() != Some(*id))
+        {
+            value["resolvedModel"] = json!(resolved);
+        }
+        value
     }
     /// Messages held after a stop or a failure; they run once resumed.
     pub(crate) fn agent_held_messages(&self) -> (usize, bool) {
@@ -170,24 +188,26 @@ impl Conversation {
         decision: Decision,
         cx: &mut Context<Self>,
     ) -> Result<String, String> {
-        let id = match request_id {
-            Some(id) => id.to_owned(),
+        // The user can decide the same request in the agent's chat or from an
+        // approval toast, so a request may be gone by the time the lead acts.
+        let approval = match request_id {
+            Some(given) => self
+                .approvals
+                .iter()
+                .find(|approval| names_request(&approval.id, given))
+                .ok_or("That approval is no longer pending: it was decided already (the user can also decide it in the agent's chat), or the requestId is wrong. Run agents.read for the agent's state")?,
             None => match self.approvals.len() {
-                1 => self.approvals[0].id.clone(),
-                0 => return Err("The agent has no pending approval".into()),
+                1 => &self.approvals[0],
+                0 => return Err("The agent has no pending approval; it may have been decided already. Run agents.read for the agent's state".into()),
                 _ => return Err("The agent has several approvals; pass requestId".into()),
             },
         };
-        let approval = self
-            .approvals
-            .iter()
-            .find(|approval| approval.id == id)
-            .ok_or("No pending approval has that requestId")?;
         if matches!(decision, Decision::Session) && !approval.can_remember {
-            return Err("This approval cannot be remembered for the session; use allow".into());
+            return Err("This approval cannot be allowed for the session; use allow".into());
         }
+        let id = approval.id.clone();
         if self.decide_notification_request(&id, decision, cx) {
-            Ok(id)
+            Ok(public_request_id(&id))
         } else {
             Err(self.status.clone())
         }
@@ -204,10 +224,10 @@ impl Conversation {
             .front()
             .ok_or("The agent has no pending question")?;
         let question = card.read(cx).request().clone();
-        if request_id.is_some_and(|id| id != question.id) {
+        if request_id.is_some_and(|given| !names_request(&question.id, given)) {
             return Err(format!(
                 "Answer the agent's current question first (requestId {})",
-                question.id
+                public_request_id(&question.id)
             ));
         }
         if let Some(answers) = &answers {
@@ -234,7 +254,7 @@ impl Conversation {
             }
         }
         self.resolve_question(&question.id, answers, cx)?;
-        Ok(question.id)
+        Ok(public_request_id(&question.id))
     }
     /// The question card's reply path: send the answer (or a skip) and drop
     /// the card. Only the front question can be answered.

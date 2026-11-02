@@ -149,6 +149,8 @@ pub struct Request {
     pub detail: String,
     /// Question items: `[{prompt, multiple, allowCustom, options:[label]}]`.
     pub items: Value,
+    /// An approval that can be allowed for the rest of the agent's session.
+    pub remember: bool,
 }
 impl Request {
     pub fn json(&self) -> Value {
@@ -158,9 +160,28 @@ impl Request {
         }
         if self.kind == "question" {
             value["items"] = self.items.clone();
+        } else {
+            value["decisions"] = if self.remember {
+                json!(["allow", "session", "deny"])
+            } else {
+                json!(["allow", "deny"])
+            };
         }
         value
     }
+}
+
+/// Providers key requests by their wire id, JSON-encoded (`"\"abc\""` for a
+/// string). Agents see and send the plain id.
+pub fn public_request_id(id: &str) -> String {
+    match serde_json::from_str::<Value>(id) {
+        Ok(Value::String(plain)) => plain,
+        _ => id.to_owned(),
+    }
+}
+/// Whether `given` names the request `id`, in either form.
+pub fn names_request(id: &str, given: &str) -> bool {
+    id == given || public_request_id(id) == given
 }
 
 /// What MonoCode can see of an agent's session right now.
@@ -535,6 +556,16 @@ pub fn activity(rows: &[Row], max_chars: usize) -> Value {
             continue;
         };
         let (action, target) = tool.summary();
+        // The display summary keeps a command's first line only.
+        let target = match serde_json::from_str::<Value>(&tool.input_detail()) {
+            Ok(input) if action == "Run" => input["command"]
+                .as_str()
+                .map(crate::tool::shell_command)
+                .filter(|command| !command.trim().is_empty())
+                .map(|command| crate::response::limit(command.trim(), 400))
+                .unwrap_or(target),
+            _ => target,
+        };
         if matches!(action.as_str(), "Edit" | "Write")
             && !target.is_empty()
             && !edited.contains(&target)
@@ -550,7 +581,7 @@ pub fn activity(rows: &[Row], max_chars: usize) -> Value {
         last_output = (!tool.output.trim().is_empty()).then(|| tail(tool.output.trim(), 600));
         steps.push(json!({
             "action": action,
-            "target": crate::response::limit(&target, 240),
+            "target": crate::response::limit(&target, 400),
             "state": state,
         }));
     }
@@ -712,9 +743,11 @@ Usage: CLI app ACTION --json '{...}'
 Every agent is a separate MonoCode chat session the user can open and talk to. Names: a lowercase letter, then up to 31 lowercase letters, digits, '-' or '_'.
 
 agents.start {name, prompt, title?, harness?, model?, effort?, modelSettings?, runtimeMode?, workspace?, base?, checkout?, reveal?}
-  Start an agent on prompt. workspace "worktree" (default) gives it its own git worktree and branch from base (default: your checkout's HEAD); "shared" runs it in your checkout; checkout reuses an existing worktree path (worktrees.list). harness is claude, codex, …; model/effort/modelSettings take values from models.list. The agent inherits your model, access policy and account unless you set them. reveal opens it in a tab.
+  Start an agent on prompt. workspace "worktree" (default) gives it its own git worktree and branch from base (default: your checkout's HEAD); "shared" runs it in your checkout; checkout reuses an existing worktree path (worktrees.list). harness is claude, codex, ….
+  model: an alias or ID from models.list (an alias's resolvesTo names the model it runs today), or for claude and codex any model ID their CLI takes, such as claude-haiku-4-5 or claude-opus-4-6[1m]. effort: claude takes low, medium, high, xhigh, max, ultrathink or ultracode; codex takes none, minimal, low, medium, high or xhigh. Without effort, a model from models.list runs at the default it shows there, and any other model at its CLI's default. modelSettings takes other values from models.list.
+  runtimeMode: read-only, supervised (asks before changes), auto-accept-edits, auto or full-access. The agent inherits your model with its effort, your access policy and your account unless you set them. reveal opens it in a tab.
 agents.list {}
-  Every agent: name, sessionId, state, since, checkout, branch, harness, model, pending input, queued messages.
+  Every agent: name, sessionId, state, since, checkout, branch, harness, model (resolvedModel once an alias resolved), effort, runtimeMode, pending input, queued messages.
 agents.read {name, view?, maxChars?, before?, limit?}
   view "activity": what it is doing in its latest turn (prompt, tool steps, latest text, last tool output). "last": its final message and the files it edited. "history": earlier exchanges (before/limit page back). "auto" (default): activity while working or blocked, otherwise last.
 agents.prompt {name, prompt, mode?}
@@ -722,7 +755,7 @@ agents.prompt {name, prompt, mode?}
 agents.wait {names?, until?, timeoutSeconds?}
   Returns the agents' unreported events (finished, stopped, failed, usageLimited, blocked), waiting up to timeoutSeconds (default 30, max 45) for the first one. until filters by resulting state: idle, blocked, stopped, failed, usageLimited. Returned events are not sent again as a wake-up. matched:false means it timed out.
 agents.approve {name, requestId?, decision}
-  decision allow, session (allow for the rest of its session, when offered) or deny. requestId defaults to its only pending approval.
+  decision allow, session (allow for the rest of its session) or deny; needsInput lists the decisions each request takes. requestId defaults to its only pending approval. The user can decide a request too, in the agent's chat; it is then no longer pending.
 agents.answer {name, requestId?, answers | skip:true}
   answers: one array of chosen option labels or free text per question item.
 agents.stop {name}
@@ -749,7 +782,7 @@ pub fn lead_context(cli: &str, full: bool) -> String {
 MonoCode adds this context, not the user. You are this thread's orchestrator. You plan the work, start agents, brief them, watch them, review and integrate what they produce, run the tests, and keep the user informed. You do not write feature code yourself, except small integration fixes or when the user asks. The user can talk to you at any time, also while agents work.
 
 Each agent is a separate MonoCode chat session. Drive them with `{cli} app ACTION --json JSON` (full reference: `{cli} app help agents`). App credentials are in your environment; never print them.
-- agents.start {{name, prompt, title?, harness?, model?, effort?, workspace?}}: own git worktree and branch from your HEAD by default, so commit what it needs first; inherits your model and access policy unless you set them (models.list lists options).
+- agents.start {{name, prompt, title?, harness?, model?, effort?, runtimeMode?, workspace?}}: own git worktree and branch from your HEAD by default, so commit what it needs first; inherits your model and access policy unless you set them. model and effort go to the agent's CLI as given: an alias from models.list or a full model ID such as claude-haiku-4-5, and a level such as high.
 - agents.list {{}} and agents.read {{name, view?}}: states, and what an agent is doing right now (view activity) or its final report (view last).
 - agents.prompt {{name, prompt, mode?}}: next task for an idle agent; steer or queue a note to a working one.
 - agents.approve / agents.answer: decide an agent's approval or question. agents.stop / agents.close. agents.open shows an agent's chat to the user.
@@ -790,6 +823,7 @@ mod tests {
             title: "Run command".into(),
             detail: "npm install".into(),
             items: Value::Null,
+            remember: true,
         }
     }
     fn row(role: &str, text: &str, first: bool) -> Row {
@@ -997,6 +1031,41 @@ mod tests {
         assert_eq!(value["lastToolOutput"], "running 3 tests");
         assert_eq!(value["editedFiles"], json!(["src/lib.rs"]));
         assert_eq!(value["turnStartedAt"], 1_000);
+
+        // A multi-line command shows whole, not just its first line.
+        let mut script = ToolCall::new("t3", "Bash");
+        script.input = json!({"command":"python3 -I -c '\nprint(2 + 2)\n'"}).to_string();
+        let rows = vec![
+            row("user", "Check", true),
+            row("tool", &serde_json::to_string(&script).unwrap(), true),
+        ];
+        let value = activity(&rows, 4_000);
+        assert_eq!(value["steps"][0]["action"], "Run");
+        assert_eq!(
+            value["steps"][0]["target"],
+            "python3 -I -c '\nprint(2 + 2)\n'"
+        );
+    }
+
+    #[test]
+    fn requests_show_plain_ids_and_the_decisions_they_take() {
+        // Claude's request_id arrives JSON-encoded in the provider's key.
+        assert_eq!(public_request_id("\"29cb8d74-c6fd\""), "29cb8d74-c6fd");
+        assert_eq!(public_request_id("7"), "7");
+        assert_eq!(public_request_id("plain"), "plain");
+        assert!(names_request("\"29cb8d74-c6fd\"", "29cb8d74-c6fd"));
+        assert!(names_request("\"29cb8d74-c6fd\"", "\"29cb8d74-c6fd\""));
+        assert!(!names_request("\"29cb8d74-c6fd\"", "29cb8d74"));
+
+        let mut approval = request("r1");
+        assert_eq!(
+            approval.json()["decisions"],
+            json!(["allow", "session", "deny"])
+        );
+        approval.remember = false;
+        assert_eq!(approval.json()["decisions"], json!(["allow", "deny"]));
+        approval.kind = "question";
+        assert!(approval.json().get("decisions").is_none());
     }
 
     #[test]

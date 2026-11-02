@@ -390,7 +390,7 @@ fn the_lead_waits_steers_and_decides_for_a_working_agent(cx: &mut TestAppContext
             cx
         )
         .unwrap_err()
-        .contains("cannot be remembered")
+        .contains("cannot be allowed for the session")
     );
     let approved = call(
         window,
@@ -675,4 +675,118 @@ fn deleting_an_agents_session_retires_it_from_its_lead(cx: &mut TestAppContext) 
         .unwrap_err()
         .contains("No open agent")
     );
+}
+
+#[gpui::test]
+fn plain_request_ids_decide_and_user_decisions_are_not_news(cx: &mut TestAppContext) {
+    let (window, worker, lead) = lead(cx);
+    window
+        .update(cx, |shell, _, cx| {
+            // The lead is busy, so events wait in its mailbox.
+            shell.sessions[&lead].update(cx, |v, cx| {
+                v.input.update(cx, |i, cx| i.set_text("typing".into(), cx))
+            });
+            shell.save_summary(
+                lead,
+                Summary {
+                    tasks: vec![SummaryTask {
+                        session: Some(worker),
+                        name: "docs".into(),
+                        title: "docs: README".into(),
+                        provider: "fixture".into(),
+                        model: None,
+                        status: "running".into(),
+                    }],
+                    live: true,
+                },
+                cx,
+            );
+        })
+        .unwrap();
+    cx.run_until_parked();
+    // Claude's request ids reach the session JSON-encoded.
+    let approval = |id: &str| Approval {
+        id: format!("\"{id}\""),
+        title: "Allow Bash?".into(),
+        detail: "python3 -c 'print(1)'".into(),
+        can_remember: true,
+    };
+    let decisions = window
+        .update(cx, |shell, _, cx| {
+            shell.sessions[&worker]
+                .update(cx, |v, cx| v.test_wait_for_approval(approval("w-1"), cx))
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let list = call(window, lead, "l1", "agents.list", json!({}), cx).unwrap();
+    let pending = &list["agents"][0]["needsInput"][0];
+    assert_eq!(pending["requestId"], "w-1");
+    assert_eq!(pending["decisions"], json!(["allow", "session", "deny"]));
+    assert_eq!(list["agents"][0]["runtimeMode"], "supervised");
+    assert_eq!(list["unreportedEvents"], 1);
+
+    // The user allows it in the agent's chat before the lead gets to it: the
+    // lead's "needs input" event is dropped, not sent later as a wake-up.
+    window
+        .update(cx, |shell, _, cx| {
+            shell.sessions[&worker].update(cx, |v, cx| {
+                assert!(v.decide_notification_request("\"w-1\"", Decision::Allow, cx))
+            })
+        })
+        .unwrap();
+    cx.run_until_parked();
+    assert!(matches!(
+        decisions.try_recv().unwrap().decision,
+        Decision::Allow
+    ));
+    let list = call(window, lead, "l2", "agents.list", json!({}), cx).unwrap();
+    assert_eq!(list["unreportedEvents"], 0);
+    let late = call(
+        window,
+        lead,
+        "a1",
+        "agents.approve",
+        json!({"name":"docs","requestId":"w-1","decision":"allow"}),
+        cx,
+    )
+    .unwrap_err();
+    assert!(late.contains("no longer pending"), "{late}");
+
+    // The next request is decided by its plain id, as needsInput shows it.
+    let decisions = window
+        .update(cx, |shell, _, cx| {
+            shell.sessions[&worker]
+                .update(cx, |v, cx| v.test_wait_for_approval(approval("w-2"), cx))
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let approved = call(
+        window,
+        lead,
+        "a2",
+        "agents.approve",
+        json!({"name":"docs","requestId":"w-2","decision":"session"}),
+        cx,
+    )
+    .unwrap();
+    assert_eq!(approved["requestId"], "w-2");
+    assert!(matches!(
+        decisions.try_recv().unwrap().decision,
+        Decision::Session
+    ));
+
+    // Once the lead is free, only news reaches it.
+    window
+        .update(cx, |shell, _, cx| {
+            shell.sessions[&lead].update(cx, |v, cx| {
+                v.input.update(cx, |i, cx| i.set_text(String::new(), cx))
+            });
+            shell.sessions[&worker].update(cx, |v, cx| v.test_end_turn(cx));
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let updates = wake_ups(window, lead, cx);
+    assert_eq!(updates.len(), 1, "{updates:?}");
+    assert!(updates[0].contains("docs finished"));
+    assert!(!updates[0].contains("needs input"), "{}", updates[0]);
 }

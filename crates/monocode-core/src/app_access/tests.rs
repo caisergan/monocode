@@ -67,6 +67,106 @@ fn operator_launch_applies_validated_overrides_without_transferring_app_access()
         .any(|s| s["id"] == "reasoningEffort"));
 }
 
+fn haiku_alias() -> Model {
+    Model {
+        id: "haiku".into(),
+        name: "Haiku 5.5".into(),
+        alias_target: Some("claude-haiku-5-5".into()),
+        efforts: vec!["low".into(), "medium".into(), "high".into()],
+        default_effort: Some("high".into()),
+        fast: false,
+        thinking: false,
+        default: false,
+        tiers: Vec::new(),
+        controls: Vec::new(),
+    }
+}
+
+#[test]
+fn agents_name_any_model_id_and_effort_like_a_herdr_pane() {
+    let lead = Settings {
+        model: Some("opus".into()),
+        effort: Some("xhigh".into()),
+        ..Default::default()
+    };
+    let catalog = [haiku_alias()];
+    let agent = |input: Value| {
+        launch_settings_for(&input, "claude", lead.clone(), Kind::Claude, &catalog, true)
+    };
+
+    // A pinned ID the catalog does not list goes to the CLI as given.
+    let pinned = agent(json!({"model":"claude-haiku-4-5","effort":"high"})).unwrap();
+    assert_eq!(pinned.model.as_deref(), Some("claude-haiku-4-5"));
+    assert_eq!(pinned.effort.as_deref(), Some("high"));
+    assert_eq!(pinned.model_settings["effort"], "high");
+
+    // Unlisted and without effort: the CLI picks; nothing of the lead's leaks.
+    let bare = agent(json!({"model":"claude-sonnet-4-5"})).unwrap();
+    assert_eq!(bare.effort, None);
+    assert!(bare.model_settings.is_empty());
+
+    // `[1m]` asks for the 1M context window, as `claude --model` takes it.
+    let wide = agent(json!({"model":"claude-opus-4-6[1m]","effort":"max"})).unwrap();
+    assert_eq!(wide.model.as_deref(), Some("claude-opus-4-6"));
+    assert_eq!(wide.model_settings["context"], "1m");
+
+    // A listed alias without effort runs at the default models.list shows,
+    // not at whatever the CLI would pick.
+    let alias = agent(json!({"model":"haiku"})).unwrap();
+    assert_eq!(alias.model.as_deref(), Some("haiku"));
+    assert_eq!(alias.effort.as_deref(), Some("high"));
+    // Any level the CLI takes, also one the catalog does not list for it.
+    let listed = agent(json!({"model":"haiku","effort":"xhigh"})).unwrap();
+    assert_eq!(listed.effort.as_deref(), Some("xhigh"));
+
+    // The lead's own model keeps the lead's effort.
+    let same = agent(json!({"prompt":"x"})).unwrap();
+    assert_eq!(same.model.as_deref(), Some("opus"));
+    assert_eq!(same.effort.as_deref(), Some("xhigh"));
+
+    for (bad, error) in [
+        (json!({"model":"claude haiku"}), "full model ID"),
+        (
+            json!({"model":"claude-haiku-4-5","effort":"extreme"}),
+            "effort must be one of",
+        ),
+        (
+            json!({"model":"claude-haiku-4-5","modelSettings":{"fast":"true"}}),
+            "modelSettings needs a model listed",
+        ),
+    ] {
+        let message = agent(bad.clone()).unwrap_err();
+        assert!(message.contains(error), "{bad}: {message}");
+    }
+
+    // Operator and Mono launches still take only listed models.
+    let message = launch_settings(
+        &json!({"model":"claude-haiku-4-5"}),
+        "claude",
+        lead.clone(),
+        Kind::Claude,
+        &catalog,
+    )
+    .unwrap_err();
+    assert!(message.contains("Unknown model"), "{message}");
+    // Other harnesses resolve models through their catalog only.
+    assert!(launch_settings_for(
+        &json!({"model":"unlisted-model"}),
+        "codex",
+        Settings::default(),
+        Kind::OpenCode,
+        &[model()],
+        true
+    )
+    .is_err());
+
+    let described = model_description(Kind::Claude, &haiku_alias());
+    assert_eq!(described["resolvesTo"], "claude-haiku-5-5");
+    assert!(model_description(Kind::Codex, &model())
+        .get("resolvesTo")
+        .is_none());
+}
+
 #[test]
 fn operator_thread_access_survives_reopen_without_enabling_other_sessions() {
     let dir = tempfile::tempdir().unwrap();

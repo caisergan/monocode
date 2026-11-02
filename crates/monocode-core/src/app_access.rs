@@ -121,7 +121,44 @@ fn is_effort(key: &str) -> bool {
     )
 }
 pub fn model_description(kind: Kind, model: &Model) -> Value {
-    json!({"id":model.id,"name":model.name,"settings":model_controls(kind,model).iter().map(|c| json!({"id":c.id,"label":c.name,"defaultValue":c.current,"options":c.choices.iter().map(|(value,label)|json!({"value":value,"label":label})).collect::<Vec<_>>()})).collect::<Vec<_>>()})
+    let mut value = json!({"id":model.id,"name":model.name,"settings":model_controls(kind,model).iter().map(|c| json!({"id":c.id,"label":c.name,"defaultValue":c.current,"options":c.choices.iter().map(|(value,label)|json!({"value":value,"label":label})).collect::<Vec<_>>()})).collect::<Vec<_>>()});
+    // A moving alias such as "haiku" names its current concrete model.
+    if let Some(target) = &model.alias_target {
+        value["resolvesTo"] = json!(target);
+    }
+    value
+}
+
+/// Effort levels a harness CLI takes by name, whatever the model.
+fn harness_efforts(kind: Kind) -> &'static [&'static str] {
+    match kind {
+        Kind::Claude => &[
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultrathink",
+            "ultracode",
+        ],
+        Kind::Codex => &["none", "minimal", "low", "medium", "high", "xhigh"],
+        _ => &[],
+    }
+}
+fn effort_key(kind: Kind) -> &'static str {
+    if kind == Kind::Codex {
+        "reasoningEffort"
+    } else {
+        "effort"
+    }
+}
+/// A model ID as a CLI's `--model` takes it: letters, digits and `-_.:/@`.
+fn model_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 200
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '/' | '@'))
 }
 
 /// Discovery runs on workers, independently of which provider views are open.
@@ -150,13 +187,36 @@ pub fn models_catalog(profiles: Vec<(Kind, crate::accounts::Profile)>) -> Result
 pub fn launch_settings(
     input: &Value,
     source_provider: &str,
-    mut settings: Settings,
+    settings: Settings,
     kind: Kind,
     models: &[Model],
 ) -> Result<Settings, String> {
+    launch_settings_for(input, source_provider, settings, kind, models, false)
+}
+
+/// `direct` launches an orchestrator's agent the way a herdr pane runs
+/// `claude --model ID --effort LEVEL`: for harnesses whose CLI resolves model
+/// IDs itself, `model` may be any ID (listed in models.list or not, with an
+/// optional `[1m]`), and `effort` any level the CLI takes. The catalog then
+/// only supplies defaults: a listed model without an effort runs at the
+/// default models.list shows.
+pub fn launch_settings_for(
+    input: &Value,
+    source_provider: &str,
+    mut settings: Settings,
+    kind: Kind,
+    models: &[Model],
+    direct: bool,
+) -> Result<Settings, String> {
     crate::mono::api::validate("sessions.start", input)?;
-    let requested =
-        optional_text(input, "model", 512)?.and_then(|m| crate::store::native_model(&m, kind.id()));
+    let direct = direct && matches!(kind, Kind::Claude | Kind::Codex);
+    let raw = optional_text(input, "model", 512)?;
+    let wide = direct
+        && kind == Kind::Claude
+        && raw
+            .as_deref()
+            .is_some_and(|m| m.to_ascii_lowercase().ends_with("[1m]"));
+    let requested = raw.and_then(|m| crate::store::native_model(&m, kind.id()));
     let changing = source_provider != kind.id()
         || requested
             .as_ref()
@@ -172,19 +232,29 @@ pub fn launch_settings(
     if let Some(model) = requested {
         settings.model = Some(model);
     }
-    let selected = settings
+    let listed = settings
         .model
         .as_deref()
-        .and_then(|id| models.iter().find(|m| m.id == id))
-        .or_else(|| models.iter().find(|m| m.default))
-        .or_else(|| models.first());
+        .and_then(|id| models.iter().find(|m| m.id == id));
     if input.get("model").is_some()
-        && !models
-            .iter()
-            .any(|m| Some(m.id.as_str()) == settings.model.as_deref())
+        && listed.is_none()
+        && !(direct && settings.model.as_deref().is_some_and(model_id))
     {
-        return Err("Unknown model; run models.list for exact model IDs".into());
+        return Err(if direct {
+            "model takes an alias or ID from models.list, or a full model ID such as claude-haiku-4-5".into()
+        } else {
+            "Unknown model; run models.list for exact model IDs".into()
+        });
     }
+    // An agent on an unlisted model gets no other model's settings.
+    let unlisted = direct && settings.model.is_some() && listed.is_none();
+    let selected = if unlisted {
+        None
+    } else {
+        listed
+            .or_else(|| models.iter().find(|m| m.default))
+            .or_else(|| models.first())
+    };
     if settings.model.is_none() {
         settings.model = selected.map(|m| m.id.clone());
     }
@@ -193,7 +263,44 @@ pub fn launch_settings(
         .map(|v| serde_json::from_value(v.clone()).map_err(|e| e.to_string()))
         .transpose()?
         .unwrap_or_default();
-    if let Some(effort) = optional_text(input, "effort", 128)? {
+    let effort = optional_text(input, "effort", 128)?;
+    if direct {
+        let mut effort = effort;
+        if let Some(key) = values.keys().find(|k| is_effort(k)).cloned() {
+            let level = values.remove(&key).unwrap_or_default();
+            effort.get_or_insert(level);
+        }
+        let effort = effort.or_else(|| {
+            settings
+                .effort
+                .is_none()
+                .then(|| selected.and_then(|m| m.default_effort.clone()))
+                .flatten()
+        });
+        if let Some(level) = effort {
+            let levels = harness_efforts(kind);
+            if !levels.contains(&level.as_str()) {
+                return Err(format!("effort must be one of: {}", levels.join(", ")));
+            }
+            settings.model_settings.retain(|key, _| !is_effort(key));
+            settings
+                .model_settings
+                .insert(effort_key(kind).into(), level.clone());
+            settings.effort = Some(level);
+        }
+        if wide {
+            values.insert("context".into(), "1m".into());
+        }
+        if unlisted {
+            if values.keys().any(|key| key != "context") {
+                return Err(
+                    "modelSettings needs a model listed in models.list; pass effort on its own"
+                        .into(),
+                );
+            }
+            settings.model_settings.extend(values.drain());
+        }
+    } else if let Some(effort) = effort {
         let model = selected.ok_or("No model settings available; run models.list first")?;
         let control = model_controls(kind, model)
             .into_iter()
