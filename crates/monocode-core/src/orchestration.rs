@@ -795,9 +795,11 @@ pub fn reads(action: &str) -> bool {
     matches!(action, "agents.list" | "agents.read" | "agents.wait")
 }
 
-pub const HELP: &str = r#"MonoCode agents (orchestrator threads only)
+pub const HELP: &str = r#"MonoCode agents
 Usage: CLI app ACTION --json '{...}'
 Every agent is a separate MonoCode chat session the user can open and talk to. Names: a lowercase letter, then up to 31 lowercase letters, digits, '-' or '_'.
+Any local thread can start agents when the user asks it to delegate; its first agents.start makes it their lead, as if it were sent with Orchestrator selected. An agent cannot start agents of its own.
+Each agent sees only its prompt, none of your conversation: say what to do, what to read, which files it owns, how to test, and how to report. A worktree agent starts from your HEAD (or base), so commit what it needs first, or use workspace "shared". When it reports, review its commit and bring it into your checkout (git cherry-pick) if the user wants it.
 
 agents.start {name, prompt, title?, harness?, model?, effort?, modelSettings?, runtimeMode?, workspace?, base?, checkout?, reveal?}
   Start an agent on prompt. workspace "worktree" (default) gives it its own git worktree, in the <repo>-worktrees folder beside the repository, on branch mc/agent-<name>-<sessionId> from base (a branch or commit; default: your checkout's HEAD); "shared" runs it in your checkout; checkout reuses an existing worktree path (worktrees.list). The result names its checkout and branch. harness is claude, codex, ….
@@ -827,6 +829,15 @@ Wake-ups: when an agent finishes a turn, stops, fails, hits a usage limit or nee
 Also available: models.list, worktrees.list, worktrees.create (a worktree beside the repository, for example for your integration branch), sessions.* for the user's other sessions (run app help).
 The CLI returns {ok,result,requestId}. Retry an uncertain mutation with the same --request-id and identical input.
 "#;
+
+/// Every turn of a thread that is not a lead yet: it can still hand work to
+/// agents when the user asks, and its first `agents.start` makes it their lead.
+pub fn delegation_hint(cli: &str) -> String {
+    format!("<monocode_agents>\nMonoCode adds this, not the user. When the user asks you to delegate or hand work to other MonoCode sessions or agents, start each one as a MonoCode chat session with `{cli} app agents.start --json JSON` (read `{cli} app help agents` first). They appear under this thread in the sidebar, where the user can open them. Your first agents.start makes this thread their lead: MonoCode sends you an [Orchestration update] turn when one finishes or needs input, so never poll.\n</monocode_agents>")
+}
+
+/// The `lead` note of the agents.start that made an ordinary thread a lead.
+pub const BECAME_LEAD: &str = "This thread now leads its agents. MonoCode sends you an [Orchestration update] turn when one finishes a turn, stops, fails or needs input: tell the user what you started, then end your turn instead of polling. Never push, open PRs or deploy without the user's OK.";
 
 /// The lead's instructions. `full` on the turn that turned Orchestrator on;
 /// later turns get a reminder, since the full text stays in its history.

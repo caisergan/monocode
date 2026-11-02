@@ -14,15 +14,31 @@ scopes on its own.
 - Sending a message with Orchestrator selected makes the thread a lead for
   good (`orchestrator_enabled`, like Operator's `operator_enabled`). It keeps
   Operator's app actions and its access policy; it is not read-only.
+- Any other local thread can delegate too, mid-session, when the user asks it
+  to. Each of its turns carries a short hint (`orchestration::delegation_hint`)
+  that names `agents.start` and `app help agents`, and it may call `agents.*`,
+  `models.list` and `worktrees.list` without Operator. Its first successful
+  `agents.start` makes it a lead for good, as a sent `/orchestrator` would
+  (`Conversation::become_lead`); that result carries a `lead` note
+  (`orchestration::BECAME_LEAD`) so the turn knows wake-ups follow. Plan,
+  read-only, remote and Mono turns get no hint.
+- The composer's bottom bar shows Orchestrator (the mode's icon and tint,
+  after the checkout and branch) while the mode is selected and for as long as
+  the thread is a lead, also one that became a lead by delegating.
 - The first lead turn carries the full instructions
-  (`orchestration::lead_context`); later turns carry a short reminder.
+  (`orchestration::lead_context`); later turns carry a short reminder. A
+  thread that became a lead by delegating gets only the reminder: it keeps
+  the role it had and hands out what the user asked for, rather than taking
+  over the herdr workflow (plan, brief, integrate) by itself.
 - Agents appear on the lead's rail in the sidebar, not in the session list.
   Each can be opened and talked to directly. The rail's Stop stops the
   agent's turn like its own Stop button; the lead hears about it. Closed
   agents leave the rail. Deleting an agent's session closes it for its lead.
 - Two agents never share a worktree: `checkout` refuses a path another open
   agent works in. Parallel `agents.start` calls cannot take the same name.
-- Agents get no app access of their own, so they cannot start agents.
+- Agents get no app access of their own, so they cannot start agents:
+  `Shell::add` gives an agent's session no app credentials, and app calls from
+  a session on any lead's roster are refused.
 
 ## Commands
 
@@ -83,3 +99,6 @@ writes to it.
   parked process is not reused is not known yet.
 - New worktrees have no installed dependencies or ignored files; the lead's
   briefs have to say how to set them up.
+- A Codex thread that is not a lead yet runs without Operator's network
+  allowance, so its sandbox may block the first `agents.start` until the user
+  approves running it outside the sandbox. A lead has the allowance.

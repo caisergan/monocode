@@ -39,10 +39,12 @@ Ordinary Operator sessions are visible in project history. Mono launches follow 
 sessions.read returns up to three prose exchanges and nextBefore for older turns; pass that turn ID as before.
 notes.write requires body for a new note; existing notes accept title, body or tags independently.
 Artifacts, memory, soul, habits, cards and notifyOnComplete:true require a Mono.
-Orchestrator threads also have agents.*; run app help agents.
+Project threads, not Monos, also have agents.* to hand tasks to agents, separate sessions that report back to the thread; run app help agents.
 The CLI returns {ok,result,requestId}. Retry uncertain mutations with the same request ID and identical input.
 Assigned projects alone may be addressed. Credentials are provided in the environment; never print them.
 "#;
+/// The calling session's id; present exactly when a session has app access.
+pub const SESSION_ENV: &str = "MONOCODE_APP_SESSION";
 #[derive(Serialize, Deserialize)]
 struct Wire {
     session: i64,
@@ -114,11 +116,12 @@ impl Server {
             rx,
         ))
     }
+    /// Set only for sessions that have app access.
     pub fn environment(&self, session: i64) -> HashMap<String, String> {
         HashMap::from([
             ("MONOCODE_APP_ENDPOINT".into(), self.endpoint.clone()),
             ("MONOCODE_APP_TOKEN".into(), token(&self.secret, session)),
-            ("MONOCODE_APP_SESSION".into(), session.to_string()),
+            (SESSION_ENV.into(), session.to_string()),
         ])
     }
 }
@@ -226,14 +229,14 @@ pub fn client(args: &[String]) -> Result<Value, String> {
         }
     }
     let endpoint: SocketAddr = std::env::var("MONOCODE_APP_ENDPOINT")
-        .map_err(|_| "App access is unavailable outside a Mono's provider process")?
+        .map_err(|_| "MonoCode app access is not available in this session")?
         .parse()
         .map_err(|_| "Invalid app endpoint")?;
     if !endpoint.ip().is_loopback() {
         return Err("App access requires a local endpoint".into());
     }
     let token = std::env::var("MONOCODE_APP_TOKEN").map_err(|_| "App capability missing")?;
-    let session = std::env::var("MONOCODE_APP_SESSION")
+    let session = std::env::var(SESSION_ENV)
         .map_err(|_| "App session missing")?
         .parse()
         .map_err(|_| "Invalid app session")?;

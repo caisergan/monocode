@@ -26,6 +26,20 @@ impl Delivery {
 }
 
 impl Conversation {
+    /// A thread that starts an agent without Orchestrator selected becomes a
+    /// lead for good, as a sent /orchestrator would make it. False when it
+    /// already was one.
+    pub(crate) fn become_lead(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.settings.orchestrator_enabled {
+            return false;
+        }
+        self.settings.orchestrator_enabled = true;
+        self.settings.operator_enabled = true;
+        self.save_settings(cx);
+        cx.notify();
+        true
+    }
+
     /// The orchestration view of this session right now.
     pub(crate) fn agent_observation(&self, cx: &gpui::App) -> Observation {
         let queued = !self.follow_ups.state.paused && !self.follow_ups.state.messages.is_empty();

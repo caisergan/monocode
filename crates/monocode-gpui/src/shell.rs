@@ -1356,7 +1356,10 @@ impl Shell {
             // the indexed working directory so those events cannot erase it.
             view.restore_worktree(worktree, None, cx);
             view.draft_hint = self.draft_sessions.contains(&id);
-            if let Some(bridge) = &self.app_bridge {
+            // Agents get no app access, so they cannot start agents of their own.
+            if let Some(bridge) = &self.app_bridge
+                && !self.orchestration_worker(id)
+            {
                 view.set_app_environment(bridge.environment(id));
             }
             view.set_project_appearance(appearance, cx);
