@@ -593,7 +593,7 @@ pub(crate) struct Shell {
     mobile: mobile_host::Mobile,
     app_results: HashMap<(i64, String), (String, Result<serde_json::Value, String>)>,
     app_pending: HashSet<(i64, String)>,
-    orchestrations: HashMap<i64, orchestration::Run>,
+    orchestrations: orchestration::Orchestrations,
     /// Each lead's last orchestration, whose agents hang under it in the sidebar.
     orchestration_summaries: HashMap<i64, monocode_core::orchestration::Summary>,
     /// Sessions an /operator thread started, by the session that started them.
@@ -980,8 +980,12 @@ impl Shell {
             mobile: mobile_host::Mobile::default(),
             app_results: HashMap::new(),
             app_pending: HashSet::new(),
-            orchestrations: HashMap::new(),
-            orchestration_summaries: sidebar_metadata.orchestrations,
+            orchestrations: Default::default(),
+            orchestration_summaries: sidebar_metadata
+                .orchestrations
+                .into_iter()
+                .map(|(lead, summary)| (lead, summary.after_restart()))
+                .collect(),
             started_by: sidebar_metadata.started_by,
             rails: Default::default(),
             usage_footer: cx.new(|cx| UsageFooter::new(active_kind, cx)),
@@ -1420,7 +1424,6 @@ impl Shell {
                     this.sidebar_frame.update(cx, |_, cx| cx.notify());
                 }
             }));
-        self.observe_orchestration(&view, id, cx);
         self.observe_session_folders(&view, id, cx);
         self.sessions.insert(id, view);
         if !self.order.contains(&id) {

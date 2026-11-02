@@ -131,6 +131,9 @@ pub struct Settings {
     /// A submitted /operator grants this thread access independently of its next draft.
     pub operator_enabled: bool,
     pub orchestrator: bool,
+    /// A submitted /orchestrator makes this thread a lead: it keeps the
+    /// `agents.*` actions and its agents' wake-ups across turns.
+    pub orchestrator_enabled: bool,
     pub new_worktree: bool,
     pub worktree_base: Option<String>,
     pub worktree_cwd: Option<String>,

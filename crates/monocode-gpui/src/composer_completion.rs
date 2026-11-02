@@ -693,7 +693,7 @@ impl Completion {
                 (
                     "orchestrator",
                     "Orchestrator",
-                    "Plan and coordinate agent work",
+                    "Lead agents in their own sessions",
                 ),
                 (
                     "operator",

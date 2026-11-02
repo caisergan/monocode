@@ -43,7 +43,7 @@ impl Shell {
             Err(error) => self.error = Some(format!("Operator app access: {error}")),
         }
     }
-    fn finish_app_call(
+    pub(super) fn finish_app_call(
         &mut self,
         call: Call,
         result: Result<Value, String>,
@@ -134,7 +134,12 @@ impl Shell {
         .detach();
     }
     fn authorize_app_call(&self, call: &Call, cx: &App) -> Result<(), String> {
-        app::validate_operator(&call.action, &call.input)?;
+        let agents = call.action.starts_with("agents.");
+        if agents {
+            monocode_core::orchestration::validate(&call.action, &call.input)?;
+        } else {
+            app::validate_operator(&call.action, &call.input)?;
+        }
         if call.request_id.is_empty()
             || call.request_id.len() > 128
             || !call
@@ -148,8 +153,11 @@ impl Shell {
             .sessions
             .get(&call.session)
             .map(|v| v.read(cx))
-            .filter(|v| v.settings.operator_enabled)
+            .filter(|v| v.settings.operator_enabled || v.settings.orchestrator_enabled)
             .ok_or("Operator is not enabled for this thread.")?;
+        if agents && !caller.settings.orchestrator_enabled {
+            return Err("agents.* actions belong to Orchestrator threads. Turn on /orchestrator in this thread first.".into());
+        }
         if caller.summary.cwd.starts_with("remote://") {
             return Err("Operator is not available on remote projects".into());
         }
@@ -176,13 +184,21 @@ impl Shell {
                     | "notes.list"
                     | "notes.read"
                     | "worktrees.list"
+                    | "agents.list"
+                    | "agents.read"
+                    | "agents.wait"
             )
         {
             return Err("This thread's access policy allows read-only app actions.".into());
         }
         Ok(())
     }
-    fn handle_app_call(&mut self, call: Call, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn handle_app_call(
+        &mut self,
+        call: Call,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Err(error) = self.authorize_app_call(&call, cx) {
             let _ = call.reply.send(Err(error));
             return;
@@ -315,6 +331,10 @@ impl Shell {
     fn dispatch_app_call(&mut self, call: Call, window: &mut Window, cx: &mut Context<Self>) {
         if let Err(error) = self.authorize_app_call(&call, cx) {
             self.finish_app_call(call, Err(error), cx);
+            return;
+        }
+        if call.action.starts_with("agents.") {
+            self.dispatch_agents_call(call, window, cx);
             return;
         }
         let caller = self.sessions[&call.session].read(cx);
@@ -608,16 +628,17 @@ impl Shell {
     }
 }
 fn mutating(action: &str) -> bool {
-    !matches!(
-        action,
-        "models.list"
-            | "sessions.list"
-            | "sessions.read"
-            | "folders.list"
-            | "notes.list"
-            | "notes.read"
-            | "worktrees.list"
-    )
+    !monocode_core::orchestration::reads(action)
+        && !matches!(
+            action,
+            "models.list"
+                | "sessions.list"
+                | "sessions.read"
+                | "folders.list"
+                | "notes.list"
+                | "notes.read"
+                | "worktrees.list"
+        )
 }
 fn worktree_json(tree: &monocode_core::git::Worktree) -> Value {
     json!({"path":tree.path,"branch":tree.branch,"head":tree.head,"main":tree.main,"missing":tree.missing})

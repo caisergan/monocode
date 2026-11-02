@@ -71,9 +71,6 @@ impl Conversation {
             || self.settings.mono.is_some()
             || self.account_switching
             || self.preparing_worktree
-            || self.planning_orchestration
-            || self.orchestration_plan.is_some()
-            || self.orchestration_progress.is_some()
             || self.settings.usage_limit.is_some()
             || !self.history_actions.is_empty()
             || self.mono_ui.external.is_some()

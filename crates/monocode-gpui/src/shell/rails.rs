@@ -108,10 +108,14 @@ impl Shell {
             .any(|s| s.tasks.iter().any(|t| t.session == Some(id)))
     }
     fn rail(&self, id: i64, started: &HashMap<i64, Vec<i64>>) -> Option<Rail> {
-        if let Some(summary) = self.orchestration_summaries.get(&id)
-            && !summary.tasks.is_empty()
+        // Closed agents leave the rail; their sessions are archived.
+        if let Some(summary) = self
+            .orchestration_summaries
+            .get(&id)
+            .map(|summary| summary.open_agents())
+            .filter(|summary| !summary.tasks.is_empty())
         {
-            return Some(Rail::Agents(summary.clone()));
+            return Some(Rail::Agents(summary));
         }
         started
             .get(&id)
@@ -958,19 +962,13 @@ impl Shell {
                                             )
                                         })
                                         .when_some(worker.filter(|_| running), |d, worker| {
-                                            d.child(
-                                                solid("rail-agent-cancel", "Cancel task").on_click(
-                                                    cx.listener(move |this, _, _, cx| {
-                                                        if let Some(view) =
-                                                            this.sessions.get(&worker)
-                                                        {
-                                                            view.update(cx, |v, cx| {
-                                                                v.stop_if_busy(cx)
-                                                            });
-                                                        }
-                                                    }),
-                                                ),
-                                            )
+                                            d.child(solid("rail-agent-stop", "Stop").on_click(
+                                                cx.listener(move |this, _, _, cx| {
+                                                    if let Some(view) = this.sessions.get(&worker) {
+                                                        view.update(cx, |v, cx| v.stop_if_busy(cx));
+                                                    }
+                                                }),
+                                            ))
                                         }),
                                 )
                             });
@@ -1043,6 +1041,7 @@ mod tests {
                         live: false,
                         tasks: vec![monocode_core::orchestration::SummaryTask {
                             session: Some(worker),
+                            name: "tests".into(),
                             title: "Write the tests".into(),
                             provider: "codex".into(),
                             model: None,
