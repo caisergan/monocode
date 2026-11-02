@@ -354,6 +354,7 @@ fn the_lead_waits_steers_and_decides_for_a_working_agent(cx: &mut TestAppContext
                         title: "Run command".into(),
                         detail: "npm install".into(),
                         can_remember: false,
+                        remembers: Vec::new(),
                     },
                     cx,
                 )
@@ -710,6 +711,7 @@ fn plain_request_ids_decide_and_user_decisions_are_not_news(cx: &mut TestAppCont
         title: "Allow Bash?".into(),
         detail: "python3 -c 'print(1)'".into(),
         can_remember: true,
+        remembers: vec!["Bash(python3 -c 'print(1)')".into()],
     };
     let decisions = window
         .update(cx, |shell, _, cx| {

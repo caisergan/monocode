@@ -183,9 +183,11 @@ impl Shell {
         if kinds.is_empty() {
             return;
         }
-        let rows = view.read(cx).agent_rows(cx).unwrap_or_default();
-        let report = orch::final_message(&rows);
-        let elapsed = orch::turn_started_at(&rows).map(|at| now.saturating_sub(at));
+        let chat = view.read(cx);
+        let rows = chat.agent_rows(cx).unwrap_or_default();
+        let steers = chat.agent_steers(cx);
+        let report = orch::final_message(&rows, &steers);
+        let elapsed = orch::turn_started_at(&rows, &steers).map(|at| now.saturating_sub(at));
         let events = kinds.into_iter().map(|kind| {
             let settled = !matches!(kind, EventKind::Blocked(_));
             Event {
@@ -534,7 +536,9 @@ impl Shell {
         let observation = chat.agent_observation(cx);
         let busy = observation.busy;
         let draft = chat.has_saved_draft();
-        let live = chat.agent_rows(cx);
+        let live = chat
+            .agent_rows(cx)
+            .map(|rows| (chat.agent_steers(cx), rows));
         let mut head = json!({"name":name,"sessionId":id,"state":state.id(),"view":mode});
         if since > 0 {
             head["since"] = json!(since);
@@ -566,20 +570,25 @@ impl Shell {
                 }
                 return Ok(value);
             }
-            let rows = match live {
-                Some(rows) => rows,
-                None => locked(&store)?.load(id)?.rows,
+            let (steers, rows) = match live {
+                Some(live) => live,
+                None => {
+                    let store = locked(&store)?;
+                    let rows = store.load(id)?.rows;
+                    let turns = store.agent_settings(id)?.unwrap_or_default().turns;
+                    (orch::steer_prompts(&rows, &turns), rows)
+                }
             };
             let mut value = head;
             if mode == "activity" {
-                value["activity"] = orch::activity(&rows, max_chars.unwrap_or(4_000));
+                value["activity"] = orch::activity(&rows, &steers, max_chars.unwrap_or(4_000));
             } else {
-                let report = orch::final_message(&rows);
+                let report = orch::final_message(&rows, &steers);
                 let limit = max_chars.unwrap_or(12_000);
                 value["finalMessageTruncated"] = json!(report.chars().count() > limit);
                 value["finalMessage"] = json!(orch::tail(&report, limit));
-                value["editedFiles"] = orch::activity(&rows, 0)["editedFiles"].clone();
-                if let Some(at) = orch::turn_started_at(&rows) {
+                value["editedFiles"] = orch::activity(&rows, &steers, 0)["editedFiles"].clone();
+                if let Some(at) = orch::turn_started_at(&rows, &steers) {
                     value["turnStartedAt"] = json!(at);
                 }
             }

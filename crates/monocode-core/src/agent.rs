@@ -234,6 +234,9 @@ pub struct Approval {
     pub title: String,
     pub detail: String,
     pub can_remember: bool,
+    /// What "Allow for this session" allows from then on, when the provider
+    /// says: Claude rules such as `Bash(npm test:*)` or `acceptEdits mode`.
+    pub remembers: Vec<String>,
 }
 #[derive(Clone, Debug)]
 pub enum Decision {

@@ -118,6 +118,12 @@ fn agents_name_any_model_id_and_effort_like_a_herdr_pane() {
     // Any level the CLI takes, also one the catalog does not list for it.
     let listed = agent(json!({"model":"haiku","effort":"xhigh"})).unwrap();
     assert_eq!(listed.effort.as_deref(), Some("xhigh"));
+    // The ID an alias resolves to is the same entry: it runs at that entry's
+    // default effort and stays pinned to the ID it named.
+    let resolved = agent(json!({"model":"claude-haiku-5-5"})).unwrap();
+    assert_eq!(resolved.model.as_deref(), Some("claude-haiku-5-5"));
+    assert_eq!(resolved.effort.as_deref(), Some("high"));
+    assert_eq!(resolved.model_settings["effort"], "high");
 
     // The lead's own model keeps the lead's effort.
     let same = agent(json!({"prompt":"x"})).unwrap();
