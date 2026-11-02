@@ -18,8 +18,16 @@ scopes on its own.
   (`orchestration::lead_context`); later turns carry a short reminder.
 - Agents appear on the lead's rail in the sidebar, not in the session list.
   Each can be opened and talked to directly. The rail's Stop stops the
-  agent's turn like its own Stop button; the lead hears about it. Closed
-  agents leave the rail. Deleting an agent's session closes it for its lead.
+  agent's turn like its own Stop button; the lead hears about it. Deleting an
+  agent's session closes it for its lead.
+- A lead keeps its orchestrator mark (the `share` glyph, "Orchestrator, 1
+  agent, 3 past") and its rail for good, also after every agent closed and
+  across restarts: the roster is saved per lead. Closed agents fold under
+  "N past agents" below the open ones. Each says how its work ended
+  (`SummaryTask::outcome`, kept by `close`: Done, Failed or Stopped; runs
+  saved before that say Closed) and still opens its archived chat, or reads
+  Deleted when that chat is gone. The rail unfolds while the lead is in view,
+  chosen or working, as before.
 - Two agents never share a worktree: `checkout` refuses a path another open
   agent works in. Parallel `agents.start` calls cannot take the same name.
 - Agents get no app access of their own, so they cannot start agents.

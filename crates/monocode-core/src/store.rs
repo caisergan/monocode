@@ -1307,6 +1307,7 @@ mod tests {
                 provider: "codex".into(),
                 model: None,
                 status: "running".into(),
+                outcome: None,
             }],
             live: true,
         };

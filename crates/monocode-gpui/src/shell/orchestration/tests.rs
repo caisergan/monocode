@@ -240,6 +240,13 @@ fn a_started_agent_reports_its_failed_turn_to_the_lead(cx: &mut TestAppContext) 
                 shell.orchestration_summaries[&lead].tasks[0].status,
                 "closed"
             );
+            // The lead's past agents still say how its work ended.
+            assert_eq!(
+                shell.orchestration_summaries[&lead].tasks[0]
+                    .outcome
+                    .as_deref(),
+                Some("failed")
+            );
             assert!(shell.sessions[&id].read(cx).summary.archived);
             assert!(
                 locked(&shell.store)
@@ -296,6 +303,7 @@ fn the_lead_waits_steers_and_decides_for_a_working_agent(cx: &mut TestAppContext
                         provider: "fixture".into(),
                         model: None,
                         status: "running".into(),
+                        outcome: None,
                     }],
                     live: true,
                 },
@@ -472,6 +480,7 @@ fn a_stop_the_lead_asked_for_is_not_news(cx: &mut TestAppContext) {
                         provider: "fixture".into(),
                         model: None,
                         status: "running".into(),
+                        outcome: None,
                     }],
                     live: true,
                 },
@@ -576,6 +585,7 @@ fn reading_a_finished_agent_counts_as_its_update_and_open_shows_it(cx: &mut Test
                         provider: "fixture".into(),
                         model: None,
                         status: "running".into(),
+                        outcome: None,
                     }],
                     live: true,
                 },
@@ -697,6 +707,7 @@ fn plain_request_ids_decide_and_user_decisions_are_not_news(cx: &mut TestAppCont
                         provider: "fixture".into(),
                         model: None,
                         status: "running".into(),
+                        outcome: None,
                     }],
                     live: true,
                 },
