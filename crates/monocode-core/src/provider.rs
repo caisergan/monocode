@@ -1096,6 +1096,16 @@ impl Protocol {
                 .and_then(|p| serde_json::to_string_pretty(p).ok())
                 .unwrap_or_else(|| "The agent is requesting permission to continue.".into());
         }
+        // Claude can remember only what it suggested; without a suggestion a
+        // session decision would be a plain allow.
+        let (claude_remembers, remembers) = if kind == "claude" {
+            (
+                claude_session_permissions(&request).is_some(),
+                claude_session_scope(&request),
+            )
+        } else {
+            (true, Vec::new())
+        };
         self.approvals
             .insert(id.clone(), (wire, kind.into(), request));
         if self.request.settings.plan || self.request.settings.access == AccessMode::ReadOnly {
@@ -1132,7 +1142,8 @@ impl Protocol {
             id,
             title,
             detail,
-            can_remember: self.request.kind != Kind::Codex && !file_change,
+            can_remember: self.request.kind != Kind::Codex && !file_change && claude_remembers,
+            remembers,
         }));
         Ok(())
     }
@@ -1200,8 +1211,8 @@ impl Protocol {
                 json!({"behavior":"deny","message":"Denied by the user"})
             };
             if session && allow {
-                if let Some(suggestions) = request.get("permission_suggestions") {
-                    response["updatedPermissions"] = suggestions.clone();
+                if let Some(permissions) = claude_session_permissions(&request) {
+                    response["updatedPermissions"] = permissions;
                 }
             }
             write_json(
@@ -1509,6 +1520,7 @@ fn run_operation(
                     "--mcp-config",
                     &json!({"mcpServers":{"monocode_visual":server}}).to_string(),
                 ]);
+                cap_claude_mcp_wait(&mut command);
                 allowed.push(crate::visual_bridge::CLAUDE_ALLOWED_TOOLS);
                 if let Some(instructions) =
                     crate::visual_bridge::instructions(&settings.environment, true)
@@ -1875,6 +1887,80 @@ fn run_operation(
     result
 }
 
+/// Claude's permission suggestions for "Allow for this session", each scoped
+/// to the session. Claude proposes Bash rules for localSettings, which would
+/// keep them in the project's .claude/settings.local.json after the session;
+/// for a worktree that is the main checkout's file.
+fn claude_session_permissions(request: &Value) -> Option<Value> {
+    let scoped: Vec<Value> = request["permission_suggestions"]
+        .as_array()?
+        .iter()
+        .filter(|update| update.is_object())
+        .map(|update| {
+            let mut update = update.clone();
+            update["destination"] = json!("session");
+            update
+        })
+        .collect();
+    (!scoped.is_empty()).then_some(Value::Array(scoped))
+}
+
+/// What "Allow for this session" allows, in Claude's notation:
+/// `Bash(npm test:*)`, `acceptEdits mode`, `directory /tmp`.
+fn claude_session_scope(request: &Value) -> Vec<String> {
+    let mut scope = Vec::new();
+    for update in request["permission_suggestions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+    {
+        match update["type"].as_str() {
+            Some("addRules" | "replaceRules") if update["behavior"] == "allow" => {
+                for rule in update["rules"].as_array().into_iter().flatten() {
+                    let Some(tool) = rule["toolName"].as_str() else {
+                        continue;
+                    };
+                    scope.push(match rule["ruleContent"].as_str() {
+                        Some(content) => format!("{tool}({content})"),
+                        None => tool.to_owned(),
+                    });
+                }
+            }
+            Some("setMode") => {
+                if let Some(mode) = update["mode"].as_str() {
+                    scope.push(format!("{mode} mode"));
+                }
+            }
+            Some("addDirectories") => {
+                for directory in update["directories"].as_array().into_iter().flatten() {
+                    if let Some(directory) = directory.as_str() {
+                        scope.push(format!("directory {directory}"));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    scope
+}
+
+/// Claude Code holds a session's first turn until every MCP server settles
+/// once any server arrives through --mcp-config, waiting up to MCP_TIMEOUT
+/// (30 s by default). A terminal session does not wait, so one hanging user
+/// server made every MonoCode start 30 s slower. Cap the wait unless the user
+/// chose a timeout; a server that answered but is still listing its tools
+/// stays pending instead of holding the turn.
+const CLAUDE_MCP_WAIT_MS: &str = "10000";
+fn cap_claude_mcp_wait(command: &mut Command) {
+    let chosen = std::env::var_os("MCP_TIMEOUT").is_some()
+        || command
+            .get_envs()
+            .any(|(key, _)| key == std::ffi::OsStr::new("MCP_TIMEOUT"));
+    if !chosen {
+        command.env("MCP_TIMEOUT", CLAUDE_MCP_WAIT_MS);
+    }
+}
+
 /// The `--effort` level Claude Code takes for `effort` on `model`: ultracode
 /// runs xhigh, models without xhigh run max, and Sonnet 4.6 tops out at high.
 /// A dated ID such as claude-haiku-4-5-20251001 counts as its family's model.
@@ -1912,6 +1998,62 @@ fn claude_effort<'a>(effort: &'a str, model: Option<&str>) -> &'a str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn claude_session_decisions_stay_in_the_session_and_say_what_they_allow() {
+        let request = json!({
+            "tool_name": "Bash",
+            "permission_suggestions": [
+                {"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"python3 -c 'print(1)'"}],"behavior":"allow","destination":"localSettings"},
+                {"type":"setMode","mode":"acceptEdits","destination":"session"},
+                {"type":"addDirectories","directories":["/tmp"],"destination":"localSettings"}
+            ]
+        });
+        let scoped = claude_session_permissions(&request).unwrap();
+        assert!(scoped
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|update| update["destination"] == "session"));
+        assert_eq!(
+            scoped[0]["rules"],
+            request["permission_suggestions"][0]["rules"]
+        );
+        assert_eq!(
+            claude_session_scope(&request),
+            [
+                "Bash(python3 -c 'print(1)')",
+                "acceptEdits mode",
+                "directory /tmp"
+            ]
+        );
+        // Nothing suggested: nothing to remember.
+        for empty in [json!({}), json!({"permission_suggestions": []})] {
+            assert!(claude_session_permissions(&empty).is_none());
+            assert!(claude_session_scope(&empty).is_empty());
+        }
+    }
+
+    #[test]
+    fn claude_launches_cap_the_mcp_wait_unless_the_user_set_one() {
+        if std::env::var_os("MCP_TIMEOUT").is_some() {
+            return;
+        }
+        let timeout = |command: &Command| {
+            command
+                .get_envs()
+                .find(|(key, _)| *key == std::ffi::OsStr::new("MCP_TIMEOUT"))
+                .and_then(|(_, value)| value)
+                .map(|value| value.to_string_lossy().into_owned())
+        };
+        let mut command = Command::new("claude");
+        cap_claude_mcp_wait(&mut command);
+        assert_eq!(timeout(&command).as_deref(), Some(CLAUDE_MCP_WAIT_MS));
+        let mut command = Command::new("claude");
+        command.env("MCP_TIMEOUT", "60000");
+        cap_claude_mcp_wait(&mut command);
+        assert_eq!(timeout(&command).as_deref(), Some("60000"));
+    }
+
     #[test]
     fn claude_effort_fits_the_level_to_the_model_also_for_dated_ids() {
         assert_eq!(claude_effort("ultracode", Some("opus")), "xhigh");

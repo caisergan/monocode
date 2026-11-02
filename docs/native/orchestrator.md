@@ -31,12 +31,12 @@ prints the reference (`orchestration::HELP`).
 
 | Action | Does |
 |---|---|
-| `agents.start {name, prompt, title?, harness?, model?, effort?, modelSettings?, runtimeMode?, workspace?, base?, checkout?, reveal?}` | New session. Default `workspace: "worktree"` creates branch `mc/agent-<name>-<id>` from the lead's HEAD (or `base`); `"shared"` uses the lead's checkout; `checkout` reuses a listed worktree. Inherits the lead's provider, model (with its effort), access policy and account unless set. Like a herdr pane's `claude --model ID --effort LEVEL`, `model` and `effort` go to a Claude or Codex agent's CLI as given (`app_access::launch_settings_for` with `direct`): any model ID, listed in `models.list` or not (`claude-haiku-4-5`, `claude-opus-4-6[1m]`), and any effort level that CLI takes. The catalog only supplies defaults: a listed model without `effort` runs at the default `models.list` shows. Other harnesses still take only listed models. |
-| `agents.list {}` | Name, state, since, checkout, branch, harness, model (and `resolvedModel` once an alias resolved), effort, runtimeMode, pending input with the decisions each request takes, queued or held messages. |
-| `agents.read {name, view?}` | `activity`: the latest turn's prompt, tool steps, latest text and last tool output. `last`: the final message and edited files. `history`: earlier exchanges. `auto` picks activity while working. |
+| `agents.start {name, prompt, title?, harness?, model?, effort?, modelSettings?, runtimeMode?, workspace?, base?, checkout?, reveal?}` | New session. Default `workspace: "worktree"` creates branch `mc/agent-<name>-<id>` from the lead's HEAD (or `base`) in a worktree under `<repo>-worktrees/` beside the repository; `"shared"` uses the lead's checkout; `checkout` reuses a listed worktree. Inherits the lead's provider, model (with its effort), access policy and account unless set. Like a herdr pane's `claude --model ID --effort LEVEL`, `model` and `effort` go to a Claude or Codex agent's CLI as given (`app_access::launch_settings_for` with `direct`): any model ID, listed in `models.list` or not (`claude-haiku-4-5`, `claude-opus-4-6[1m]`), and any effort level that CLI takes. The catalog only supplies defaults: a listed model without `effort` runs at the default `models.list` shows, and so does the ID a listed alias resolves to (`claude-haiku-5-5` for `haiku`), which keeps its pinned ID. Other harnesses still take only listed models. |
+| `agents.list {}` | Name, state, since, checkout, branch, harness, model (and `resolvedModel` once an alias resolved to another ID), effort, runtimeMode, `needsInput` with the decisions each request takes, `error`, `queuedMessages` or `heldMessages`. Fields without a value are left out. |
+| `agents.read {name, view?}` | `activity`: the latest turn's prompt, tool steps, latest text and last tool output. `last`: the final message and edited files. `history`: earlier exchanges. `auto` picks activity while working. A message steered into a running turn is a `Steer` step of that turn, not a new turn (`orchestration::steer_prompts` reads the turn receipts' `joined_turn`), so the turn's prompt, start time and the wake-up's duration stay the original turn's. |
 | `agents.prompt {name, prompt, mode?}` | Idle agent: next turn. Working agent: steer (default) or queue. Blocked agents refuse. It goes through the agent's message queue, so a draft the user is writing in that agent's composer is never touched. |
 | `agents.wait {names?, until?, timeoutSeconds?}` | Returns unreported events, waiting up to 45 s for one. Returned events are not sent again as a wake-up. |
-| `agents.approve {name, requestId?, decision}` / `agents.answer {name, requestId?, answers \| skip}` | Decide an agent's approval or question through the same path as its cards. Request ids are the plain provider ids; the user can decide the same request in the agent's chat or an approval toast, and a request decided there is no longer pending. |
+| `agents.approve {name, requestId?, decision}` / `agents.answer {name, requestId?, answers \| skip}` | Decide an agent's approval or question through the same path as its cards. Request ids are the plain provider ids; the user can decide the same request in the agent's chat or an approval toast, and a request decided there is no longer pending. `session` (the card's "Allow for this session") sends Claude back its own permission suggestions with every destination set to `session`, and `needsInput` lists them as `sessionAllows` (`Bash(python3 -c 'print(1)')`, `acceptEdits mode`). Claude suggests a Bash rule for that exact command or its prefix, so a different command asks again. Claude's suggestions target `localSettings`; sent as they came, they were saved in the project's `.claude/settings.local.json`, for a worktree in the main checkout's. Without a suggestion, a Claude request does not offer `session`. |
 | `agents.stop {name}` / `agents.close {name}` | Stop the turn and hold queued messages; close also archives the session. Worktrees stay. |
 | `agents.open {name}` | Open the agent's chat in a tab for the user. |
 
@@ -71,8 +71,15 @@ writes to it.
 - A lead can have 12 open agents.
 - `models.list` shows what a moving alias runs today (`resolvesTo`, for
   example `haiku` → `claude-haiku-5-5`). Pass the full ID to pin a version.
-- Each Claude turn that starts a new CLI process waits for the user's MCP
-  servers to connect, so an MCP server that times out delays every agent start
-  and every wake-up by its timeout (30 s by default).
+- Claude Code holds the first turn of a new CLI process until every MCP server
+  settles whenever a server arrives through `--mcp-config`, as MonoCode's
+  visual server does; a terminal session does not wait. One hanging user
+  server (an OData bridge whose host is down, a server that never lists its
+  tools) then delayed every agent start and every lead wake-up by
+  `MCP_TIMEOUT`, 30 s by default. MonoCode now sets `MCP_TIMEOUT=10000` for
+  those launches unless the user set it (`provider::cap_claude_mcp_wait`).
+- Lead wake-ups still start a new CLI process even when idle-agent reuse is
+  on; the 2026-11-02 test run's eight lead turns all started cold. Why the
+  parked process is not reused is not known yet.
 - New worktrees have no installed dependencies or ignored files; the lead's
   briefs have to say how to set them up.

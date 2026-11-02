@@ -151,6 +151,9 @@ pub struct Request {
     pub items: Value,
     /// An approval that can be allowed for the rest of the agent's session.
     pub remember: bool,
+    /// What a session decision allows from then on, when the provider says:
+    /// Claude rules such as `Bash(npm test:*)` or `acceptEdits mode`.
+    pub remembers: Vec<String>,
 }
 impl Request {
     pub fn json(&self) -> Value {
@@ -166,6 +169,9 @@ impl Request {
             } else {
                 json!(["allow", "deny"])
             };
+            if self.remember && !self.remembers.is_empty() {
+                value["sessionAllows"] = json!(self.remembers);
+            }
         }
         value
     }
@@ -480,39 +486,78 @@ pub fn tail(text: &str, count: usize) -> String {
     }
 }
 
-/// Rows joined into transcript blocks: continuation rows belong to the row
-/// that began their block.
-fn blocks(rows: &[Row]) -> Vec<(&str, String, Option<u64>)> {
-    let mut blocks: Vec<(&str, String, Option<u64>)> = Vec::new();
-    for row in rows {
+/// A transcript block: continuation rows joined to the row that began it.
+struct Block<'a> {
+    role: &'a str,
+    text: String,
+    sent_at: Option<u64>,
+    /// A message steered into a running turn, not the start of a turn.
+    steer: bool,
+}
+impl Block<'_> {
+    fn prompt(&self) -> bool {
+        matches!(self.role, "user" | "mono-system")
+    }
+}
+/// Rows joined into transcript blocks. `steers` holds the row indices of
+/// messages that joined a running turn (see `steer_prompts`).
+fn blocks<'a>(rows: &'a [Row], steers: &[usize]) -> Vec<Block<'a>> {
+    let mut blocks: Vec<Block<'a>> = Vec::new();
+    for (ix, row) in rows.iter().enumerate() {
         match blocks.last_mut() {
-            Some(block) if !row.first && block.0 == row.role => block.1.push_str(&row.text),
-            _ => blocks.push((row.role.as_str(), row.text.clone(), row.sent_at)),
+            Some(block) if !row.first && block.role == row.role => block.text.push_str(&row.text),
+            _ => blocks.push(Block {
+                role: row.role.as_str(),
+                text: row.text.clone(),
+                sent_at: row.sent_at,
+                steer: steers.contains(&ix),
+            }),
         }
     }
     blocks
 }
-fn last_prompt(blocks: &[(&str, String, Option<u64>)]) -> usize {
+/// The block that began the latest turn; a steer belongs to the turn it joined.
+fn last_prompt(blocks: &[Block]) -> usize {
     blocks
         .iter()
-        .rposition(|(role, _, _)| matches!(*role, "user" | "mono-system"))
+        .rposition(|block| block.prompt() && !block.steer)
         .unwrap_or(0)
+}
+
+/// Row indices of the messages that were steered into a running turn, from
+/// the session's turn receipts (keyed by the row after each prompt).
+pub fn steer_prompts(
+    rows: &[Row],
+    turns: &std::collections::HashMap<usize, crate::agent::TurnInfo>,
+) -> Vec<usize> {
+    let mut steers: Vec<usize> = turns
+        .iter()
+        .filter(|(_, info)| info.joined_turn.is_some())
+        .filter_map(|(&turn, _)| {
+            rows[..turn.min(rows.len())]
+                .iter()
+                .rposition(|row| row.first && row.is_prompt())
+        })
+        .collect();
+    steers.sort_unstable();
+    steers.dedup();
+    steers
 }
 
 /// The agent's final message in its latest turn: the replies after its last
 /// tool call, or its last reply when it ended on a tool.
-pub fn final_message(rows: &[Row]) -> String {
-    let blocks = blocks(rows);
+pub fn final_message(rows: &[Row], steers: &[usize]) -> String {
+    let blocks = blocks(rows, steers);
     let turn = &blocks[last_prompt(&blocks)..];
     let after_tools = turn
         .iter()
-        .rposition(|(role, _, _)| *role == "tool")
+        .rposition(|block| block.role == "tool")
         .map_or(0, |ix| ix + 1);
-    let text = |range: &[(&str, String, Option<u64>)]| {
+    let text = |range: &[Block]| {
         range
             .iter()
-            .filter(|(role, _, _)| matches!(*role, "assistant" | "error"))
-            .map(|(_, text, _)| text.trim())
+            .filter(|block| matches!(block.role, "assistant" | "error"))
+            .map(|block| block.text.trim())
             .filter(|text| !text.is_empty())
             .collect::<Vec<_>>()
             .join("\n\n")
@@ -523,36 +568,48 @@ pub fn final_message(rows: &[Row]) -> String {
     }
     turn.iter()
         .rev()
-        .find(|(role, text, _)| *role == "assistant" && !text.trim().is_empty())
-        .map(|(_, text, _)| text.trim().to_owned())
+        .find(|block| block.role == "assistant" && !block.text.trim().is_empty())
+        .map(|block| block.text.trim().to_owned())
         .unwrap_or_default()
 }
 
-/// When the latest turn began (ms), from its prompt row.
-pub fn turn_started_at(rows: &[Row]) -> Option<u64> {
-    let blocks = blocks(rows);
-    blocks.get(last_prompt(&blocks)).and_then(|block| block.2)
+/// When the latest turn began (ms), from its prompt row. A steer does not
+/// restart the clock.
+pub fn turn_started_at(rows: &[Row], steers: &[usize]) -> Option<u64> {
+    let blocks = blocks(rows, steers);
+    blocks
+        .get(last_prompt(&blocks))
+        .and_then(|block| block.sent_at)
 }
 
 /// What an agent is doing in its latest turn: its prompt, the steps it took,
 /// and its latest words.
-pub fn activity(rows: &[Row], max_chars: usize) -> Value {
-    let blocks = blocks(rows);
+pub fn activity(rows: &[Row], steers: &[usize], max_chars: usize) -> Value {
+    let blocks = blocks(rows, steers);
     let start = last_prompt(&blocks);
     let turn = &blocks[start..];
     let prompt = turn
         .first()
-        .filter(|(role, _, _)| matches!(*role, "user" | "mono-system"))
-        .map(|(_, text, _)| crate::response::limit(text.trim(), 600))
+        .filter(|block| block.prompt())
+        .map(|block| crate::response::limit(block.text.trim(), 600))
         .unwrap_or_default();
     let mut steps = Vec::new();
     let mut last_output = None;
     let mut edited: Vec<String> = Vec::new();
-    for (role, text, _) in turn {
-        if *role != "tool" {
+    for block in turn {
+        // A steer shows where it reached the agent among its steps.
+        if block.steer && block.prompt() {
+            steps.push(json!({
+                "action": "Steer",
+                "target": crate::response::limit(block.text.trim(), 400),
+                "state": "done",
+            }));
             continue;
         }
-        let Ok(tool) = serde_json::from_str::<ToolCall>(text) else {
+        if block.role != "tool" {
+            continue;
+        }
+        let Ok(tool) = serde_json::from_str::<ToolCall>(&block.text) else {
             continue;
         };
         let (action, target) = tool.summary();
@@ -589,8 +646,8 @@ pub fn activity(rows: &[Row], max_chars: usize) -> Value {
     let latest = turn
         .iter()
         .rev()
-        .find(|(role, text, _)| *role == "assistant" && !text.trim().is_empty())
-        .map(|(_, text, _)| text.trim().to_owned())
+        .find(|block| block.role == "assistant" && !block.text.trim().is_empty())
+        .map(|block| block.text.trim().to_owned())
         .unwrap_or_default();
     let mut value = json!({
         "prompt": prompt,
@@ -602,7 +659,7 @@ pub fn activity(rows: &[Row], max_chars: usize) -> Value {
     if earlier > 0 {
         value["earlierSteps"] = json!(earlier);
     }
-    if let Some(started) = turn.first().and_then(|block| block.2) {
+    if let Some(started) = turn.first().and_then(|block| block.sent_at) {
         value["turnStartedAt"] = json!(started);
     }
     if let Some(output) = last_output {
@@ -743,11 +800,11 @@ Usage: CLI app ACTION --json '{...}'
 Every agent is a separate MonoCode chat session the user can open and talk to. Names: a lowercase letter, then up to 31 lowercase letters, digits, '-' or '_'.
 
 agents.start {name, prompt, title?, harness?, model?, effort?, modelSettings?, runtimeMode?, workspace?, base?, checkout?, reveal?}
-  Start an agent on prompt. workspace "worktree" (default) gives it its own git worktree and branch from base (default: your checkout's HEAD); "shared" runs it in your checkout; checkout reuses an existing worktree path (worktrees.list). harness is claude, codex, ….
-  model: an alias or ID from models.list (an alias's resolvesTo names the model it runs today), or for claude and codex any model ID their CLI takes, such as claude-haiku-4-5 or claude-opus-4-6[1m]. effort: claude takes low, medium, high, xhigh, max, ultrathink or ultracode; codex takes none, minimal, low, medium, high or xhigh. Without effort, a model from models.list runs at the default it shows there, and any other model at its CLI's default. modelSettings takes other values from models.list.
+  Start an agent on prompt. workspace "worktree" (default) gives it its own git worktree, in the <repo>-worktrees folder beside the repository, on branch mc/agent-<name>-<sessionId> from base (a branch or commit; default: your checkout's HEAD); "shared" runs it in your checkout; checkout reuses an existing worktree path (worktrees.list). The result names its checkout and branch. harness is claude, codex, ….
+  model: an alias or ID from models.list (an alias's resolvesTo names the model it runs today), or for claude and codex any model ID their CLI takes, such as claude-haiku-4-5 or claude-opus-4-6[1m]. effort: claude takes low, medium, high, xhigh, max, ultrathink or ultracode; codex takes none, minimal, low, medium, high or xhigh. Without effort, a model from models.list (an alias, or the ID its resolvesTo names) runs at the default it shows there, and any other model at its CLI's default. modelSettings takes other values from models.list.
   runtimeMode: read-only, supervised (asks before changes), auto-accept-edits, auto or full-access. The agent inherits your model with its effort, your access policy and your account unless you set them. reveal opens it in a tab.
 agents.list {}
-  Every agent: name, sessionId, state, since, checkout, branch, harness, model (resolvedModel once an alias resolved), effort, runtimeMode, pending input, queued messages.
+  Every agent: name, sessionId, state, since, checkout, branch, harness, model, resolvedModel (once an alias resolved to another ID), effort, runtimeMode, needsInput (its pending requests), error, queuedMessages or heldMessages. A field without a value is left out.
 agents.read {name, view?, maxChars?, before?, limit?}
   view "activity": what it is doing in its latest turn (prompt, tool steps, latest text, last tool output). "last": its final message and the files it edited. "history": earlier exchanges (before/limit page back). "auto" (default): activity while working or blocked, otherwise last.
 agents.prompt {name, prompt, mode?}
@@ -755,7 +812,7 @@ agents.prompt {name, prompt, mode?}
 agents.wait {names?, until?, timeoutSeconds?}
   Returns the agents' unreported events (finished, stopped, failed, usageLimited, blocked), waiting up to timeoutSeconds (default 30, max 45) for the first one. until filters by resulting state: idle, blocked, stopped, failed, usageLimited. Returned events are not sent again as a wake-up. matched:false means it timed out.
 agents.approve {name, requestId?, decision}
-  decision allow, session (allow for the rest of its session) or deny; needsInput lists the decisions each request takes. requestId defaults to its only pending approval. The user can decide a request too, in the agent's chat; it is then no longer pending.
+  decision allow (this request only), session or deny. session also allows, for the rest of the agent's session, what the request's sessionAllows lists: for claude usually that exact command or its prefix, so a different command asks again, or acceptEdits mode for file edits. needsInput (in agents.list and agents.read) lists each request's full detail and the decisions it takes. requestId defaults to its only pending approval. The user can decide a request too, in the agent's chat; it is then no longer pending.
 agents.answer {name, requestId?, answers | skip:true}
   answers: one array of chosen option labels or free text per question item.
 agents.stop {name}
@@ -767,7 +824,7 @@ agents.close {name}
 
 States: starting, working, blocked (needsInput), idle, stopped, failed (error), usageLimited.
 Wake-ups: when an agent finishes a turn, stops, fails, hits a usage limit or needs input, MonoCode sends you an [Orchestration update] turn once you are idle. You do not need to wait or poll.
-Also available: models.list, worktrees.list, worktrees.create, sessions.* for the user's other sessions (run app help).
+Also available: models.list, worktrees.list, worktrees.create (a worktree beside the repository, for example for your integration branch), sessions.* for the user's other sessions (run app help).
 The CLI returns {ok,result,requestId}. Retry an uncertain mutation with the same --request-id and identical input.
 "#;
 
@@ -782,20 +839,20 @@ pub fn lead_context(cli: &str, full: bool) -> String {
 MonoCode adds this context, not the user. You are this thread's orchestrator. You plan the work, start agents, brief them, watch them, review and integrate what they produce, run the tests, and keep the user informed. You do not write feature code yourself, except small integration fixes or when the user asks. The user can talk to you at any time, also while agents work.
 
 Each agent is a separate MonoCode chat session. Drive them with `{cli} app ACTION --json JSON` (full reference: `{cli} app help agents`). App credentials are in your environment; never print them.
-- agents.start {{name, prompt, title?, harness?, model?, effort?, runtimeMode?, workspace?}}: own git worktree and branch from your HEAD by default, so commit what it needs first; inherits your model and access policy unless you set them. model and effort go to the agent's CLI as given: an alias from models.list or a full model ID such as claude-haiku-4-5, and a level such as high.
+- agents.start {{name, prompt, title?, harness?, model?, effort?, runtimeMode?, workspace?, base?}}: own git worktree and branch from your HEAD by default (base names another branch or commit), so commit what it needs first; inherits your model and access policy unless you set them. model and effort go to the agent's CLI as given: an alias from models.list or a full model ID such as claude-haiku-4-5, and a level such as high.
 - agents.list {{}} and agents.read {{name, view?}}: states, and what an agent is doing right now (view activity) or its final report (view last).
 - agents.prompt {{name, prompt, mode?}}: next task for an idle agent; steer or queue a note to a working one.
 - agents.approve / agents.answer: decide an agent's approval or question. agents.stop / agents.close. agents.open shows an agent's chat to the user.
 - agents.wait {{names?, timeoutSeconds?}}: block up to 45 s for the next event; use it only when you have nothing else to do and expect news within a minute.
 
 How to run the work:
-1. Agree on scope with the user, and on how many agents run at once (default 3).
+1. Agree on scope with the user, and on how many agents run at once (default 3). Integrate on a branch made for this work. If your checkout is on the user's own branch (main, dev or the one they work on), create an integration worktree with worktrees.create, work there, and start agents from it with base. Make extra worktrees only that way: one inside a checkout's folder can make tools such as package managers and git hooks act on the outer project.
 2. Split the work into small tasks (10 to 40 minutes each). Run tasks that edit the same files one after another; shared files get small additive edits only. Put backend work before the client that needs it.
 3. Brief each agent so it never has to ask: the goal and why, what to read first, numbered deliverables with exact behaviour and edge cases, what is out of scope, the folders other agents own ("do not touch"), the tests to write and the full test commands. A new worktree has no installed dependencies and no ignored files such as `.env`; say how to set it up. Tell it to commit on its branch and to end with a report whose first line is `STATUS: DONE` or `STATUS: BLOCKED`, followed by the commit SHA, tests run with results, decisions made and follow-ups.
 4. After starting agents, tell the user in a few lines what started and why, then end your turn. MonoCode wakes you with an [Orchestration update] when an agent finishes a turn, stops, fails, hits a usage limit or needs input. Do not poll or sleep.
 5. On every completion: read the report, review the risky parts of its commit (`git -C <checkout> show <sha>`), cherry-pick it onto your checkout (the integration branch; resolve conflicts by reading both sides), run the full tests, and fix integration breaks with a small commit. Tell running agents about breaks that affect them (agents.prompt). Then give the free agent its next task in the same checkout (rebase or reset its branch onto your new HEAD first if it needs your latest work) or close it, and start the next task so the agreed number stays busy. Never stack several unreviewed commits.
-6. Blocked agents: approve routine requests within the user's access policy; deny destructive or out-of-scope ones; ask the user when unsure. A failed or usage-limited agent: read it, then retry, reassign or report.
-7. Keep the user informed after each completion: what landed, test results, decisions they need to make, what is running. Record their decisions in the briefs so they are never reopened.
+6. Blocked agents: approve routine requests within the user's access policy; deny destructive or out-of-scope ones; ask the user when unsure. session allows what the request's sessionAllows lists for the rest of that agent's session, usually only that command or its prefix; use allow for one-off commands. A failed or usage-limited agent: read it, then retry, reassign or report.
+7. Keep the user informed after each completion: what landed, test results, decisions they need to make, what is running. Report only what you checked: run git status in a checkout before calling it clean. Record their decisions in the briefs so they are never reopened.
 8. Never push, open PRs, deploy, or remove branches and worktrees you did not create, without the user's explicit OK. When the user says stop: start nothing new, let running agents finish, integrate and test, then report the final state.
 </monocode_orchestration>"#
     )
@@ -824,6 +881,7 @@ mod tests {
             detail: "npm install".into(),
             items: Value::Null,
             remember: true,
+            remembers: Vec::new(),
         }
     }
     fn row(role: &str, text: &str, first: bool) -> Row {
@@ -995,10 +1053,10 @@ mod tests {
             row("assistant", "STATUS: DONE\n", true),
             row("assistant", "commit abc", false),
         ];
-        assert_eq!(final_message(&rows), "STATUS: DONE\ncommit abc");
-        assert_eq!(turn_started_at(&rows), Some(1_000));
+        assert_eq!(final_message(&rows, &[]), "STATUS: DONE\ncommit abc");
+        assert_eq!(turn_started_at(&rows, &[]), Some(1_000));
         // Ending on a tool falls back to the last reply.
-        assert_eq!(final_message(&rows[..5]), "Let me look.");
+        assert_eq!(final_message(&rows[..5], &[]), "Let me look.");
     }
 
     #[test]
@@ -1022,7 +1080,7 @@ mod tests {
             row("assistant", "Edited; now testing.", true),
             row("tool", &serde_json::to_string(&run).unwrap(), true),
         ];
-        let value = activity(&rows, 4_000);
+        let value = activity(&rows, &[], 4_000);
         assert_eq!(value["prompt"], "Add pagination");
         assert_eq!(value["steps"].as_array().unwrap().len(), 2);
         assert_eq!(value["steps"][0]["state"], "done");
@@ -1039,12 +1097,64 @@ mod tests {
             row("user", "Check", true),
             row("tool", &serde_json::to_string(&script).unwrap(), true),
         ];
-        let value = activity(&rows, 4_000);
+        let value = activity(&rows, &[], 4_000);
         assert_eq!(value["steps"][0]["action"], "Run");
         assert_eq!(
             value["steps"][0]["target"],
             "python3 -I -c '\nprint(2 + 2)\n'"
         );
+    }
+
+    #[test]
+    fn a_steer_joins_the_running_turn_instead_of_starting_one() {
+        let mut run = ToolCall::new("t1", "Bash");
+        run.input = json!({"command":"cargo test"}).to_string();
+        run.state = crate::tool::ToolState::Completed;
+        let mut edit = ToolCall::new("t2", "Edit");
+        edit.input =
+            json!({"file_path":"src/lib.rs","old_string":"a","new_string":"b"}).to_string();
+        let at = |mut row: Row, ms: u64| {
+            row.sent_at = Some(ms);
+            row
+        };
+        let rows = vec![
+            at(row("user", "Old task", true), 100),
+            row("assistant", "Old answer", true),
+            at(row("user", "Add pagination", true), 1_000),
+            row("tool", &serde_json::to_string(&run).unwrap(), true),
+            at(row("user", "Also cap pages at 50", true), 9_000),
+            row("tool", &serde_json::to_string(&edit).unwrap(), true),
+            row("assistant", "STATUS: DONE", true),
+        ];
+        // Receipts key a turn by the row after its prompt; the steer joined
+        // the turn that row 2 opened.
+        let mut turns = std::collections::HashMap::new();
+        turns.insert(3, crate::agent::TurnInfo::default());
+        turns.insert(
+            5,
+            crate::agent::TurnInfo {
+                joined_turn: Some(3),
+                ..Default::default()
+            },
+        );
+        let steers = steer_prompts(&rows, &turns);
+        assert_eq!(steers, vec![4]);
+        assert_eq!(turn_started_at(&rows, &steers), Some(1_000));
+        assert_eq!(final_message(&rows, &steers), "STATUS: DONE");
+        let value = activity(&rows, &steers, 4_000);
+        assert_eq!(value["prompt"], "Add pagination");
+        assert_eq!(value["turnStartedAt"], 1_000);
+        let actions: Vec<_> = value["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|step| step["action"].as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(actions, ["Run", "Steer", "Edit"]);
+        assert_eq!(value["steps"][1]["target"], "Also cap pages at 50");
+        assert_eq!(value["editedFiles"], json!(["src/lib.rs"]));
+        // Without receipts the steer still reads as a new turn, as before.
+        assert_eq!(turn_started_at(&rows, &[]), Some(9_000));
     }
 
     #[test]
@@ -1062,7 +1172,14 @@ mod tests {
             approval.json()["decisions"],
             json!(["allow", "session", "deny"])
         );
+        assert!(approval.json().get("sessionAllows").is_none());
+        approval.remembers = vec!["Bash(npm install)".into()];
+        assert_eq!(
+            approval.json()["sessionAllows"],
+            json!(["Bash(npm install)"])
+        );
         approval.remember = false;
+        assert!(approval.json().get("sessionAllows").is_none());
         assert_eq!(approval.json()["decisions"], json!(["allow", "deny"]));
         approval.kind = "question";
         assert!(approval.json().get("decisions").is_none());

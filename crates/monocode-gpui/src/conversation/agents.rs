@@ -39,12 +39,14 @@ impl Conversation {
                 detail: approval.detail.clone(),
                 items: Value::Null,
                 remember: approval.can_remember,
+                remembers: approval.remembers.clone(),
             })
             .chain(self.questions.iter().map(|(card, _)| {
                 let question = card.read(cx).request();
                 Request {
                     id: public_request_id(&question.id),
                     remember: false,
+                    remembers: Vec::new(),
                     kind: "question",
                     title: question.title.clone(),
                     detail: String::new(),
@@ -97,6 +99,19 @@ impl Conversation {
     pub(crate) fn agent_rows(&self, cx: &gpui::App) -> Option<Vec<monocode_core::transcript::Row>> {
         (self.history_ready() && !self.needs_history_restore())
             .then(|| self.transcript.read(cx).source_rows().to_vec())
+    }
+    /// Where messages were steered into a running turn, as indices into
+    /// `agent_rows`, so a steer does not read as the start of a turn. Turn
+    /// receipts count every loaded row; `agent_rows` starts at the store's
+    /// window.
+    pub(crate) fn agent_steers(&self, cx: &gpui::App) -> Vec<usize> {
+        let transcript = self.transcript.read(cx);
+        let all = transcript.history_rows();
+        let base = all.len() - transcript.source_rows().len();
+        monocode_core::orchestration::steer_prompts(all, &transcript.turns)
+            .into_iter()
+            .filter_map(|ix| ix.checked_sub(base))
+            .collect()
     }
     pub(crate) fn agent_branch(&self) -> Option<String> {
         self.branch.clone()

@@ -33,6 +33,7 @@ impl Protocol {
             title,
             detail: String::new(),
             can_remember: false,
+            remembers: Vec::new(),
         }));
         Ok(())
     }

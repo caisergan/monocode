@@ -232,10 +232,19 @@ pub fn launch_settings_for(
     if let Some(model) = requested {
         settings.model = Some(model);
     }
-    let listed = settings
-        .model
-        .as_deref()
-        .and_then(|id| models.iter().find(|m| m.id == id));
+    // An alias's concrete ID (its resolvesTo in models.list) is that entry
+    // too: it gets the entry's defaults and keeps the exact ID it pinned.
+    let listed = settings.model.as_deref().and_then(|id| {
+        models.iter().find(|m| m.id == id).or_else(|| {
+            direct
+                .then(|| {
+                    models
+                        .iter()
+                        .find(|m| m.alias_target.as_deref() == Some(id))
+                })
+                .flatten()
+        })
+    });
     if input.get("model").is_some()
         && listed.is_none()
         && !(direct && settings.model.as_deref().is_some_and(model_id))
