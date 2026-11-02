@@ -132,7 +132,7 @@ impl Shell {
         if let Some((lead, ix)) = self.agent_of(id)
             && let Some(mut summary) = self.orchestration_summaries.get(&lead).cloned()
         {
-            summary.tasks[ix].status = "closed".into();
+            summary.tasks[ix].close();
             self.save_summary(lead, summary, cx);
             if let Some(entry) = self.orchestrations.leads.get_mut(&lead) {
                 entry.mailbox.retain(|event| event.session != id);
@@ -686,7 +686,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) {
         if let Some(mut summary) = self.orchestration_summaries.get(&lead).cloned() {
-            summary.tasks[ix].status = "closed".into();
+            summary.tasks[ix].close();
             self.save_summary(lead, summary, cx);
         }
         self.orchestrations.watches.remove(&id);
@@ -945,6 +945,7 @@ impl Shell {
                             provider: harness.clone(),
                             model: model.clone(),
                             status: State::Starting.summary_status().into(),
+                            outcome: None,
                         });
                         this.orchestrations
                             .watches

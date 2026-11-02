@@ -17,11 +17,15 @@ pub struct Summary {
     pub live: bool,
 }
 impl Summary {
-    /// The agents a lead still addresses, as the sidebar lists them.
-    pub fn open_agents(&self) -> Summary {
-        Summary {
-            tasks: self.tasks.iter().filter(|t| t.open()).cloned().collect(),
-            live: self.live,
+    /// "2 agents", "3 past agents" or "1 agent, 2 past", for the lead's mark.
+    pub fn describe(&self) -> String {
+        let open = self.tasks.iter().filter(|t| t.open()).count();
+        let past = self.tasks.len() - open;
+        let agents = |n: usize| if n == 1 { "agent" } else { "agents" };
+        match (open, past) {
+            (open, 0) => format!("{open} {}", agents(open)),
+            (0, past) => format!("{past} past {}", agents(past)),
+            (open, past) => format!("{open} {}, {past} past", agents(open)),
         }
     }
     /// No agent's turn survives an app restart: a saved run reads as stopped
@@ -47,6 +51,10 @@ pub struct SummaryTask {
     pub model: Option<String>,
     /// running, completed, blocked, failed, stopped, closed or queued.
     pub status: String,
+    /// The status a closed agent had when it was closed, so the lead's past
+    /// agents still say how their work ended. Absent for runs saved earlier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
 }
 impl SummaryTask {
     /// orchestrationTaskLabel, given whether the agent needs input.
@@ -71,6 +79,22 @@ impl SummaryTask {
     /// Whether the lead still addresses this agent by its name.
     pub fn open(&self) -> bool {
         self.status != "closed"
+    }
+    /// Leaves the roster's open agents and keeps how its work ended.
+    pub fn close(&mut self) {
+        if self.open() {
+            self.outcome = Some(std::mem::replace(&mut self.status, "closed".into()));
+        }
+    }
+    /// A closed agent's label: how its work ended. Closing a working agent
+    /// stops it.
+    pub fn past_label(&self) -> &'static str {
+        match self.outcome.as_deref() {
+            Some("completed") => "Done",
+            Some("failed") => "Failed",
+            Some(_) => "Stopped",
+            None => "Closed",
+        }
     }
 }
 
@@ -905,7 +929,7 @@ mod tests {
     }
 
     #[test]
-    fn a_restarted_run_reads_as_stopped_and_the_rail_skips_closed_agents() {
+    fn a_restarted_run_reads_as_stopped_and_closed_agents_keep_how_they_ended() {
         let task = |name: &str, status: &str| SummaryTask {
             session: Some(1),
             name: name.into(),
@@ -921,14 +945,41 @@ mod tests {
             ],
             live: true,
         };
-        let open = summary.open_agents();
+        assert_eq!(summary.describe(), "3 agents, 1 past");
+
+        // Closing keeps the status it ended with for the past agents' row.
+        let mut closed = summary.clone();
+        for task in &mut closed.tasks {
+            task.close();
+        }
+        let labels: Vec<_> = closed.tasks.iter().map(|t| t.past_label()).collect();
+        // A run saved before outcomes were kept says only that it closed.
+        assert_eq!(labels, ["Stopped", "Done", "Closed", "Stopped"]);
+        assert!(closed.tasks.iter().all(|t| !t.open()));
+        assert_eq!(closed.describe(), "4 past agents");
+        let mut failed = task("e", "failed");
+        failed.close();
+        failed.close();
         assert_eq!(
-            open.tasks
-                .iter()
-                .map(|t| t.name.as_str())
-                .collect::<Vec<_>>(),
-            ["a", "b", "d"]
+            failed.outcome.as_deref(),
+            Some("failed"),
+            "closing twice keeps it"
         );
+        assert_eq!(failed.past_label(), "Failed");
+        let one = Summary {
+            tasks: vec![task("f", "running")],
+            live: true,
+        };
+        assert_eq!(one.describe(), "1 agent");
+        // Saved rosters without outcomes still load.
+        let saved: SummaryTask =
+            serde_json::from_str(r#"{"session":1,"name":"a","status":"closed"}"#).unwrap();
+        assert_eq!(saved.outcome, None);
+        assert!(serde_json::to_string(&task("g", "running"))
+            .unwrap()
+            .find("outcome")
+            .is_none());
+
         let restarted = summary.after_restart();
         assert!(!restarted.live);
         assert_eq!(
