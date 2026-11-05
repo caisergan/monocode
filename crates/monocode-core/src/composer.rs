@@ -250,9 +250,10 @@ pub fn prepare_prompt(text: &str, cwd: &str, attachments: &[PathBuf]) -> Result<
     }
     // Mentions use full project-relative paths, including quoted paths with spaces.
     let mentions = mentions(text);
+    let root = crate::scm::expand_home(Path::new(cwd));
     for relative in mentions {
-        let path = Path::new(cwd).join(&relative);
-        if let (Ok(root), Ok(path)) = (Path::new(cwd).canonicalize(), path.canonicalize()) {
+        let path = root.join(&relative);
+        if let (Ok(root), Ok(path)) = (root.canonicalize(), path.canonicalize()) {
             if path.starts_with(&root) && path.is_file() {
                 blocks.push(format!("Referenced project file: {}", path.display()));
             }
@@ -379,6 +380,15 @@ fn mentions_in_line(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mentions_in_a_chat_without_a_project_resolve_from_home() {
+        let home = crate::scm::shell::dirs_home().unwrap();
+        let dir = tempfile::tempdir_in(home).unwrap();
+        std::fs::write(dir.path().join("a.txt"), "a").unwrap();
+        let name = dir.path().file_name().unwrap().to_string_lossy();
+        let prompt = prepare_prompt(&format!("read @{name}/a.txt"), "~", &[]).unwrap();
+        assert!(prompt.contains("Referenced project file:"), "{prompt}");
+    }
     #[test]
     fn thumbnails_cover_the_chip_and_swap_to_bgra() {
         let mut png = Vec::new();

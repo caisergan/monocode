@@ -45,9 +45,11 @@ pub fn discard_worktree(path: &Path) {
     opencode::discard_worktree(path);
 }
 pub fn forget_session(kind: Kind, provider_id: &str, account_id: &str, cwd: &Path) {
-    parked::forget_session(kind, provider_id, account_id, cwd);
+    // Parked processes are keyed by the expanded folder they were started in.
+    let cwd = crate::scm::expand_home(cwd);
+    parked::forget_session(kind, provider_id, account_id, &cwd);
     if kind == Kind::OpenCode {
-        opencode::forget_session(provider_id, account_id, cwd);
+        opencode::forget_session(provider_id, account_id, &cwd);
     }
 }
 mod questions;
@@ -70,6 +72,14 @@ pub struct Request {
     pub provider_id: Option<String>,
     pub model: Option<String>,
     pub settings: Settings,
+}
+impl Request {
+    /// Chats without a project are stored with the cwd "~", which only a shell
+    /// understands. Providers need the real folder, to start in and to report.
+    fn with_expanded_cwd(mut self) -> Self {
+        self.cwd = crate::scm::expand_home(&self.cwd);
+        self
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1439,6 +1449,7 @@ fn run_operation(
     if cancel.load(Ordering::Relaxed) {
         return Err("Stopped".into());
     }
+    let request = request.with_expanded_cwd();
     if request.kind == Kind::OpenCode {
         return opencode::run(request, cancel, controls, probe, compact, emit);
     }
@@ -2523,6 +2534,30 @@ mod process_tests {
             settings: Default::default(),
         };
         (tmp, request)
+    }
+    #[test]
+    fn a_chat_without_a_project_runs_in_the_home_folder() {
+        let (tmp, mut request) = fixture("#!/bin/sh\npwd -P > \"$MC_TEST_PWD\"\n");
+        let out = tmp.path().join("pwd");
+        request
+            .settings
+            .environment
+            .insert("MC_TEST_PWD".into(), out.to_string_lossy().into_owned());
+        request.cwd = "~".into();
+        let _ = run(request, Arc::new(AtomicBool::new(false)), |_| Ok(()));
+        let home = crate::scm::shell::dirs_home().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(out).unwrap().trim(),
+            std::fs::canonicalize(home).unwrap().to_string_lossy()
+        );
+    }
+    #[test]
+    fn a_missing_folder_is_not_reported_as_a_missing_binary() {
+        let (tmp, mut request) = fixture("#!/bin/sh\n");
+        request.cwd = tmp.path().join("gone");
+        let error = run(request, Arc::new(AtomicBool::new(false)), |_| Ok(())).unwrap_err();
+        assert!(error.contains("gone"), "{error}");
+        assert!(error.contains("the folder does not exist"), "{error}");
     }
     #[test]
     fn cancellation_reaps_child_and_descendant_promptly() {
