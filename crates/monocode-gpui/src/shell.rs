@@ -73,7 +73,7 @@ use crate::{
     right_panel::{PanelEvent, RightPanel},
     runtime::{Database, locked},
     session_mark::{SessionMark, State as MarkState},
-    tab_tile::{Face, TAB_TILE},
+    tab_tile::TAB_TILE,
     terminal::{Terminal, TerminalEvent},
     theme::*,
     usage_footer::UsageFooter,
@@ -7307,17 +7307,15 @@ impl Shell {
         }
         (from, tick.dir, crate::reveal::bezier(t, 0.22, 1., 0.36, 1.))
     }
-    /// A pinned card's face and mark: the pane's own mark on a neutral card.
-    /// `live` lets a lit session borrow its live mark, which can only draw in
-    /// one place a frame.
-    fn pane_tile(&self, mark: &PaneMark, live: bool) -> (Face, AnyElement) {
-        let mark = match mark {
+    /// A pinned card's mark: the pane's own. `live` lets a lit session borrow
+    /// its live mark, which can only draw in one place a frame.
+    fn pane_tile(&self, mark: &PaneMark, live: bool) -> AnyElement {
+        match mark {
             PaneMark::Session(provider, Some(_)) if !live => {
                 self.pane_mark(&PaneMark::Session(provider.clone(), None), true)
             }
             mark => self.pane_mark(mark, true),
-        };
-        (Face::Neutral, mark)
+        }
     }
     /// The dragged session's title, following the pointer.
     fn drag_ghost(&self, cx: &App) -> Option<AnyElement> {

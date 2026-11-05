@@ -35,9 +35,9 @@ use crate::{
     theme::*,
 };
 use gpui::{
-    AvailableSpace, Bounds, ClipboardItem, Context, Entity, FollowMode, ListAlignment, ListOffset,
-    ListState, Pixels, Role, SharedString, StyleRefinement, Window, canvas, div, list, prelude::*,
-    px, rgb, size,
+    AvailableSpace, Bounds, ClipboardItem, Context, FollowMode, ListAlignment, ListOffset,
+    ListState, Pixels, Role, SharedString, Transformation, Window, canvas, div, list, percentage,
+    prelude::*, px, rgb, size,
 };
 use monocode_core::tool::{ToolCall, ToolState, tasks::Panel};
 use monocode_core::transcript::Row;
@@ -754,10 +754,6 @@ pub(crate) struct TranscriptView {
     note_feedback: HashMap<usize, Result<(), String>>,
     action_anchors: HashMap<(usize, &'static str), AnchorSlot>,
     hovered_action: Option<(usize, &'static str)>,
-    /// Each work phase's tile, its own view so a hover redraws only it.
-    phase_tiles: HashMap<usize, Entity<crate::phase_tile::PhaseTile>>,
-    /// Each reply's "worked for" tile, keyed by turn.
-    work_tiles: HashMap<usize, Entity<crate::phase_tile::PhaseTile>>,
     pub(crate) target_action: Option<(usize, monocode_core::response::TransferKind)>,
     document: bool,
     side_question: bool,
@@ -1293,8 +1289,7 @@ impl TranscriptView {
         let Some((mascot, color, name)) = self.mono_look.clone() else {
             return div().into_any_element();
         };
-        // As a model's "Worked for" line: the Mono's mascot on a tile, then
-        // its name.
+        // As a model's "Worked for" line: the Mono's mascot, then its name.
         let pill = div()
             .debug_selector(|| "mono-signature-pill".into())
             .flex()
@@ -1302,14 +1297,14 @@ impl TranscriptView {
             .flex_shrink_0()
             .max_w(px(320.))
             .items_center()
-            .gap(px(8.))
+            .gap_1p5()
             .child(
-                crate::tab_tile::mark_tile(
-                    &crate::tab_tile::ACTIVITY_TILE,
-                    crate::tab_tile::Face::Neutral,
-                    crate::monos::avatar::avatar(&mascot, color, "idle", 14., true),
-                )
-                .flex_shrink_0(),
+                div()
+                    .size(px(14.))
+                    .flex_shrink_0()
+                    .child(crate::monos::avatar::avatar(
+                        &mascot, color, "idle", 14., true,
+                    )),
             )
             .child(div().min_w_0().truncate().child(name));
         div()
@@ -2585,8 +2580,6 @@ impl TranscriptView {
             note_feedback: HashMap::new(),
             action_anchors: HashMap::new(),
             hovered_action: None,
-            phase_tiles: HashMap::new(),
-            work_tiles: HashMap::new(),
             target_action: None,
             document: false,
             side_question: false,
@@ -5098,30 +5091,6 @@ impl TranscriptView {
                 } else {
                     title.clone()
                 };
-                let provider: SharedString = self
-                    .turns
-                    .get(&turn)
-                    .map(|info| info.provider.as_str())
-                    .filter(|provider| !provider.is_empty())
-                    .unwrap_or(self.provider.as_str())
-                    .to_owned()
-                    .into();
-                let work_tile = self
-                    .work_tiles
-                    .entry(turn)
-                    .or_insert_with(|| cx.new(|_| crate::phase_tile::PhaseTile::new(turn)))
-                    .clone();
-                // Only a fold that opens shows the chevron; a header that just
-                // labels unfolded work keeps the logo.
-                work_tile.update(cx, |tile, cx| {
-                    tile.set(
-                        crate::phase_tile::Mark::Provider(provider),
-                        false,
-                        open && expandable,
-                        if open { 1. } else { 0. },
-                        cx,
-                    )
-                });
                 div()
                     .id(("work-fold", turn))
                     .role(if expandable {
@@ -5134,27 +5103,52 @@ impl TranscriptView {
                     .group("work-fold")
                     .flex()
                     .items_center()
-                    .gap(px(8.))
+                    .gap_1p5()
                     .py_1()
                     .text_size(px(14.))
                     .line_height(px(20.))
                     .text_color(content(0.5))
-                    // The provider's tile; an open fold turns it into the
-                    // chevron, as a tool group's tile does.
                     .child(
-                        work_tile.clone().cached(
-                            StyleRefinement::default()
-                                .w(px(crate::tab_tile::ACTIVITY_TILE.w))
-                                .h(px(crate::tab_tile::ACTIVITY_TILE.h))
-                                .flex_shrink_0(),
-                        ),
+                        div()
+                            .relative()
+                            .size(px(14.))
+                            .flex_shrink_0()
+                            // A header that just labels unfolded work keeps
+                            // the logo; only a fold that opens shows a chevron.
+                            .when(!open || !expandable, |d| {
+                                d.child(
+                                    provider_icon(
+                                        self.turns
+                                            .get(&turn)
+                                            .map(|info| info.provider.as_str())
+                                            .filter(|provider| !provider.is_empty())
+                                            .unwrap_or(self.provider.as_str()),
+                                        14.,
+                                    )
+                                    .when(expandable, |i| {
+                                        i.group_hover("work-fold", |s| s.opacity(0.))
+                                    }),
+                                )
+                            })
+                            .when(expandable, |d| {
+                                d.child(
+                                    icon(
+                                        if open {
+                                            "chevron-down"
+                                        } else {
+                                            "chevron-right"
+                                        },
+                                        14.,
+                                    )
+                                    .absolute()
+                                    .top_0()
+                                    .left_0()
+                                    .when(!open, |i| {
+                                        i.opacity(0.).group_hover("work-fold", |s| s.opacity(1.))
+                                    }),
+                                )
+                            }),
                     )
-                    .when(expandable, |d| {
-                        let tile = work_tile.clone();
-                        d.on_hover(move |hovered: &bool, _, cx| {
-                            tile.update(cx, |tile, cx| tile.hover(*hovered, cx));
-                        })
-                    })
                     .child(div().min_w_0().flex_1().truncate().child(
                         if live && !cx.reduce_motion() {
                             crate::activity::shimmer(
@@ -5191,22 +5185,6 @@ impl TranscriptView {
                     .values()
                     .find(|m| m.group == Some(group))
                     .map_or(if open { 1. } else { 0. }, |m| m.rotation(self.frame_now));
-                let phase_tile = self
-                    .phase_tiles
-                    .entry(group)
-                    .or_insert_with(|| cx.new(|_| crate::phase_tile::PhaseTile::new(group)))
-                    .clone();
-                let spinning = active && !cx.reduce_motion();
-                // A running phase keeps its spinner unless pointed at.
-                phase_tile.update(cx, |tile, cx| {
-                    tile.set(
-                        crate::phase_tile::Mark::Work(glyph),
-                        spinning,
-                        open && !active,
-                        rotation,
-                        cx,
-                    )
-                });
                 div()
                     .id(("phase", group))
                     .role(Role::Button)
@@ -5218,20 +5196,46 @@ impl TranscriptView {
                     .group("activity-phase")
                     .flex()
                     .items_center()
-                    .gap(px(8.))
+                    .gap_1p5()
                     .py_1()
                     .text_size(px(14.))
                     .line_height(px(20.))
                     .text_color(content(0.5))
-                    // The tile animates itself; the transcript only tells it
-                    // what the phase is doing.
                     .child(
-                        phase_tile.clone().cached(
-                            StyleRefinement::default()
-                                .w(px(crate::tab_tile::ACTIVITY_TILE.w))
-                                .h(px(crate::tab_tile::ACTIVITY_TILE.h))
-                                .flex_shrink_0(),
-                        ),
+                        div()
+                            .relative()
+                            .size(px(14.))
+                            .flex_shrink_0()
+                            .child(if active && !cx.reduce_motion() {
+                                // The compaction step's dots stand in for the
+                                // group's icon until its work settles.
+                                div()
+                                    .size_full()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .child(crate::session_mark::spinner(
+                                        ("phase-loader", group),
+                                        crate::pulse::Rate::Half,
+                                    ))
+                                    .group_hover("activity-phase", |s| s.opacity(0.))
+                                    .into_any_element()
+                            } else {
+                                crate::activity::glyph(glyph, 14.)
+                                    .group_hover("activity-phase", |s| s.opacity(0.))
+                                    .into_any_element()
+                            })
+                            .child(
+                                icon("chevron-right", 14.)
+                                    .with_transformation(Transformation::rotate(percentage(
+                                        rotation * 0.25,
+                                    )))
+                                    .absolute()
+                                    .top_0()
+                                    .left_0()
+                                    .opacity(0.)
+                                    .group_hover("activity-phase", |s| s.opacity(1.)),
+                            ),
                     )
                     .child(div().min_w_0().flex_1().truncate().child(
                         if active && !cx.reduce_motion() {
@@ -5244,12 +5248,6 @@ impl TranscriptView {
                         },
                     ))
                     .hover(|s| s.text_color(content(0.8)))
-                    .on_hover({
-                        let tile = phase_tile.clone();
-                        move |hovered: &bool, _, cx| {
-                            tile.update(cx, |tile, cx| tile.hover(*hovered, cx));
-                        }
-                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.toggle_phase(group, !open, cx);
                     }))
@@ -5265,50 +5263,44 @@ impl TranscriptView {
                 // a second step joins it. It keeps spinning after it settles,
                 // until whatever comes next arrives, so the hand-off to the
                 // group header never drops the loader.
-                let tiled = group.is_none() && !call.is_milestone() && call.panel().is_none();
-                let loading =
-                    tiled && (call.state == ToolState::Running || live) && !cx.reduce_motion();
+                let loading = group.is_none()
+                    && (call.state == ToolState::Running || live)
+                    && !call.is_milestone()
+                    && call.panel().is_none()
+                    && !cx.reduce_motion();
                 div()
                     .relative()
                     .w_full()
                     .when(group.is_some(), |d| {
-                        d.pl(px(crate::activity::TILE_RAIL_INDENT))
-                            .child(crate::activity::tile_rail(tail))
+                        d.pl(px(20.)).child(crate::activity::rail(tail))
                     })
-                    // A lone step leads with a tile like a group's, coloured by
-                    // the kind of work; while it runs, its spinner sits there.
-                    .when(tiled, |d| {
-                        let tile = crate::tab_tile::ACTIVITY_TILE;
-                        let lead = if loading {
-                            crate::tab_tile::mark_tile(
-                                &tile,
-                                crate::tab_tile::Face::Neutral,
-                                crate::session_mark::spinner(
-                                    ("tool-loader", message_start),
-                                    crate::pulse::Rate::Half,
-                                ),
-                            )
-                        } else {
-                            let glyph =
-                                crate::activity::summary(std::slice::from_ref(&*call), false).1;
-                            let (face, mark, _) = crate::tab_tile::activity_face(glyph);
-                            crate::tab_tile::mark_tile(&tile, face, mark)
-                        };
-                        d.flex().items_start().gap(px(8.)).child(
+                    .when(loading, |d| {
+                        d.flex().items_start().gap_1p5().child(
                             div()
                                 .h(px(28.))
                                 .flex_shrink_0()
                                 .opacity(step_opacity)
                                 .flex()
                                 .items_center()
-                                .child(lead),
+                                .child(
+                                    div()
+                                        .size(px(14.))
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .text_color(content(0.5))
+                                        .child(crate::session_mark::spinner(
+                                            ("tool-loader", message_start),
+                                            crate::pulse::Rate::Half,
+                                        )),
+                                ),
                         )
                     })
                     .child(
                         div()
-                            .when(tiled, |d| d.min_w_0().flex_1())
+                            .when(loading, |d| d.min_w_0().flex_1())
                             .opacity(step_opacity)
-                            .child(self.tool(*call, message_start, tiled, cx)),
+                            .child(self.tool(*call, message_start, cx)),
                     )
                     .into_any_element()
             }
@@ -5634,9 +5626,9 @@ impl TranscriptView {
             div()
                 .relative()
                 .w_full()
-                .pl(px(crate::activity::TILE_RAIL_INDENT))
+                .pl(px(20.))
                 .when(!tail || thought_header, |d| {
-                    d.child(crate::activity::tile_rail_branch(tail, thought_header))
+                    d.child(crate::activity::rail_branch(tail, thought_header))
                 })
                 .child(body)
                 .into_any_element()
@@ -5654,8 +5646,8 @@ impl TranscriptView {
                     ..
                 }
             );
-        // Unfolded work that opens with a tool group: the header's tile
-        // connects down into that group's tile.
+        // Unfolded work that opens with a tool group: the header's icon
+        // connects down into that group's icon.
         let leads_into_group = !self.fold_work
             && matches!(self.rows[ix].body, Body::WorkLine { .. })
             && matches!(
@@ -5669,7 +5661,7 @@ impl TranscriptView {
             }
             _ => leads_into_group,
         };
-        // The other end of that connector: from the row's top into the tile.
+        // The other end of that connector: from the row's top to the icon.
         let joined_to_header = !self.fold_work
             && matches!(self.rows[ix].body, Body::Phase { .. })
             && ix > 0
@@ -5775,37 +5767,39 @@ impl TranscriptView {
                                     .when(user && !self.chat_layout, |d| d.w_full())
                                     .when(!user, |d| d.w_full())
                                     .when(row.work, |d| {
-                                        d.pl(px(crate::activity::TILE_RAIL_INDENT))
-                                            .pb(px(bottom))
-                                            .when(!nested_phase || !row.work_tail, |d| {
-                                                d.child(crate::activity::tile_rail_branch(
+                                        d.pl(px(20.)).pb(px(bottom)).when(
+                                            !nested_phase || !row.work_tail,
+                                            |d| {
+                                                d.child(crate::activity::rail_branch(
                                                     row.work_tail,
                                                     rail_branch,
                                                 ))
-                                            })
+                                            },
+                                        )
                                     })
                                     .when(receipt_open, |d| {
                                         d.child(
                                             div()
                                                 .absolute()
-                                                // From under the header's tile,
+                                                // From under the header's icon,
                                                 // down its centre.
-                                                .left(px(crate::activity::TILE_RAIL_X))
-                                                .top(px(4. + crate::tab_tile::ACTIVITY_TILE.h))
+                                                .left(px(6.))
+                                                .top(px(22.))
                                                 .bottom(px(-4.))
                                                 .w(px(1.))
                                                 .bg(crate::theme::rail_color()),
                                         )
                                     })
                                     .when(joined_to_header, |d| {
-                                        // A tool group's tile sits 5px into its
-                                        // row; the line meets it there.
+                                        // A tool group's icon sits 7px into its
+                                        // row; the line stops just short of it,
+                                        // as it does under the header's icon.
                                         d.child(
                                             div()
                                                 .absolute()
-                                                .left(px(crate::activity::TILE_RAIL_X))
+                                                .left(px(6.))
                                                 .top_0()
-                                                .h(px(5.))
+                                                .h(px(6.))
                                                 .w(px(1.))
                                                 .bg(crate::theme::rail_color()),
                                         )
@@ -5984,8 +5978,6 @@ impl TranscriptView {
             .map(|line| line.wrap_boundaries.len() + 1)
             .sum()
     }
-    /// How far phase `group`'s tile has morphed into its chevron, eased:
-    /// 0 is the tile, 1 the chevron.
     /// Whether a tool group nobody has opened or closed shows its steps: a
     /// running one does, unless groups are set to stay collapsed.
     fn phase_opens(&self, active: bool) -> bool {
