@@ -31,7 +31,8 @@ use crate::{
     git_picker::{GitPicker, Mode as GitMode, Picked as GitPicked},
     input,
     pickers::{
-        ModelList, ModelPicked, cached_model_name, model_display_name, model_name, remember_model,
+        ModelList, ModelPicked, cached_model_name, hosted_model, model_display_name, model_name,
+        remember_model,
     },
     popover::{
         Align, Anchor, AnchorSlot, Flyout, Menu, MenuAction, MenuEvent, MenuItem, MenuStyle, Side,
@@ -2685,15 +2686,29 @@ impl Conversation {
             .try_global::<crate::settings::Preferences>()
             .map(|p| p.hidden_for(&self.summary.cwd))
             .unwrap_or_default();
+        // Recents are shared with local projects, and a host offers its own
+        // models under its own IDs.
+        let hosted = self
+            .is_remote()
+            .then(|| catalog::cached_remote_catalog(&self.summary.cwd));
+        let hosted_row = |kind: Kind, id: &str| {
+            let catalog = hosted.as_ref()?.as_ref()?;
+            hosted_model(catalog.models.get(&kind)?, kind, id).cloned()
+        };
         let mut choices: Vec<(Kind, Option<String>)> = cx
             .try_global::<crate::settings::Preferences>()
             .into_iter()
             .flat_map(|p| &p.recent_models)
             .filter_map(|choice| {
                 let kind = Kind::parse(&choice.provider)?;
-                choice.model.as_ref()?;
+                let model = choice.model.as_ref()?;
+                let model = if hosted.is_some() {
+                    hosted_row(kind, model)?.id
+                } else {
+                    model.clone()
+                };
                 (kind == provider || !hidden.iter().any(|id| id == kind.id()))
-                    .then(|| (kind, choice.model.clone()))
+                    .then_some((kind, Some(model)))
             })
             .collect();
         choices.dedup();
@@ -2708,7 +2723,11 @@ impl Conversation {
                 let name = if selected {
                     self.model_label()
                 } else {
-                    let name = cached_model_name(kind, model.as_deref());
+                    let name = model
+                        .as_deref()
+                        .and_then(|id| hosted_row(kind, id))
+                        .map(|row| model_display_name(kind, &row.id, &row.name))
+                        .unwrap_or_else(|| cached_model_name(kind, model.as_deref()));
                     match name.strip_prefix("Claude ") {
                         Some(short) if kind == Kind::Claude => short.to_owned().into(),
                         _ => name,
@@ -4988,6 +5007,76 @@ mod menu_tests {
             .unwrap();
         window
             .update(visual, |c, _, _| assert!(c.menu.is_none()))
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn remote_recent_models_are_the_hosts_rows(cx: &mut TestAppContext) {
+        let window = conversation(cx);
+        let host_model = |id: &str, name: &str| Model {
+            id: id.into(),
+            name: name.into(),
+            alias_target: None,
+            efforts: Vec::new(),
+            default_effort: None,
+            fast: false,
+            thinking: false,
+            default: false,
+            tiers: Vec::new(),
+            controls: Vec::new(),
+        };
+        let project = "remote://env/recent-models";
+        let labels = |c: &Conversation, cx: &gpui::App| -> Vec<(String, bool)> {
+            c.recent_model_items(cx)
+                .iter()
+                .filter_map(|item| match item {
+                    MenuItem::Action(a) => Some((a.label.to_string(), a.checked)),
+                    _ => None,
+                })
+                .collect()
+        };
+        window
+            .update(cx, |c, _, cx| {
+                c.summary.provider = "claude".into();
+                c.summary.cwd = project.into();
+                c.model = Some("claude:opus".into());
+                c.catalog = vec![host_model("claude:opus", "Opus 5.5")];
+                cx.set_global(crate::settings::Preferences {
+                    recent_models: ["sonnet", "local-only", "claude:opus"]
+                        .into_iter()
+                        .map(|model| crate::settings::ModelChoice {
+                            provider: "claude".into(),
+                            model: Some(model.into()),
+                        })
+                        .collect(),
+                    ..Default::default()
+                });
+                // Before the host has answered there is only the current model.
+                assert_eq!(labels(c, cx), [("Opus 5.5".to_string(), true)]);
+                catalog::remember_remote_catalog(
+                    project,
+                    &catalog::RemoteCatalog {
+                        providers: vec![Kind::Claude],
+                        models: [(
+                            Kind::Claude,
+                            vec![
+                                host_model("claude:opus", "Opus 5.5"),
+                                host_model("claude:sonnet", "Sonnet 5.5"),
+                            ],
+                        )]
+                        .into_iter()
+                        .collect(),
+                        errors: Default::default(),
+                    },
+                );
+                assert_eq!(
+                    labels(c, cx),
+                    [
+                        ("Sonnet 5.5".to_string(), false),
+                        ("Opus 5.5".to_string(), true),
+                    ]
+                );
+            })
             .unwrap();
     }
 

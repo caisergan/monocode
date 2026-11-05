@@ -18,13 +18,41 @@ const CATALOG_BYTES: usize = 2 * 1024 * 1024;
 
 /// Installed providers and their project-specific catalogs on a remote host.
 /// The host owns discovery, credentials, catalog caching, and model defaults.
+#[derive(Clone)]
 pub struct RemoteCatalog {
     pub providers: Vec<Kind>,
     pub models: std::collections::HashMap<Kind, Vec<Model>>,
     pub errors: std::collections::HashMap<Kind, String>,
 }
 
+fn remote_cache() -> &'static Mutex<std::collections::HashMap<String, RemoteCatalog>> {
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<String, RemoteCatalog>>> =
+        OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+/// The project's last catalog from its host, for immediate display while a
+/// refresh runs. The host decides how fresh a catalog is, so this never expires.
+pub fn cached_remote_catalog(cwd: &str) -> Option<RemoteCatalog> {
+    remote_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(cwd)
+        .cloned()
+}
+pub fn remember_remote_catalog(cwd: &str, catalog: &RemoteCatalog) {
+    remote_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(cwd.into(), catalog.clone());
+}
+
 pub fn remote_catalog(cwd: &str) -> Result<RemoteCatalog, String> {
+    let catalog = fetch_remote_catalog(cwd)?;
+    remember_remote_catalog(cwd, &catalog);
+    Ok(catalog)
+}
+
+fn fetch_remote_catalog(cwd: &str) -> Result<RemoteCatalog, String> {
     let remote = crate::remote::parse_remote_path(cwd).ok_or("Invalid remote project")?;
     let connections = crate::remote::default_connections()?;
     let machine = connections.machine_for_environment(&remote.environment_id)?;

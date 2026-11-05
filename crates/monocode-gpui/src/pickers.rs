@@ -26,7 +26,11 @@ pub(crate) fn model_name(kind: Kind, model: Option<&str>) -> SharedString {
     if model.is_some_and(contains_account_id) {
         return kind.label().into();
     }
-    match model {
+    // A remote host prefixes its IDs with the provider: `claude:opus`.
+    let native = model
+        .filter(|id| id.starts_with(&format!("{}:", kind.id())))
+        .map(|id| monocode_core::store::native_model(id, kind.id()));
+    match native.as_ref().map_or(model, |id| id.as_deref()) {
         None => kind.label().into(),
         Some("sonnet") => "Sonnet".into(),
         Some("opus") => "Opus".into(),
@@ -71,6 +75,19 @@ pub(crate) fn model_display_name(kind: Kind, id: &str, name: &str) -> SharedStri
 pub(crate) fn cached_model_name(kind: Kind, id: Option<&str>) -> SharedString {
     id.and_then(|id| catalog::cached_name(kind, id).map(|name| model_display_name(kind, id, &name)))
         .unwrap_or_else(|| model_name(kind, id))
+}
+/// Saved favorites and recents hold whatever ID the pick used, and a remote host
+/// spells a model differently: `sonnet` here is `claude:sonnet` there.
+fn same_model(kind: Kind, a: &str, b: &str) -> bool {
+    use monocode_core::store::native_model;
+    a == b || native_model(a, kind.id()).is_some_and(|a| Some(a) == native_model(b, kind.id()))
+}
+/// The row of a host's catalog that a saved model ID means, if it has one.
+pub(crate) fn hosted_model<'a>(models: &'a [Model], kind: Kind, id: &str) -> Option<&'a Model> {
+    models
+        .iter()
+        .find(|model| model.id == id)
+        .or_else(|| models.iter().find(|model| same_model(kind, &model.id, id)))
 }
 /// saveRecentModelChoice: the pick moves to the front of the six recents.
 pub(crate) fn remember_model(kind: Kind, model: Option<String>, cx: &mut gpui::App) {
@@ -144,6 +161,207 @@ mod model_label_tests {
                 assert_eq!(entries.len(), 1);
                 assert_eq!(entries[0].id, None);
             });
+        });
+    }
+
+    fn hosted(id: &str, name: &str) -> Model {
+        Model {
+            id: id.into(),
+            name: name.into(),
+            alias_target: None,
+            efforts: Vec::new(),
+            default_effort: None,
+            fast: false,
+            thinking: false,
+            default: false,
+            tiers: Vec::new(),
+            controls: Vec::new(),
+        }
+    }
+    fn hosted_claude() -> catalog::RemoteCatalog {
+        catalog::RemoteCatalog {
+            providers: vec![Kind::Claude, Kind::Codex],
+            models: [
+                (
+                    Kind::Claude,
+                    vec![
+                        hosted("claude:opus", "Opus 5.5"),
+                        hosted("claude:sonnet", "Sonnet 5.5"),
+                        hosted("claude:haiku-4-5-20251001", "Haiku 4.5"),
+                    ],
+                ),
+                (Kind::Codex, vec![hosted("codex:gpt-test", "GPT Test")]),
+            ]
+            .into_iter()
+            .collect(),
+            errors: Default::default(),
+        }
+    }
+    /// What the local side leaves behind: bare CLI aliases, one model the host
+    /// doesn't offer, and the host's own ID from an earlier remote pick.
+    fn saved_locally() -> crate::settings::Preferences {
+        let choice = |model: &str| crate::settings::ModelChoice {
+            provider: "claude".into(),
+            model: Some(model.into()),
+        };
+        crate::settings::Preferences {
+            recent_models: vec![
+                choice("claude:opus"),
+                choice("sonnet"),
+                choice("opus"),
+                choice("claude-haiku-4-5-20251001"),
+                choice("local-only"),
+            ],
+            favorite_models: vec![choice("sonnet"), choice("local-only")],
+            ..Default::default()
+        }
+    }
+    fn rows(list: &Entity<ModelList>, cx: &gpui::App) -> Vec<(Option<String>, String, bool)> {
+        list.read(cx)
+            .entries(cx)
+            .into_iter()
+            .map(|entry| (entry.id, entry.name.to_string(), entry.enabled))
+            .collect()
+    }
+    fn row(id: Option<&str>, name: &str, enabled: bool) -> (Option<String>, String, bool) {
+        (id.map(str::to_owned), name.to_owned(), enabled)
+    }
+
+    #[test]
+    fn a_hosts_prefixed_id_gets_the_same_name_as_the_bare_one() {
+        for (id, name) in [
+            ("claude:opus", "Opus"),
+            ("claude:opus-5-5", "Claude Opus 5.5"),
+            ("opus", "Opus"),
+        ] {
+            assert_eq!(model_name(Kind::Claude, Some(id)).as_ref(), name);
+        }
+        assert_eq!(
+            model_name(Kind::Codex, Some("codex:gpt-6.1-sol")).as_ref(),
+            "GPT-6.1-Sol"
+        );
+    }
+
+    #[test]
+    fn saved_ids_find_the_hosts_spelling_of_a_model() {
+        let catalog = hosted_claude();
+        let claude = &catalog.models[&Kind::Claude];
+        let found = |id| hosted_model(claude, Kind::Claude, id).map(|m| m.id.as_str());
+        assert_eq!(found("opus"), Some("claude:opus"));
+        assert_eq!(found("claude:opus"), Some("claude:opus"));
+        assert_eq!(found("opus[1m]"), Some("claude:opus"));
+        assert_eq!(
+            found("claude-haiku-4-5-20251001"),
+            Some("claude:haiku-4-5-20251001")
+        );
+        assert_eq!(found("haiku"), None);
+        assert_eq!(found("local-only"), None);
+    }
+
+    #[gpui::test]
+    fn a_remote_picker_lists_nothing_local_before_its_first_catalog(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(saved_locally());
+            let list = cx.new(|cx| {
+                ModelList::new_for(
+                    Kind::Claude,
+                    Some("claude:opus".into()),
+                    "remote://env/no-catalog-yet",
+                    Default::default(),
+                    cx,
+                )
+            });
+            assert_eq!(
+                rows(&list, cx),
+                [
+                    row(None, "Default", false),
+                    row(Some("claude:opus"), "Opus", false),
+                ]
+            );
+            assert_eq!(list.read(cx).current_index(cx), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn a_remote_picker_opens_ready_from_its_last_catalog(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(saved_locally());
+            let project = "remote://env/cached-catalog";
+            catalog::remember_remote_catalog(project, &hosted_claude());
+            let list = cx.new(|cx| {
+                ModelList::new_for(
+                    Kind::Claude,
+                    Some("opus".into()),
+                    project,
+                    Default::default(),
+                    cx,
+                )
+            });
+            // Recents become the host's rows, once each, and the rest follow.
+            assert_eq!(
+                rows(&list, cx),
+                [
+                    row(None, "Default", true),
+                    row(Some("claude:opus"), "Opus 5.5", true),
+                    row(Some("claude:sonnet"), "Sonnet 5.5", true),
+                    row(Some("claude:haiku-4-5-20251001"), "Haiku 4.5", true),
+                ]
+            );
+            // A session saved with the bare alias still marks the host's row.
+            assert_eq!(list.read(cx).current_index(cx), 1);
+            assert!(
+                list.read(cx)
+                    .remote_providers
+                    .as_ref()
+                    .is_some_and(|providers| providers.contains(&Kind::Codex))
+            );
+            list.update(cx, |list, _| list.tab = ModelTab::Favorites);
+            assert_eq!(
+                rows(&list, cx),
+                [row(Some("claude:sonnet"), "Claude Code · Sonnet 5.5", true)]
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_star_on_a_hosts_row_follows_the_favorite_saved_locally(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(saved_locally());
+            let project = "remote://env/cached-favorites";
+            catalog::remember_remote_catalog(project, &hosted_claude());
+            let list = cx
+                .new(|cx| ModelList::new_for(Kind::Claude, None, project, Default::default(), cx));
+            let starred =
+                |id: &str, cx: &gpui::App| list.read(cx).favorite(Kind::Claude, Some(id), cx);
+            assert!(starred("claude:sonnet", cx));
+            assert!(!starred("claude:opus", cx));
+            list.update(cx, |list, cx| {
+                list.toggle_favorite(Kind::Claude, Some("claude:sonnet".into()), cx)
+            });
+            assert!(!starred("claude:sonnet", cx));
+            assert_eq!(
+                favorites(cx),
+                [("claude".to_owned(), Some("local-only".to_owned()))]
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_local_picker_keeps_saved_ids_as_they_are(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(saved_locally());
+            let list = cx
+                .new(|cx| ModelList::new_for(Kind::Claude, None, "/work", Default::default(), cx));
+            list.update(cx, |list, _| list.tab = ModelTab::Harness(Kind::Claude));
+            let ids: Vec<_> = rows(&list, cx).into_iter().map(|row| row.0).collect();
+            assert!(ids.contains(&Some("sonnet".to_owned())));
+            assert!(ids.contains(&Some("local-only".to_owned())));
+            assert!(list.read(cx).favorite(Kind::Claude, Some("sonnet"), cx));
+            assert!(
+                !list
+                    .read(cx)
+                    .favorite(Kind::Claude, Some("claude:sonnet"), cx)
+            );
         });
     }
 
@@ -526,6 +744,13 @@ impl ModelList {
             search,
             _changed: changed,
         };
+        if let Some(catalog) = list
+            .remote_project
+            .as_deref()
+            .and_then(catalog::cached_remote_catalog)
+        {
+            list.apply_remote_catalog(catalog);
+        }
         list.highlighted = list.current_index(cx);
         list.probe_installed(cx);
         list.discover(
@@ -578,24 +803,41 @@ impl ModelList {
             None => models.iter().find(|m| m.default).or(models.first()),
         }
     }
+    /// Whether a saved choice names this row. Only a remote catalog spells
+    /// models differently from what was saved.
+    fn same_choice(&self, kind: Kind, saved: Option<&str>, row: Option<&str>) -> bool {
+        match (saved, row) {
+            (Some(saved), Some(row)) if self.remote_project.is_some() => {
+                same_model(kind, saved, row)
+            }
+            _ => saved == row,
+        }
+    }
     fn favorite(&self, kind: Kind, id: Option<&str>, cx: &gpui::App) -> bool {
         cx.try_global::<crate::settings::Preferences>()
             .is_some_and(|prefs| {
-                prefs
-                    .favorite_models
-                    .iter()
-                    .any(|c| c.provider == kind.id() && c.model.as_deref() == id)
+                prefs.favorite_models.iter().any(|c| {
+                    c.provider == kind.id() && self.same_choice(kind, c.model.as_deref(), id)
+                })
             })
     }
     fn toggle_favorite(&mut self, kind: Kind, id: Option<String>, cx: &mut Context<Self>) {
         if !cx.has_global::<crate::settings::Preferences>() {
             return;
         }
+        let saved: Vec<_> = cx
+            .global::<crate::settings::Preferences>()
+            .favorite_models
+            .iter()
+            .filter(|c| {
+                c.provider != kind.id()
+                    || !self.same_choice(kind, c.model.as_deref(), id.as_deref())
+            })
+            .cloned()
+            .collect();
         cx.update_global::<crate::settings::Preferences, _>(|prefs, _| {
             let before = prefs.favorite_models.len();
-            prefs
-                .favorite_models
-                .retain(|c| !(c.provider == kind.id() && c.model == id));
+            prefs.favorite_models = saved;
             if prefs.favorite_models.len() == before {
                 prefs.favorite_models.push(crate::settings::ModelChoice {
                     provider: kind.id().into(),
@@ -643,6 +885,21 @@ impl ModelList {
         })
         .detach();
     }
+    fn apply_remote_catalog(&mut self, catalog: catalog::RemoteCatalog) {
+        self.missing = Kind::ALL
+            .into_iter()
+            .filter(|kind| !catalog.providers.contains(kind))
+            .collect();
+        self.remote_providers = Some(catalog.providers);
+        self.catalogs = catalog.models.into_iter().collect();
+        self.errors = catalog.errors.into_iter().collect();
+        if let ModelTab::Harness(selected) = self.tab
+            && self.missing.contains(&selected)
+            && selected != self.provider
+        {
+            self.tab = ModelTab::Harness(self.provider);
+        }
+    }
     fn discover(&mut self, kind: Kind, cx: &mut Context<Self>) {
         if cfg!(test) || self.loading.contains(&kind) {
             return;
@@ -655,23 +912,16 @@ impl ModelList {
             cx.spawn(async move |this, cx| {
                 let result = work.await;
                 let _ = this.update(cx, |this, cx| {
+                    // A refresh behind a cached catalog leaves the arrow keys'
+                    // row where it was.
+                    let highlighted = this
+                        .remote_providers
+                        .is_some()
+                        .then(|| this.entries(cx).into_iter().nth(this.highlighted))
+                        .flatten();
                     this.loading.clear();
                     match result {
-                        Ok(catalog) => {
-                            this.missing = Kind::ALL
-                                .into_iter()
-                                .filter(|kind| !catalog.providers.contains(kind))
-                                .collect();
-                            this.remote_providers = Some(catalog.providers);
-                            this.catalogs = catalog.models.into_iter().collect();
-                            this.errors = catalog.errors.into_iter().collect();
-                            if let ModelTab::Harness(selected) = this.tab
-                                && this.missing.contains(&selected)
-                                && selected != this.provider
-                            {
-                                this.tab = ModelTab::Harness(this.provider);
-                            }
-                        }
+                        Ok(catalog) => this.apply_remote_catalog(catalog),
                         Err(error) => {
                             this.errors = Kind::ALL
                                 .into_iter()
@@ -679,7 +929,13 @@ impl ModelList {
                                 .collect();
                         }
                     }
-                    this.highlighted = this.current_index(cx);
+                    this.highlighted = highlighted
+                        .and_then(|row| {
+                            this.entries(cx)
+                                .iter()
+                                .position(|entry| entry.kind == row.kind && entry.id == row.id)
+                        })
+                        .unwrap_or_else(|| this.current_index(cx));
                     cx.notify();
                 });
             })
@@ -730,6 +986,7 @@ impl ModelList {
     fn entries(&self, cx: &gpui::App) -> Vec<ModelEntry> {
         let ModelTab::Harness(kind) = self.tab else {
             let query = self.query(cx);
+            let mut seen: Vec<(Kind, Option<String>)> = Vec::new();
             return cx
                 .try_global::<crate::settings::Preferences>()
                 .into_iter()
@@ -739,16 +996,21 @@ impl ModelList {
                     if kind != self.provider && self.hidden.iter().any(|id| id == kind.id()) {
                         return None;
                     }
-                    let name = self.saved_model_name(kind, choice.model.as_deref());
+                    let (id, pickable) = self.saved_choice(kind, choice.model.as_deref())?;
+                    if seen.contains(&(kind, id.clone())) {
+                        return None;
+                    }
+                    seen.push((kind, id.clone()));
+                    let name = self.saved_model_name(kind, id.as_deref());
                     let name: SharedString = format!("{} · {}", kind.label(), name).into();
                     if !query.is_empty() && !name.to_lowercase().contains(&query) {
                         return None;
                     }
                     Some(ModelEntry {
                         kind,
-                        id: choice.model.clone(),
+                        id,
                         name,
-                        enabled: self.enabled(kind),
+                        enabled: pickable && self.enabled(kind),
                     })
                 })
                 .collect();
@@ -764,12 +1026,15 @@ impl ModelList {
             for choice in &prefs.recent_models {
                 if choice.provider == kind.id()
                     && choice.model.is_some()
-                    && !entries.iter().any(|entry| entry.id == choice.model)
+                    // A recent the host doesn't offer, or can't yet be matched
+                    // to what it offers, is not a choice on this machine.
+                    && let Some((id, true)) = self.saved_choice(kind, choice.model.as_deref())
+                    && !entries.iter().any(|entry| entry.id == id)
                 {
                     entries.push(ModelEntry {
                         kind,
-                        id: choice.model.clone(),
-                        name: self.saved_model_name(kind, choice.model.as_deref()),
+                        name: self.saved_model_name(kind, id.as_deref()),
+                        id,
                         enabled,
                     });
                 }
@@ -809,7 +1074,7 @@ impl ModelList {
         // An override from the environment that the catalog doesn't name.
         if kind == self.provider
             && let Some(id) = &self.current
-            && !entries.iter().any(|e| e.id.as_ref() == Some(id))
+            && !entries.iter().any(|e| self.is_current(e))
         {
             entries.push(ModelEntry {
                 kind,
@@ -828,6 +1093,24 @@ impl ModelList {
                         .contains(&query)
             })
             .collect()
+    }
+    /// A saved choice as this picker offers it, and whether it can be picked.
+    /// On a remote project that takes the host's catalog: a choice it doesn't
+    /// list goes, and one that can't be checked yet can't be picked.
+    fn saved_choice(&self, kind: Kind, id: Option<&str>) -> Option<(Option<String>, bool)> {
+        let (Some(id), true) = (id, self.remote_project.is_some()) else {
+            return Some((id.map(str::to_owned), true));
+        };
+        match self.catalogs.iter().find(|(k, _)| *k == kind) {
+            Some((_, models)) => {
+                hosted_model(models, kind, id).map(|model| (Some(model.id.clone()), true))
+            }
+            None => Some((Some(id.to_owned()), false)),
+        }
+    }
+    fn is_current(&self, entry: &ModelEntry) -> bool {
+        entry.kind == self.provider
+            && self.same_choice(entry.kind, self.current.as_deref(), entry.id.as_deref())
     }
     fn enabled(&self, kind: Kind) -> bool {
         (kind == self.provider || self.switch_allowed)
@@ -849,7 +1132,7 @@ impl ModelList {
     fn current_index(&self, cx: &gpui::App) -> usize {
         self.entries(cx)
             .iter()
-            .position(|entry| entry.kind == self.provider && entry.id == self.current)
+            .position(|entry| self.is_current(entry))
             .unwrap_or(0)
     }
     fn select_tab(&mut self, tab: ModelTab, window: &mut Window, cx: &mut Context<Self>) {
@@ -954,7 +1237,10 @@ impl Render for ModelList {
             ModelTab::Harness(kind) => Some(kind),
             _ => None,
         };
-        let loading = kind.is_some_and(|kind| self.loading.contains(&kind));
+        // A refresh behind rows that are already listed isn't worth a note.
+        let loading = kind.is_some_and(|kind| {
+            self.loading.contains(&kind) && !self.catalogs.iter().any(|(k, _)| *k == kind)
+        });
         let error = kind.and_then(|kind| {
             self.errors
                 .iter()
@@ -971,7 +1257,7 @@ impl Render for ModelList {
             .enumerate()
             .map(|(ix, entry)| {
                 let highlighted = self.highlighted == ix && entry.enabled;
-                let current = entry.kind == self.provider && entry.id == self.current;
+                let current = self.is_current(&entry);
                 let starred = self.favorite(entry.kind, entry.id.as_deref(), cx);
                 let (star_kind, star_id) = (entry.kind, entry.id.clone());
                 let row_group: SharedString = format!("model-row-{ix}").into();
@@ -1226,7 +1512,7 @@ impl ModelList {
             .enumerate()
             .map(|(ix, entry)| {
                 let highlighted = self.highlighted == ix;
-                let current = entry.kind == self.provider && entry.id == self.current;
+                let current = self.is_current(&entry);
                 let starred = self.favorite(entry.kind, entry.id.as_deref(), cx);
                 let (star_kind, star_id) = (entry.kind, entry.id.clone());
                 div()
