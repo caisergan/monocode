@@ -87,7 +87,17 @@ fn mascot(index: usize, side: f32, color: gpui::Hsla) -> AnyElement {
     .flex_shrink_0()
     .into_any_element()
 }
+/// Chats have no project to dress up, so they show what they are, unless
+/// someone chose a logo or mascot for them.
+fn shows_chats_icon(appearance: &ProjectAppearance, project: &str) -> bool {
+    project == "~" && appearance.logo.is_none() && appearance.mascot.is_none()
+}
 pub(crate) fn project_icon(appearance: &ProjectAppearance, project: &str, side: f32) -> AnyElement {
+    if shows_chats_icon(appearance, project) {
+        return icon("message-multiple", side)
+            .text_color(content(0.7))
+            .into_any_element();
+    }
     if project.starts_with("remote://") && appearance.logo.is_none() {
         return icon("internet", side)
             .text_color(content(0.7))
@@ -136,7 +146,15 @@ pub(crate) fn header_project_icon(appearance: &ProjectAppearance, project: &str)
             .flex()
             .items_center()
             .justify_center()
-            .child(project_icon(appearance, project, 10.))
+            .child(project_icon(
+                appearance,
+                project,
+                if shows_chats_icon(appearance, project) {
+                    14.
+                } else {
+                    10.
+                },
+            ))
             .into_any_element(),
     }
 }

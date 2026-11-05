@@ -595,9 +595,15 @@ impl Workspace {
                 .insert(project.clone(), state.active.unwrap());
         }
         state.add_project(&state.project.clone());
+        // Earlier versions saved "~" here once a chat had been created.
+        state.projects.retain(|p| p != "~");
         state
     }
     pub fn add_project(&mut self, path: &str) {
+        // Chats without a project are not a project, whatever cwd they carry.
+        if path == "~" {
+            return;
+        }
         self.archived_projects.retain(|p| p != path);
         if !self.projects.iter().any(|p| p == path) {
             self.projects.push(path.into());
@@ -1323,6 +1329,16 @@ mod tests {
             (dock.terminals.clone(), dock.active),
             (vec!["/c".to_string()], 0)
         );
+    }
+    #[test]
+    fn chats_without_a_project_never_join_the_projects() {
+        let sessions = vec![(1, "~".into()), (2, "/a".into())];
+        let saved = r#"{"project":"~","projects":["/a","~"]}"#;
+        let mut state = Workspace::restore(Some(saved), &sessions, "~");
+        assert_eq!(state.project, "~", "Chats stay open across a restart");
+        assert_eq!(state.projects, ["/a"]);
+        state.add_project("~");
+        assert_eq!(state.projects, ["/a"]);
     }
     #[test]
     fn restore_keeps_project_selection_and_prunes_stale_project_focus() {

@@ -420,6 +420,10 @@ impl Input {
         input.height = 120.;
         input
     }
+    #[cfg(test)]
+    pub(crate) fn placeholder_text(&self) -> &str {
+        &self.placeholder
+    }
     pub(crate) fn set_placeholder(
         &mut self,
         text: impl Into<SharedString>,

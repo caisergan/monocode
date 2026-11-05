@@ -121,6 +121,7 @@ pub(crate) fn install(prefs: &crate::settings::Preferences, cx: &mut App) {
             MenuItem::action("Next Session", NextSession),
             MenuItem::action("Previous Project", PreviousProject),
             MenuItem::action("Next Project", NextProject),
+            MenuItem::action("Chats", ShowChats),
             MenuItem::separator(),
             MenuItem::action("Focus Left", FocusPaneLeft),
             MenuItem::action("Focus Right", FocusPaneRight),

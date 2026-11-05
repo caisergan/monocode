@@ -14,6 +14,7 @@ use std::sync::{
 pub(crate) enum Command {
     New,
     Project,
+    Chats,
     Model,
     Settings,
     Sidebar,
@@ -28,6 +29,7 @@ pub(crate) enum Command {
 const COMMANDS: &[(Command, &str, &str)] = &[
     (Command::New, "New conversation", "⌘N"),
     (Command::Project, "Open project", "⌘O"),
+    (Command::Chats, "Open chats", "⌘⇧H"),
     (Command::Model, "Switch model", "⌘."),
     (Command::Settings, "Open settings", "⌘,"),
     (Command::Sidebar, "Toggle sidebar", "⌘B"),

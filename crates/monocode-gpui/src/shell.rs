@@ -113,6 +113,7 @@ actions!(
         NextSessionInTab,
         PreviousProject,
         NextProject,
+        ShowChats,
         SwitchModel,
         ToggleRightPanel,
         SplitRight,
@@ -238,6 +239,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new(&format!("{modifier}-down"), NextSessionInTab, context),
         KeyBinding::new(&format!("{modifier}-shift-left"), PreviousProject, context),
         KeyBinding::new(&format!("{modifier}-shift-right"), NextProject, context),
+        KeyBinding::new(&format!("{modifier}-shift-h"), ShowChats, context),
         KeyBinding::new(&format!("{modifier}-."), SwitchModel, context),
         KeyBinding::new(&format!("{modifier}-shift-b"), ToggleRightPanel, context),
         KeyBinding::new(&format!("{modifier}-d"), SplitRight, context),
@@ -5532,8 +5534,11 @@ impl Shell {
             }
             // SidebarWorktreeSwitcher's menu under the project header.
             MenuTarget::Header => {
+                let chats = self.workspace.project == "~";
+                let mut listed = vec!["~".to_owned()];
+                listed.extend(self.workspace.projects.iter().cloned());
                 let picker = cx.new(|cx| {
-                    ProjectPicker::new(&self.workspace.projects, &self.workspace.project, cx)
+                    ProjectPicker::new(&listed, &self.workspace.project, cx)
                         .appearance(self.workspace.project_appearance.clone())
                         .allow_remote()
                 });
@@ -5559,51 +5564,66 @@ impl Shell {
                     },
                 ));
                 let focus = picker.read(cx).search_focus(cx);
-                let branch = self
-                    .worktree_focus
-                    .get(&self.workspace.project)
-                    .and_then(|focus| focus.branch.clone())
-                    .or_else(|| {
-                        crate::conversation::git_branch(std::path::Path::new(
-                            &self.workspace.project,
-                        ))
-                    });
-                let worktree = MenuAction::new("switch-worktree", "Switch worktree")
-                    .icon("folder-tree")
-                    .flyout(self.worktree_flyout(events, window, cx));
-                (
-                    format!("{} menu", self.project_label(&self.workspace.project)).into(),
-                    vec![
+                let mut items: Vec<MenuItem> = Vec::new();
+                // Chats have no repository to branch or project to configure.
+                if !chats {
+                    let branch = self
+                        .worktree_focus
+                        .get(&self.workspace.project)
+                        .and_then(|focus| focus.branch.clone())
+                        .or_else(|| {
+                            crate::conversation::git_branch(std::path::Path::new(
+                                &self.workspace.project,
+                            ))
+                        });
+                    let worktree = MenuAction::new("switch-worktree", "Switch worktree")
+                        .icon("folder-tree")
+                        .flyout(self.worktree_flyout(events, window, cx));
+                    items.push(
                         match branch {
                             Some(branch) => worktree.value(branch),
                             None => worktree,
                         }
                         .into(),
-                        MenuItem::Separator,
-                        MenuAction::new("switch-project", "Switch project")
-                            .icon("folder")
-                            .flyout(Flyout {
-                                view: picker.into(),
-                                width: 286.,
-                                padding: 0.,
-                                height: None,
-                                max_height: Some(380.),
-                                focus: Some(focus),
-                                surface: None,
-                            })
-                            .into(),
+                    );
+                    items.push(MenuItem::Separator);
+                }
+                items.push(
+                    MenuAction::new("switch-project", "Switch project")
+                        .icon("folder")
+                        .flyout(Flyout {
+                            view: picker.into(),
+                            width: 286.,
+                            padding: 0.,
+                            height: None,
+                            max_height: Some(380.),
+                            focus: Some(focus),
+                            surface: None,
+                        })
+                        .into(),
+                );
+                if !chats {
+                    items.push(
                         MenuAction::new("project-settings", "Project settings")
                             .icon("sliders")
                             .flyout(self.project_settings_flyout(events, window, cx))
                             .into(),
-                        MenuAction::new("open-remote-project", "Open folder on a machine…")
-                            .icon("globe")
-                            .into(),
-                        MenuAction::new("settings", "Settings")
-                            .icon("settings")
-                            .shortcut(format!("{MOD},"))
-                            .into(),
-                    ],
+                    );
+                }
+                items.push(
+                    MenuAction::new("open-remote-project", "Open folder on a machine…")
+                        .icon("globe")
+                        .into(),
+                );
+                items.push(
+                    MenuAction::new("settings", "Settings")
+                        .icon("settings")
+                        .shortcut(format!("{MOD},"))
+                        .into(),
+                );
+                (
+                    format!("{} menu", self.project_label(&self.workspace.project)).into(),
+                    items,
                     240.,
                     MenuStyle::Switcher,
                 )
@@ -6874,7 +6894,14 @@ impl Shell {
         };
         let conversation = sessions.first().map(title).unwrap_or_default();
         let file = files.first().cloned().unwrap_or_default();
-        let untitled = "New session".to_owned();
+        let untitled = if sessions
+            .first()
+            .is_some_and(|id| self.session_metadata(*id, cx).summary.cwd == "~")
+        {
+            "New chat".to_owned()
+        } else {
+            "New session".to_owned()
+        };
         let mono = self.mono_pane_title(focus, cx);
         let headline = if let Some(mono) = mono {
             mono
@@ -8426,6 +8453,12 @@ impl Render for Shell {
             .on_action(
                 cx.listener(|this, _: &NextProject, window, cx| this.step_project(1, window, cx)),
             )
+            .on_action(cx.listener(|this, _: &ShowChats, window, cx| {
+                // Classic keeps its Chats in the project rail.
+                if this.menu.is_none() && !this.workspace.classic_layout {
+                    this.select_project("~".into(), window, cx);
+                }
+            }))
             .on_action(cx.listener(|this, _: &SwitchModel, window, cx| {
                 if let Some(view) = this.workspace.active.and_then(|id| this.sessions.get(&id)) {
                     view.update(cx, |v, cx| v.toggle_recent_models(window, cx));

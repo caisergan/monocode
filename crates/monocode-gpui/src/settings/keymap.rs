@@ -77,6 +77,7 @@ fn command(binding: &KeyBinding) -> Option<&'static str> {
         "workspace::NextSessionInTab" => "Session: Next in Current Tab",
         "workspace::PreviousProject" => "Project: Previous",
         "workspace::NextProject" => "Project: Next",
+        "workspace::ShowChats" => "Project: Chats",
         "workspace::SplitRight" => "Pane: Split Right",
         "workspace::SplitDown" => "Pane: Split Down",
         "workspace::FocusPaneLeft" => "Pane: Focus Left",

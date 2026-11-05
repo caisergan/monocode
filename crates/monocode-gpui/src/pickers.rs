@@ -1272,9 +1272,16 @@ impl ProjectPicker {
             .collect()
     }
     fn label(&self, path: &str) -> String {
-        self.appearance
-            .get(path)
-            .map_or_else(|| project_name(path), |a| a.label(path))
+        self.appearance.get(path).map_or_else(
+            || {
+                if path == "~" {
+                    "Chats".into()
+                } else {
+                    project_name(path)
+                }
+            },
+            |a| a.label(path),
+        )
     }
     fn matches(&self, cx: &gpui::App) -> Vec<String> {
         let query = self.search.read(cx).content.to_lowercase();

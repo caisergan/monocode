@@ -472,6 +472,9 @@ impl Conversation {
 
     pub(crate) fn new(summary: Session, store: Database, cx: &mut Context<Self>) -> Self {
         let input = cx.new(input::Input::new);
+        if summary.cwd == "~" {
+            input.update(cx, |input, cx| input.set_placeholder("Ask anything…", cx));
+        }
         // A new tab shows its folder's checkout from the first frame; the
         // load below confirms it rather than popping it in.
         let git = (!summary.has_messages)
@@ -3032,7 +3035,26 @@ impl Conversation {
         let enabled = !self.busy && !self.preparing_worktree && self.git.is_some();
         // Still reading git is not unavailable: don't dim, then brighten.
         let dimmed = !enabled && (self.loaded || self.busy || self.preparing_worktree);
-        let workspace = if draft {
+        let workspace = if self.execution_cwd() == "~" {
+            // No repository to pick a worktree from; say where the agent runs.
+            div()
+                .id("composer-workspace")
+                .debug_selector(|| "composer-home-folder".into())
+                .role(Role::Group)
+                .aria_label("Workspace Home folder")
+                .flex_shrink_0()
+                .h(px(24.))
+                .ml(px(-6.))
+                .px(px(6.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .text_size(px(12.))
+                .text_color(content(0.55))
+                .child(icon("folder", 14.).text_color(content(0.55)))
+                .child("Home folder")
+                .into_any_element()
+        } else if draft {
             bar_trigger(
                 "composer-workspace",
                 if new || linked {
@@ -3425,10 +3447,14 @@ impl Conversation {
                                 .line_height(px(28.))
                                 .text_color(content(1.))
                                 .truncate()
-                                .child(format!(
-                                    "What should we work on in {}?",
-                                    self.project_appearance.label(&self.summary.cwd)
-                                )),
+                                .child(if self.summary.cwd == "~" {
+                                    "What's on your mind?".to_owned()
+                                } else {
+                                    format!(
+                                        "What should we work on in {}?",
+                                        self.project_appearance.label(&self.summary.cwd)
+                                    )
+                                }),
                         )
                     })
                     .child(self.composer(window, cx))

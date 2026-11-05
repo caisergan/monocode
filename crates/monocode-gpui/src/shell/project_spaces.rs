@@ -654,6 +654,67 @@ impl Shell {
         }
     }
 
+    /// Chats without a project: fixed beside the track, since "~" is not one of
+    /// the projects the track slides through and reorders.
+    fn chats_space(&self, dragging: bool, cx: &mut Context<Self>) -> AnyElement {
+        let active = self.workspace.project == "~";
+        let attention = !active && self.chats_need_attention(cx);
+        let hovered = !dragging && self.hovered_space.as_deref() == Some("~");
+        div()
+            .id("chats-space")
+            .debug_selector(|| "chats-space".into())
+            .group("chats-space")
+            .role(Role::Tab)
+            .aria_label("Chats")
+            .aria_selected(active)
+            .when(attention, |d| d.aria_description("A chat needs you"))
+            .relative()
+            .flex_shrink_0()
+            .w(px(26.))
+            .h(px(20.))
+            .rounded_md()
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .when(active, |d| d.bg(content(0.1)))
+            .when(!dragging && !active, |d| d.hover(|s| s.bg(content(0.05))))
+            .child(
+                // Only the icon dims, so the dot keeps its full colour.
+                div()
+                    .opacity(if active { 1. } else { 0.55 })
+                    .group_hover("chats-space", |s| s.opacity(1.))
+                    .child(icon("message-multiple", 14.)),
+            )
+            .when(attention, |d| {
+                d.child(
+                    div()
+                        .debug_selector(|| "chats-space-dot".into())
+                        .absolute()
+                        .top(px(1.))
+                        .right(px(3.))
+                        .size(px(6.))
+                        .rounded_full()
+                        .bg(accent_color()),
+                )
+            })
+            .when(hovered, |d| d.child(self.space_anchor.probe()))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if *hovered && this.spaces.drag.is_none() && !this.spaces.moving() {
+                    this.hovered_space = Some("~".into());
+                } else if this.hovered_space.as_deref() == Some("~") {
+                    this.hovered_space = None;
+                } else {
+                    return;
+                }
+                this.invalidate_chrome(cx);
+            }))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.hovered_space = None;
+                this.select_project("~".into(), window, cx)
+            }))
+            .into_any_element()
+    }
     pub(super) fn project_spaces(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let now = Instant::now();
         self.tick_spaces(now, cx.background_executor().now());
@@ -664,7 +725,7 @@ impl Shell {
         if self
             .hovered_space
             .as_ref()
-            .is_some_and(|hovered| !self.workspace.projects.contains(hovered))
+            .is_some_and(|hovered| hovered != "~" && !self.workspace.projects.contains(hovered))
         {
             self.hovered_space = None;
         }
@@ -703,6 +764,8 @@ impl Shell {
             .filter_map(|command| crate::settings::command_shortcut(prefs, command))
             .collect::<Vec<_>>()
             .join(" / ");
+        let chats_shortcut =
+            crate::settings::command_shortcut(prefs, "Project: Chats").unwrap_or_default();
         let tooltip = self
             .hovered_space
             .clone()
@@ -734,8 +797,15 @@ impl Shell {
                                 .text_color(content(1.))
                                 .child(self.project_label(&path)),
                         )
-                        .when(!shortcuts.is_empty(), |d| {
-                            d.child(div().text_color(content(0.55)).child(shortcuts.clone()))
+                        .map(|d| {
+                            let keys = if path == "~" {
+                                &chats_shortcut
+                            } else {
+                                &shortcuts
+                            };
+                            d.when(!keys.is_empty(), |d| {
+                                d.child(div().text_color(content(0.55)).child(keys.clone()))
+                            })
                         }),
                 )
             });
@@ -774,6 +844,8 @@ impl Shell {
             .flex()
             .items_center()
             .gap_1()
+            .child(self.chats_space(dragging, cx))
+            .child(div().w_px().h(px(14.)).flex_shrink_0().bg(content(0.12)))
             .child(
                 icon_button("previous-projects", "Previous projects", "chevron-left")
                     .size(px(20.))
@@ -949,6 +1021,111 @@ mod tests {
             .unwrap()
     }
 
+    #[gpui::test]
+    fn the_chats_slot_opens_chats_without_joining_the_projects(cx: &mut TestAppContext) {
+        let (window, mut visual) = strip(cx);
+        let slot = visual.debug_bounds("chats-space").unwrap().center();
+        // The track keeps its spaces; the slot sits before it.
+        let track = visual.debug_bounds("project-spaces").unwrap();
+        assert!(slot.x < track.left());
+        visual.simulate_click(slot, Default::default());
+        visual.run_until_parked();
+        window
+            .update(&mut visual, |shell, _, cx| {
+                assert_eq!(shell.workspace.project, "~");
+                assert_eq!(shell.workspace.projects.len(), PROJECTS.len());
+                assert!(!shell.workspace.projects.contains(&"~".to_owned()));
+                let id = shell.workspace.active.unwrap();
+                assert_eq!(shell.session_metadata(id, cx).summary.cwd, "~");
+            })
+            .unwrap();
+        visual.refresh().unwrap();
+        // A space on the strip leads back to its project.
+        let space = visual.debug_bounds("project-space-0").unwrap().center();
+        visual.simulate_click(space, Default::default());
+        visual.run_until_parked();
+        window
+            .update(&mut visual, |shell, _, _| {
+                assert_eq!(shell.workspace.project, PROJECTS[0]);
+            })
+            .unwrap();
+    }
+    #[gpui::test]
+    fn the_chats_slot_shows_a_dot_for_an_unread_chat_until_chats_opens(cx: &mut TestAppContext) {
+        let (window, mut visual) = strip(cx);
+        assert!(visual.debug_bounds("chats-space-dot").is_none());
+        window
+            .update(&mut visual, |shell, _, cx| {
+                let id = shell.workspace.active.unwrap();
+                assert!(!shell.chats_need_attention(cx));
+                shell.sessions[&id].update(cx, |s, _| s.summary.cwd = "/s/d".into());
+                shell.unseen_finished.insert(id);
+                assert!(!shell.chats_need_attention(cx), "a project's reply");
+                shell.sessions[&id].update(cx, |s, _| s.summary.cwd = "~".into());
+                assert!(shell.chats_need_attention(cx));
+                shell.invalidate_chrome(cx);
+                cx.notify();
+            })
+            .unwrap();
+        visual.run_until_parked();
+        visual.refresh().unwrap();
+        assert!(visual.debug_bounds("chats-space-dot").is_some());
+        window
+            .update(&mut visual, |shell, _, cx| {
+                shell.workspace.project = "~".into();
+                shell.invalidate_chrome(cx);
+                cx.notify();
+            })
+            .unwrap();
+        visual.run_until_parked();
+        visual.refresh().unwrap();
+        assert!(visual.debug_bounds("chats-space-dot").is_none());
+    }
+    #[gpui::test]
+    fn the_chats_command_only_acts_in_the_focused_layout(cx: &mut TestAppContext) {
+        let (window, mut visual) = strip(cx);
+        window
+            .update(&mut visual, |shell, w, cx| {
+                shell.workspace.classic_layout = true;
+                shell.focus_active(w, cx);
+                w.dispatch_action(Box::new(ShowChats), cx);
+            })
+            .unwrap();
+        visual.run_until_parked();
+        window
+            .update(&mut visual, |shell, w, cx| {
+                assert_eq!(shell.workspace.project, "/s/d");
+                shell.workspace.classic_layout = false;
+                w.dispatch_action(Box::new(ShowChats), cx);
+            })
+            .unwrap();
+        visual.run_until_parked();
+        window
+            .update(&mut visual, |shell, _, _| {
+                assert_eq!(shell.workspace.project, "~");
+            })
+            .unwrap();
+    }
+    #[gpui::test]
+    fn chats_hide_monos_and_offer_a_first_chat(cx: &mut TestAppContext) {
+        let (window, mut visual) = strip(cx);
+        window
+            .update(&mut visual, |shell, w, cx| {
+                shell.select_project("~".into(), w, cx);
+            })
+            .unwrap();
+        visual.run_until_parked();
+        visual.refresh().unwrap();
+        window
+            .update(&mut visual, |shell, _, cx| {
+                let id = shell.workspace.active.unwrap();
+                let view = shell.sessions[&id].read(cx);
+                assert_eq!(view.input.read(cx).placeholder_text(), "Ask anything…");
+            })
+            .unwrap();
+        assert!(visual.debug_bounds("chats-empty-new").is_some());
+        assert!(visual.debug_bounds("composer-home-folder").is_some());
+    }
     #[gpui::test]
     fn dragging_a_space_sideways_reorders_the_projects(cx: &mut TestAppContext) {
         let (window, mut visual) = strip(cx);
