@@ -1,8 +1,7 @@
 // The right panel's peek, the sidebar's mirror: in the Focused layout (rounded
-// or boxy) a closed
-// right panel slides out over the workspace while the pointer rests on the
-// window's right edge or on the panel toggle, and puts itself away once the
-// pointer leaves it.
+// or boxy) a closed right panel slides out over the workspace while the pointer
+// rests on the window's right edge or on the panel toggle, and puts itself away
+// once the pointer leaves it.
 use super::{
     Shell,
     sidebar_peek::{PEEK_CLOSE_DELAY, PEEK_DRIFT, PEEK_EDGE, PEEK_INSET, SidebarPeek},

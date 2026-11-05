@@ -217,6 +217,12 @@ impl Shell {
     }
 
     pub(super) fn spaces_animating(&self) -> bool {
+        // Drawing the strip advances it, and the classic layout never does, so
+        // asking for frames there would never end. A glide left over finishes
+        // when the strip is next drawn.
+        if self.workspace.classic_layout {
+            return false;
+        }
         let now = Instant::now();
         self.spaces.glide.is_some()
             || self.spaces.edge_tick.is_some()
@@ -1270,6 +1276,31 @@ mod tests {
                 let saved = locked(&shell.store).unwrap().ui_state().unwrap().unwrap();
                 let restored = Workspace::restore(Some(&saved), &[], "/s/c");
                 assert_eq!(restored.projects, shell.workspace.projects);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn moving_a_project_in_the_classic_layout_leaves_the_undrawn_strip_idle(
+        cx: &mut TestAppContext,
+    ) {
+        let (window, mut visual) = strip(cx);
+        let visual = &mut visual;
+        visual.update(|_, cx| cx.set_reduce_motion(false));
+        window
+            .update(visual, |shell, window, cx| {
+                shell.workspace.classic_layout = true;
+                shell.layout_changed(cx);
+                let target = MenuTarget::Project {
+                    path: "/s/c".into(),
+                    rail: true,
+                };
+                shell.run_menu(target, "move:end", None, window, cx);
+                assert_eq!(shell.workspace.projects.last().unwrap(), "/s/c");
+                assert!(
+                    !shell.spaces_animating(),
+                    "nothing ticks a strip the layout doesn't draw"
+                );
             })
             .unwrap();
     }
