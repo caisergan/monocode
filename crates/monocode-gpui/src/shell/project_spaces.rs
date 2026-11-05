@@ -947,9 +947,10 @@ impl Shell {
                                         cx.listener(
                                             move |this, event: &MouseDownEvent, window, cx| {
                                                 let anchor = Anchor::Point(event.position);
+                                                // Spaces have no pins or groups to offer.
                                                 let target = MenuTarget::Project {
                                                     path: path.clone(),
-                                                    rail: true,
+                                                    rail: false,
                                                 };
                                                 this.open_menu(target, anchor, window, cx);
                                             },
@@ -1233,6 +1234,42 @@ mod tests {
                 );
                 assert_eq!(shell.workspace.project, "/s/d", "the drop opens nothing");
                 assert!(shell.peek_open(), "the peek stays out after the drop");
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn the_project_menu_and_shortcut_move_a_space(cx: &mut TestAppContext) {
+        let (window, mut visual) = strip(cx);
+        let visual = &mut visual;
+        let (first, last) = (PROJECTS[0], PROJECTS[PROJECTS.len() - 1]);
+        window
+            .update(visual, |shell, window, cx| {
+                let target = MenuTarget::Project {
+                    path: "/s/c".into(),
+                    rail: false,
+                };
+                shell.run_menu(target.clone(), "move:start", None, window, cx);
+                assert_eq!(shell.workspace.projects[0], "/s/c");
+                shell.run_menu(target, "move:end", None, window, cx);
+                assert_eq!(shell.workspace.projects.last().unwrap(), "/s/c");
+                assert_eq!(shell.workspace.projects[0], first);
+                assert_ne!(last, "/s/c");
+                shell.select_project("/s/c".into(), window, cx);
+            })
+            .unwrap();
+        visual.run_until_parked();
+        window
+            .update(visual, |shell, _, cx| shell.move_current_project(-1, cx))
+            .unwrap();
+        visual.run_until_parked();
+        window
+            .update(visual, |shell, _, _| {
+                let count = shell.workspace.projects.len();
+                assert_eq!(shell.workspace.projects[count - 2], "/s/c");
+                let saved = locked(&shell.store).unwrap().ui_state().unwrap().unwrap();
+                let restored = Workspace::restore(Some(&saved), &[], "/s/c");
+                assert_eq!(restored.projects, shell.workspace.projects);
             })
             .unwrap();
     }

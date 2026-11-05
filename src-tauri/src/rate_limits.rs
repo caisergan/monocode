@@ -369,11 +369,28 @@ fn fetch_claude_usage_sync(config_dir: Option<PathBuf>) -> Result<ClaudeUsageFet
     // usage footer must remain read-only: independently refreshing here can
     // race a live CLI (or another MonoCode window) and leave one process with
     // a spent refresh token, which forces the user through sign-in again.
+    // The access token lasts about 8 hours. With a refresh token present the
+    // CLI renews it on its next run, so report stale usage, not a sign-out
+    // (the message must not read as an auth failure to `needsProviderLogin`).
     if token_expired(creds.expires_at_ms, now_ms()) {
         return Ok(expired_token_usage(creds.refreshable));
     }
 
-    Ok(fetch_usage_with_token(&creds.access_token))
+    let result = fetch_usage_with_token(&creds.access_token);
+    Ok(if creds.refreshable && result.http_status == Some(401) {
+        renews_on_next_message()
+    } else {
+        result
+    })
+}
+
+fn renews_on_next_message() -> ClaudeUsageFetch {
+    usage_result(
+        "error",
+        None,
+        None,
+        Some("Usage updates after this account's next Claude turn".into()),
+    )
 }
 
 fn fetch_usage_with_token(token: &str) -> ClaudeUsageFetch {
@@ -413,12 +430,7 @@ fn fetch_usage_with_token(token: &str) -> ClaudeUsageFetch {
 /// browser login; the next Claude turn renews the token and the usage with it.
 fn expired_token_usage(refreshable: bool) -> ClaudeUsageFetch {
     if refreshable {
-        usage_result(
-            "error",
-            None,
-            None,
-            Some("Usage updates after this account's next Claude turn".into()),
-        )
+        renews_on_next_message()
     } else {
         usage_error(401)
     }
@@ -438,9 +450,12 @@ fn usage_error(status: u16) -> ClaudeUsageFetch {
 fn read_claude_credentials(config_dir: Option<&std::path::Path>) -> Option<ClaudeCredentials> {
     #[cfg(target_os = "macos")]
     {
+        // A Keychain item that is present but blank (the CLI clears it when a
+        // refresh fails) means signed out. An old .credentials.json must not
+        // stand in for it with a long-dead refresh token.
         let service = claude_keychain_service(config_dir);
-        if let Some(creds) = read_macos_keychain_credentials(&service) {
-            return Some(creds);
+        if let Some(secret) = read_macos_keychain_secret(&service) {
+            return credentials_from_blob(&secret);
         }
     }
     read_credentials_file(config_dir)
@@ -528,7 +543,7 @@ fn now_ms() -> i64 {
 }
 
 #[cfg(target_os = "macos")]
-fn read_macos_keychain_credentials(service: &str) -> Option<ClaudeCredentials> {
+fn read_macos_keychain_secret(service: &str) -> Option<String> {
     let candidates = [
         {
             let mut args = keychain_find_args(service);
@@ -548,9 +563,7 @@ fn read_macos_keychain_credentials(service: &str) -> Option<ClaudeCredentials> {
     ];
     for args in candidates {
         if let Some(secret) = security_output(&args) {
-            if let Some(creds) = credentials_from_blob(&secret) {
-                return Some(creds);
-            }
+            return Some(secret);
         }
     }
     None
@@ -703,6 +716,23 @@ fn run_with_timeout(cmd: &mut std::process::Command, timeout: Duration) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn claude_credentials_note_whether_the_cli_can_renew_them() {
+        let renewable =
+            credentials_from_blob(r#"{"claudeAiOauth":{"accessToken":"a","refreshToken":"r"}}"#)
+                .unwrap();
+        assert!(renewable.refreshable);
+        let wiped =
+            credentials_from_blob(r#"{"claudeAiOauth":{"accessToken":"a","refreshToken":""}}"#)
+                .unwrap();
+        assert!(!wiped.refreshable);
+        // The footer must not read the stale-usage note as a sign-out.
+        let message = renews_on_next_message().error.unwrap().to_lowercase();
+        assert!(!["expired", "sign-in", "not signed in", "authentication"]
+            .iter()
+            .any(|word| message.contains(word)));
+    }
 
     #[test]
     fn extract_access_token_from_claude_credentials() {

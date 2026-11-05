@@ -11,7 +11,9 @@ mod links;
 mod live_phase;
 mod mascot;
 mod measurements;
+mod mono_divider;
 mod outline;
+mod perf_scroll;
 pub(crate) mod phases;
 mod provider_switch;
 mod remote_plans;
@@ -33,9 +35,9 @@ use crate::{
     theme::*,
 };
 use gpui::{
-    AvailableSpace, Bounds, ClipboardItem, Context, FollowMode, ListAlignment, ListOffset,
-    ListState, Pixels, Role, SharedString, Transformation, Window, canvas, div, list, percentage,
-    prelude::*, px, rgb, size,
+    AvailableSpace, Bounds, ClipboardItem, Context, Entity, FollowMode, ListAlignment, ListOffset,
+    ListState, Pixels, Role, SharedString, StyleRefinement, Window, canvas, div, list, prelude::*,
+    px, rgb, size,
 };
 use monocode_core::tool::{ToolCall, ToolState, tasks::Panel};
 use monocode_core::transcript::Row;
@@ -143,6 +145,8 @@ enum Body {
     RemotePlan(crate::conversation::remote_plans::Plan),
     SavedDraft,
     Markdown(Arc<MarkdownRow>),
+    /// A dithered break between text replies in one Mono turn.
+    MonoDivider,
     Visual(Arc<monocode_core::visual::VisualDocument>),
     Plain(SharedString),
     Interjection(monocode_core::transcript::Interjection),
@@ -157,10 +161,6 @@ enum Body {
     Pending(usize),
     /// LaunchedSessionCard for a session the run started.
     Launch(i64),
-    /// SessionReview, the latest settled turn's recorded changes.
-    Review {
-        turn: usize,
-    },
     /// A commit pill turn's status line, then its card.
     GitAction(Arc<git_turns::GitCard>),
     Tool {
@@ -363,6 +363,100 @@ impl Follow {
     }
 }
 
+/// monoSpawnedSessions: sessions the run at `turn..end` started with
+/// `sessions.start`, and those `known` to be launched that it followed up with
+/// `sessions.send`.
+pub(crate) fn run_launches(
+    source: &[Row],
+    turn: usize,
+    end: usize,
+    known: impl Fn(i64) -> bool,
+) -> Vec<i64> {
+    let mut found = Vec::new();
+    let mut at = turn;
+    while at < end {
+        let next = (at + 1..end).find(|&i| source[i].first).unwrap_or(end);
+        if source[at].role == "mono-launch" {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(&source[at].text)
+                && let Some(id) = value["sessionId"].as_i64()
+                && !found.contains(&id)
+            {
+                found.push(id);
+            }
+        } else if source[at].role == "tool" {
+            let text: String = source[at..next].iter().map(|r| r.text.as_str()).collect();
+            if let Ok(tool) = serde_json::from_str::<ToolCall>(&text)
+                && tool.state == ToolState::Completed
+                && let Ok(input) = serde_json::from_str::<serde_json::Value>(&tool.input)
+                && let Some(action) = input["command"]
+                    .as_str()
+                    .or_else(|| input["cmd"].as_str())
+                    .and_then(monocode_core::mono::work::command_action)
+                && matches!(action.as_str(), "sessions.start" | "sessions.send")
+            {
+                let receipts = serde_json::from_str::<serde_json::Value>(&tool.output)
+                    .map(|v| vec![v])
+                    .unwrap_or_else(|_| {
+                        tool.output
+                            .lines()
+                            .filter_map(|line| serde_json::from_str(line.trim()).ok())
+                            .collect()
+                    });
+                for value in receipts {
+                    if value["ok"] == true
+                        && let Some(id) = value["result"]["sessionId"]
+                            .as_i64()
+                            .or_else(|| {
+                                monocode_core::mono::work::session_handle(&value["result"]["id"])
+                            })
+                            .or_else(|| {
+                                (value["result"]["submitted"] == true)
+                                    .then(|| {
+                                        monocode_core::mono::work::session_handle(
+                                            &value["result"]["sessionId"],
+                                        )
+                                    })
+                                    .flatten()
+                            })
+                        && (action == "sessions.start" || known(id))
+                        && !found.contains(&id)
+                    {
+                        found.push(id);
+                    }
+                }
+            }
+        }
+        at = next;
+    }
+    found
+}
+
+/// Whether the Mono has said something the user can read in `from..to`: the
+/// opening sentence of any run there. A message the user sends after it reads
+/// as the next line of the chat, not as part of the prompt above.
+pub(crate) fn mono_spoke(source: &[Row], from: usize, to: usize) -> bool {
+    let mut working = false;
+    for (at, row) in source[from.min(to)..to].iter().enumerate() {
+        if row.is_prompt() {
+            working = false;
+        } else if row.first && row.role != "reasoning" {
+            if !working && row.role == "assistant" {
+                // One message spans its first row and the continuations after it.
+                let at = from.min(to) + at;
+                let text: String = std::iter::once(row)
+                    .chain(source[at + 1..to].iter().take_while(|r| !r.first))
+                    .map(|r| r.text.as_str())
+                    .collect();
+                let text = text.trim();
+                if !text.is_empty() && !text.starts_with("<reaction>") {
+                    return true;
+                }
+            }
+            working = true;
+        }
+    }
+    false
+}
 /// The first row of the prompt block that opens `turn`.
 pub(crate) fn prompt_start(source: &[Row], turn: usize) -> usize {
     let mut at = turn.min(source.len());
@@ -409,26 +503,41 @@ pub(crate) fn mono_work_label(source: &[Row], group: usize) -> String {
         .unwrap_or(source.len());
     let mut thought = 0usize;
     let mut latest = None;
+    let mut reasoning = None;
     for (ix, row) in source[turn..end].iter().enumerate() {
         if !row.first {
             continue;
         }
         match row.role.as_str() {
-            "assistant" | "reasoning" => {
+            "assistant" => {
                 thought += 1;
                 latest = None;
+                reasoning = None;
             }
-            "tool" => latest = Some(turn + ix),
+            "reasoning" => {
+                thought += 1;
+                latest = None;
+                reasoning = Some(turn + ix);
+            }
+            "tool" => {
+                latest = Some(turn + ix);
+                reasoning = None;
+            }
             _ => {}
         }
     }
-    let Some(tool) = latest.and_then(|at| {
+    let message = |at: usize| -> String {
         let end = (at + 1..source.len())
             .find(|&i| source[i].first)
             .unwrap_or(source.len());
-        let text: String = source[at..end].iter().map(|r| r.text.as_str()).collect();
-        serde_json::from_str::<ToolCall>(&text).ok()
-    }) else {
+        source[at..end].iter().map(|r| r.text.as_str()).collect()
+    };
+    // A reasoning summary's own heading says what it is working on.
+    if let Some(heading) = reasoning.and_then(|at| reasoning_heading(&message(at))) {
+        return format!("{heading}…");
+    }
+    let Some(tool) = latest.and_then(|at| serde_json::from_str::<ToolCall>(&message(at)).ok())
+    else {
         return THINKING[thought.saturating_sub(1) % THINKING.len()].into();
     };
     if tool.is_milestone() {
@@ -440,15 +549,80 @@ pub(crate) fn mono_work_label(source: &[Row], group: usize) -> String {
             "Compacting context…".into()
         };
     }
-    match tool.summary().0.as_str() {
-        "Run" => "Running command…",
-        "Edit" | "Write" => "Editing file…",
-        "Read" => "Reading file…",
-        "Find" | "List" | "Search" | "Glob" | "Grep" => "Exploring project…",
-        "Agent" | "Task" => "Running agent…",
-        _ => "Using tool…",
+    tool_status(&tool)
+}
+/// A reasoning summary's heading, as Codex writes them (`**Finding the repo**`),
+/// when it is short enough for a status line.
+fn reasoning_heading(text: &str) -> Option<String> {
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let heading = line
+        .strip_prefix("**")
+        .and_then(|l| l.strip_suffix("**"))
+        .or_else(|| line.strip_prefix('#').map(|l| l.trim_start_matches('#')))?
+        .trim()
+        .trim_end_matches(['.', ':', '…']);
+    let words = heading.split_whitespace().count();
+    ((1..=8).contains(&words) && heading.chars().count() <= 60).then(|| heading.to_owned())
+}
+/// What a running tool is doing, in the user's words where we can tell.
+fn tool_status(tool: &ToolCall) -> String {
+    let shown = tool.presentation();
+    let app = monocode_core::tool::app_tool(&tool.name)
+        || shown
+            .command
+            .as_deref()
+            .and_then(monocode_core::tool::app_cli_action)
+            .is_some();
+    if app {
+        return format!("{} {}…", shown.action, shown.target);
     }
-    .into()
+    let (action, _) = tool.summary();
+    match action.as_str() {
+        "Run" => {
+            // The model's own one-line description of the command, when given.
+            if let Some(description) = shown
+                .description
+                .as_deref()
+                .map(|d| d.trim().trim_end_matches(['.', '…']))
+                .filter(|d| !d.is_empty() && d.chars().count() <= 60)
+            {
+                return format!("{description}…");
+            }
+            command_status(shown.command.as_deref().unwrap_or("")).into()
+        }
+        "Edit" | "Write" => "Editing file…".into(),
+        "Read" => "Reading file…".into(),
+        "Search" => "Searching the web…".into(),
+        "Find" | "List" | "Glob" | "Grep" => "Exploring project…".into(),
+        "Agent" | "Task" => "Running agent…".into(),
+        _ => mcp_status(&tool.name).unwrap_or_else(|| "Using tool…".into()),
+    }
+}
+/// A status for a shell command the model did not describe.
+fn command_status(command: &str) -> &'static str {
+    let mut words = command.split_whitespace();
+    match (words.next().unwrap_or(""), words.next().unwrap_or("")) {
+        ("gh", "pr") => "Looking at pull requests…",
+        ("gh", "issue") => "Looking at issues…",
+        ("gh", "run" | "workflow") => "Checking CI…",
+        ("gh", "search" | "repo") => "Searching GitHub…",
+        ("gh", _) => "Checking GitHub…",
+        ("git", _) => "Checking git…",
+        ("curl" | "wget", _) => "Fetching from the web…",
+        ("npm" | "bun" | "pnpm" | "yarn" | "cargo" | "make", _) => "Running a build…",
+        _ => "Running command…",
+    }
+}
+/// `mcp__github__search_repositories` → "Search repositories…".
+fn mcp_status(name: &str) -> Option<String> {
+    let tool = name
+        .strip_prefix("mcp__")
+        .and_then(|rest| rest.split_once("__"))
+        .map(|(_, tool)| tool)?;
+    let words = tool.replace(['_', '-'], " ");
+    let mut chars = words.trim().chars();
+    let first = chars.next()?;
+    Some(format!("{}{}…", first.to_uppercase(), chars.as_str()))
 }
 /// isEmojiOnlyMessage: up to three emoji, which read as a reaction.
 pub(crate) fn is_emoji_only(text: &str) -> bool {
@@ -507,6 +681,9 @@ pub(crate) struct TranscriptView {
     base: usize,
     /// The store cursor for the turns above the loaded rows, if any.
     history_before: Option<i64>,
+    /// The store cursor for the turns just above the window, which older
+    /// pages loaded here don't move: a paired phone pages from the window.
+    window_before: Option<i64>,
     history_pager: Option<history::HistoryPager>,
     /// The last page read failed; only a scroll retries it.
     history_failed: bool,
@@ -541,10 +718,6 @@ pub(crate) struct TranscriptView {
     taken: Vec<TakenMessage>,
     pending_entrances: HashMap<String, Instant>,
     launches: HashMap<i64, LaunchView>,
-    /// The session's latestTurnAccessory card.
-    review: Option<gpui::AnyView>,
-    /// The card has changes or an error to show, so it takes a row.
-    review_shown: bool,
     /// A clock for the tool and task shimmers.
     started_at: Instant,
     /// One clock per frame for row motion. The list measures rows and the
@@ -556,9 +729,14 @@ pub(crate) struct TranscriptView {
     messages: Vec<Message>,
     rows: Vec<UiRow>,
     streaming: bool,
+    perf_scroll: perf_scroll::PerfScroll,
     chat_layout: bool,
     anchor_prompts: bool,
     smooth_reveal: bool,
+    /// Tool groups open only when clicked, even while running.
+    collapse_groups: bool,
+    /// Finished replies fold their work under "worked for".
+    fold_work: bool,
     search_match: Option<(usize, String)>,
     highlights: HashMap<u64, Option<Arc<HighlightedDocument>>>,
     highlighting: HashSet<u64>,
@@ -573,6 +751,10 @@ pub(crate) struct TranscriptView {
     note_feedback: HashMap<usize, Result<(), String>>,
     action_anchors: HashMap<(usize, &'static str), AnchorSlot>,
     hovered_action: Option<(usize, &'static str)>,
+    /// Each work phase's tile, its own view so a hover redraws only it.
+    phase_tiles: HashMap<usize, Entity<crate::phase_tile::PhaseTile>>,
+    /// Each reply's "worked for" tile, keyed by turn.
+    work_tiles: HashMap<usize, Entity<crate::phase_tile::PhaseTile>>,
     pub(crate) target_action: Option<(usize, monocode_core::response::TransferKind)>,
     document: bool,
     side_question: bool,
@@ -600,7 +782,7 @@ pub(crate) struct TranscriptView {
     viewport: Bounds<Pixels>,
     anchor_turn: Option<usize>,
     prompt_rise: Option<(usize, Instant)>,
-    /// The /operator, Plan or Orchestrator burst inside a just-sent prompt.
+    /// The mode or /visualize burst inside a just-sent prompt.
     burst: Option<burst::Burst>,
     prompt_rise_pending: bool,
     introduced_prompt: Option<usize>,
@@ -861,6 +1043,7 @@ impl TranscriptView {
         &mut self,
         turn: usize,
         output: String,
+        before_user: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let copied = self.copied_response.is_some_and(|(id, _)| id == turn);
@@ -975,8 +1158,10 @@ impl TranscriptView {
         );
         div()
             .id(("mono-turn-actions", turn))
+            .relative()
+            .top(px(-4.))
             .h(px(24.))
-            .mb_1()
+            .mb(px(if before_user { 0. } else { 4. }))
             .w_full()
             .min_w_0()
             .flex()
@@ -997,19 +1182,48 @@ impl TranscriptView {
             })
             .into_any_element()
     }
-    /// MonoTurnHeader: the Mono signs its turn with its mascot and name; while
-    /// it works, a ticker beside the pill says what it is doing.
+    /// The Mono signs its turn with its mascot and name, beside a live ticker.
     fn mono_turn_header(&self, turn: usize, cx: &mut Context<Self>) -> gpui::AnyElement {
-        // Nearby completion runs continue this header; a new stretch gets its own.
+        // Completion runs share the original turn's header.
+        let label = self
+            .mono_activity()
+            .filter(|(group, _)| *group == turn)
+            .map(|(_, label)| label);
+        self.mono_header(turn, label, cx)
+    }
+    /// The latest live activity, without relabeling a completed turn before
+    /// the next prompt arrives.
+    fn mono_activity(&self) -> Option<(usize, String)> {
+        if !self.mono || !self.streaming || self.source.len() <= self.live_start {
+            return None;
+        }
         let latest = self
             .source
             .iter()
             .rposition(|r| r.is_prompt())
             .map_or(0, |ix| ix + 1);
-        let live = self.streaming
-            && self.source.len() > self.live_start
-            && self.mono_group_start(latest) == turn;
-        self.mono_header(turn, live.then(|| self.mono_work_label(turn)), cx)
+        if latest < self.live_start && self.source[..latest].iter().any(Row::is_prompt) {
+            return None;
+        }
+        let typing = (latest..self.source.len())
+            .rev()
+            .find(|&at| self.source[at].first)
+            .is_some_and(|message| {
+                self.source[message].role == "assistant"
+                    && self.source[message..]
+                        .iter()
+                        .any(|row| !row.text.trim().is_empty())
+                    && self.mono_prose_hidden(message)
+            });
+        let group = self.mono_group_start(latest);
+        Some((
+            group,
+            if typing {
+                "Typing…".into()
+            } else {
+                mono_work_label(&self.source, group)
+            },
+        ))
     }
     fn mono_header(
         &self,
@@ -1020,6 +1234,8 @@ impl TranscriptView {
         let Some((mascot, color, name)) = self.mono_look.clone() else {
             return div().into_any_element();
         };
+        // As a model's "Worked for" line: the Mono's mascot on a tile, then
+        // its name.
         let pill = div()
             .debug_selector(|| "mono-signature-pill".into())
             .flex()
@@ -1027,28 +1243,16 @@ impl TranscriptView {
             .flex_shrink_0()
             .max_w(px(320.))
             .items_center()
-            .gap_1p5()
-            .rounded_full()
-            .bg(content(0.07))
-            .py(px(2.))
-            .pl_2()
-            .pr_3()
+            .gap(px(8.))
             .child(
-                div()
-                    .size(px(14.))
-                    .flex_shrink_0()
-                    .child(crate::monos::avatar::avatar(
-                        &mascot, color, "idle", 14., true,
-                    )),
+                crate::tab_tile::mark_tile(
+                    &crate::tab_tile::ACTIVITY_TILE,
+                    crate::tab_tile::Face::Neutral,
+                    crate::monos::avatar::avatar(&mascot, color, "idle", 14., true),
+                )
+                .flex_shrink_0(),
             )
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(content(0.8))
-                    .child(name),
-            );
+            .child(div().min_w_0().truncate().child(name));
         div()
             .id(("mono-turn-header", turn))
             .flex()
@@ -1088,10 +1292,6 @@ impl TranscriptView {
                     )
             })
             .into_any_element()
-    }
-    /// monoWorkStatus: a short status for the turn's latest activity.
-    fn mono_work_label(&self, group: usize) -> String {
-        mono_work_label(&self.source, group)
     }
     /// MonoReactionBadge, on the top left corner of the message it answers.
     fn reaction_badge(&self, prompt: usize) -> Option<gpui::AnyElement> {
@@ -1578,7 +1778,14 @@ impl TranscriptView {
                 .source
                 .iter()
                 .rposition(Row::is_prompt)
-                .is_some_and(|prompt| prompt >= self.live_start)
+                .is_some_and(|prompt| {
+                    prompt >= self.live_start
+                        && !mono_spoke(
+                            &self.source,
+                            self.mono_group_start(prompt + 1),
+                            self.source.len(),
+                        )
+                })
     }
     /// Whether `at` sits in a completion run that continues the turn above,
     /// returning the turn that opens the group: groupMonoChatTurns.
@@ -1593,7 +1800,11 @@ impl TranscriptView {
                 .turns
                 .get(&turn)
                 .and_then(|info| info.joined_turn)
-                .filter(|&root| root < turn)
+                // A steer stays beside the prompt it joins only until the
+                // Mono has replied in words; after that, the chat reads in order.
+                .filter(|&root| {
+                    root < turn && !mono_spoke(&self.source, root, prompt_start(&self.source, turn))
+                })
                 .or_else(|| mono_continues(&self.source, turn))
             {
                 Some(previous) => turn = previous,
@@ -1628,78 +1839,39 @@ impl TranscriptView {
             .iter()
             .rposition(Row::is_prompt)
             .map_or(0, |prompt| prompt + 1);
+        let internal = turn > 0 && self.source[turn - 1].role == "mono-system";
+        // A direct reply keeps its opening sentence for the conversation.
+        // Notification runs keep all commentary in activity and show only
+        // their final message. Every Mono message appears whole.
+        let start = self.source[..=at]
+            .iter()
+            .rposition(|r| r.first)
+            .unwrap_or(at);
+        let complete = (start + 1..self.source.len()).any(|i| self.source[i].first)
+            || !(self.streaming && start >= self.live_start);
+        if !internal
+            && self.source[turn..start]
+                .iter()
+                .all(|r| !r.first || r.role == "reasoning")
+        {
+            return !complete;
+        }
         // Starting a request precedes delivery of its prompt. History remains
         // settled during that gap, even though it is still the source's tail.
         (self.streaming && at >= self.live_start && end == self.source.len())
             || (self.source.get(end).is_some_and(|row| row.role == "user")
                 && self.mono_next_run_continues(turn, end))
-            || self.source[at + 1..end]
-                .iter()
-                .any(|r| r.first && matches!(r.role.as_str(), "tool" | "reasoning"))
+            || self.source[at + 1..end].iter().any(|r| {
+                r.first
+                    && (matches!(r.role.as_str(), "tool" | "reasoning")
+                        || (internal && r.role == "assistant"))
+            })
     }
     /// monoSpawnedSessions: sessions a run's `sessions.start` calls accepted.
     fn run_launches(&self, turn: usize, end: usize) -> Vec<i64> {
-        let mut found = Vec::new();
-        let mut at = turn;
-        while at < end {
-            let next = (at + 1..end).find(|&i| self.source[i].first).unwrap_or(end);
-            if self.source[at].role == "mono-launch" {
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(&self.source[at].text)
-                    && let Some(id) = value["sessionId"].as_i64()
-                    && !found.contains(&id)
-                {
-                    found.push(id);
-                }
-            } else if self.source[at].role == "tool" {
-                let text: String = self.source[at..next]
-                    .iter()
-                    .map(|r| r.text.as_str())
-                    .collect();
-                if let Ok(tool) = serde_json::from_str::<ToolCall>(&text)
-                    && tool.state == ToolState::Completed
-                    && let Ok(input) = serde_json::from_str::<serde_json::Value>(&tool.input)
-                    && let Some(action) = input["command"]
-                        .as_str()
-                        .and_then(monocode_core::mono::work::command_action)
-                    && matches!(action.as_str(), "sessions.start" | "sessions.send")
-                {
-                    let receipts = serde_json::from_str::<serde_json::Value>(&tool.output)
-                        .map(|v| vec![v])
-                        .unwrap_or_else(|_| {
-                            tool.output
-                                .lines()
-                                .filter_map(|line| serde_json::from_str(line.trim()).ok())
-                                .collect()
-                        });
-                    for value in receipts {
-                        if value["ok"] == true
-                            && let Some(id) = value["result"]["sessionId"]
-                                .as_i64()
-                                .or_else(|| {
-                                    monocode_core::mono::work::session_handle(
-                                        &value["result"]["id"],
-                                    )
-                                })
-                                .or_else(|| {
-                                    (value["result"]["submitted"] == true)
-                                        .then(|| {
-                                            monocode_core::mono::work::session_handle(
-                                                &value["result"]["sessionId"],
-                                            )
-                                        })
-                                        .flatten()
-                                })
-                            && (action == "sessions.start" || self.launches.contains_key(&id))
-                            && !found.contains(&id)
-                        {
-                            found.push(id);
-                        }
-                    }
-                }
-            }
-            at = next;
-        }
-        found
+        run_launches(&self.source, turn, end, |id| {
+            self.launches.contains_key(&id)
+        })
     }
     /// The live state of the sessions this Mono launched, for their cards.
     pub(crate) fn set_launches(
@@ -1719,12 +1891,7 @@ impl TranscriptView {
         }
     }
     fn launch_row(&mut self, ix: usize, id: i64, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let card_after = self
-            .rows
-            .get(ix + 1)
-            .is_some_and(|r| matches!(r.body, Body::Launch(_) | Body::MonoCard(_)));
-        let first =
-            ix == 0 || !matches!(self.rows[ix - 1].body, Body::Launch(_) | Body::MonoCard(_));
+        let (top, bottom) = self.mono_card_spacing(ix);
         let view = self.launches.get(&id).cloned();
         div()
             .w_full()
@@ -1735,61 +1902,28 @@ impl TranscriptView {
                     .relative()
                     .w_full()
                     .max_w(px(COLUMN))
-                    .px_4()
-                    .pt(px(if first { 4. } else { 0. }))
-                    .pb(px(if card_after { 8. } else { 12. }))
+                    .px(px(COLUMN_PAD))
+                    .pt(px(top))
+                    .pb(px(bottom))
                     .child(crate::monos::cards::launch(id, view.as_ref(), cx)),
             )
             .into_any_element()
     }
-    /// The session's review card, under the latest settled turn only.
-    pub(crate) fn set_review(&mut self, review: gpui::AnyView) {
-        self.review = Some(review);
-    }
-    /// The card gained or lost its content; the latest turn makes room for it.
-    pub(crate) fn set_review_shown(&mut self, shown: bool, cx: &mut Context<Self>) {
-        if self.review_shown == shown {
-            return;
-        }
-        self.review_shown = shown;
-        if !self.messages.is_empty() {
-            let start = self
-                .source
-                .iter()
-                .rposition(|r| r.is_prompt())
-                .map_or(0, |i| i + 1);
-            self.rebuild(start, cx);
-        }
-        cx.notify();
-    }
-    fn review_row(&self, turn: usize) -> gpui::AnyElement {
-        let latest = self
-            .source
-            .iter()
-            .rposition(|r| r.is_prompt())
-            .map_or(0, |i| i + 1);
-        let Some(review) = self
-            .review
-            .clone()
-            .filter(|_| !self.streaming && turn == latest)
-        else {
-            return div().into_any_element();
+    fn mono_card_spacing(&self, ix: usize) -> (f32, f32) {
+        let is_card = |row: &UiRow| matches!(row.body, Body::Launch(_) | Body::MonoCard(_));
+        let top = if ix > 0 && is_card(&self.rows[ix - 1]) {
+            0.
+        } else {
+            4.
         };
-        div()
-            .w_full()
-            .flex()
-            .justify_center()
-            .child(
-                div()
-                    .relative()
-                    .w_full()
-                    .max_w(px(COLUMN))
-                    .px_4()
-                    .pt_1()
-                    .pb_2()
-                    .child(review),
-            )
-            .into_any_element()
+        // Prose already supplies its own 12px top gap. Do not add another
+        // 12px below the card when a completion continues the conversation.
+        let bottom = match self.rows.get(ix + 1) {
+            Some(row) if is_card(row) => 8.,
+            Some(row) if matches!(row.body, Body::Markdown(_)) => 0.,
+            _ => 12.,
+        };
+        (top, bottom)
     }
     /// A queued message's bubble, as UserMessageBlock draws one, with its
     /// delivery line when it could not be sent.
@@ -1843,7 +1977,7 @@ impl TranscriptView {
                     .max_w(px(COLUMN))
                     .min_w_0()
                     .pl(px(56.))
-                    .pr(px(16.))
+                    .pr(px(COLUMN_PAD))
                     .pt_1()
                     .pb(px(if stacked { 0. } else { 20. }))
                     .flex()
@@ -1954,7 +2088,7 @@ impl TranscriptView {
                         .w_full()
                         .max_w(px(COLUMN))
                         .min_w_0()
-                        .px_4()
+                        .px(px(COLUMN_PAD))
                         .child(self.mono_header(self.source.len(), Some("Thinking…".into()), cx)),
                 )
             })
@@ -2039,19 +2173,23 @@ impl TranscriptView {
         &mut self,
         turn: usize,
         complete: bool,
+        before_user: bool,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         if !complete {
-            // A Mono's turn keeps its 1.5rem action gap while it works, and
-            // the 4px gap between turns.
+            // Reserve the action gap while the ticker works in the header.
             return div()
-                .h(px(if self.mono { 28. } else { 38. }))
+                .h(px(if self.mono {
+                    if before_user { 24. } else { 28. }
+                } else {
+                    38.
+                }))
                 .into_any_element();
         }
         let (rows, _) = self.response_rows(turn);
         let output = monocode_core::response::prose(&rows);
         if self.mono {
-            return self.mono_actions(turn, output, cx);
+            return self.mono_actions(turn, output, before_user, cx);
         }
         let copied = self.copied_response.is_some_and(|(id, _)| id == turn);
         let saved = self.note_feedback.get(&turn).is_some_and(|r| r.is_ok());
@@ -2340,6 +2478,7 @@ impl TranscriptView {
             history_requested: false,
             base: 0,
             history_before: None,
+            window_before: None,
             history_pager: None,
             history_failed: false,
             history_search: None,
@@ -2360,8 +2499,6 @@ impl TranscriptView {
             taken: Vec::new(),
             pending_entrances: HashMap::new(),
             launches: HashMap::new(),
-            review: None,
-            review_shown: false,
             started_at: Instant::now(),
             frame_now: Instant::now(),
             measurements: Default::default(),
@@ -2369,9 +2506,12 @@ impl TranscriptView {
             messages: Vec::new(),
             rows: Vec::new(),
             streaming: false,
+            perf_scroll: Default::default(),
             chat_layout: true,
             anchor_prompts: true,
             smooth_reveal: true,
+            collapse_groups: false,
+            fold_work: true,
             search_match: None,
             highlights: HashMap::new(),
             highlighting: HashSet::new(),
@@ -2386,6 +2526,8 @@ impl TranscriptView {
             note_feedback: HashMap::new(),
             action_anchors: HashMap::new(),
             hovered_action: None,
+            phase_tiles: HashMap::new(),
+            work_tiles: HashMap::new(),
             target_action: None,
             document: false,
             side_question: false,
@@ -2453,9 +2595,13 @@ impl TranscriptView {
         if self.chat_layout == chat
             && self.anchor_prompts == anchor_prompts
             && self.smooth_reveal == p.paced_reveal
+            && self.collapse_groups == p.collapse_tool_groups
+            && self.fold_work == p.fold_finished_work
         {
             return;
         }
+        self.collapse_groups = p.collapse_tool_groups;
+        self.fold_work = p.fold_finished_work;
         self.chat_layout = chat;
         self.anchor_prompts = anchor_prompts;
         self.smooth_reveal = p.paced_reveal;
@@ -2512,6 +2658,20 @@ impl TranscriptView {
         if self.streaming == streaming {
             return;
         }
+        // What the user already reads while the Mono works, such as its
+        // opening sentence, must not enter again when the run settles.
+        let shown: HashSet<usize> = if self.mono && !streaming {
+            let run = self
+                .source
+                .iter()
+                .rposition(|r| r.is_prompt())
+                .map_or(0, |i| i + 1);
+            (run..self.source.len())
+                .filter(|&at| self.source[at].first && !self.mono_prose_hidden(at))
+                .collect()
+        } else {
+            HashSet::new()
+        };
         self.streaming = streaming;
         if streaming {
             self.active_provider_turn_id = None;
@@ -2577,6 +2737,7 @@ impl TranscriptView {
                 let row = &self.source[at];
                 if row.first
                     && row.role == "assistant"
+                    && !shown.contains(&at)
                     && !row.text.trim_start().starts_with("<reaction>")
                 {
                     self.entrances.insert(at, now);
@@ -2721,7 +2882,7 @@ impl TranscriptView {
         }
         submitted.begin("assistant");
         if !settings.internal_message && !self.mono && self.visible && !cx.reduce_motion() {
-            self.burst = burst::Kind::from_settings(settings)
+            self.burst = burst::Kind::from_prompt(prompt, settings)
                 .map(|kind| burst::Burst::new(self.source.len(), kind));
         }
         if self.mono {
@@ -2930,6 +3091,11 @@ impl TranscriptView {
         let following = self.list.is_following_tail();
         let offset = self.list.logical_scroll_top();
         let anchor = self.rows.get(offset.item_ix).map(|r| r.key);
+        let anchor_turn = self
+            .rows
+            .get(offset.item_ix)
+            .and_then(|r| self.messages.get(r.message))
+            .map(|m| m.turn);
         let current_turn = self.source[..(start + 1).min(self.source.len())]
             .iter()
             .rposition(|r| r.is_prompt())
@@ -3158,12 +3324,17 @@ impl TranscriptView {
                 git_card = self.git_card(turn, turn_end, final_answer);
                 git_live_shown = false;
             }
-            let folded = !is_prompt
+            let folded = self.fold_work
+                && !is_prompt
                 && !activity.pinned.contains(&at)
                 && has_work
                 && ready
                 && final_answer.is_some_and(|answer| at < answer)
-                && !self.work_folds.get(&turn).copied().unwrap_or(false);
+                && !self
+                    .work_folds
+                    .get(&turn)
+                    .copied()
+                    .unwrap_or(!self.fold_work);
             if !self.document
                 && !is_prompt
                 && !stopped_notice
@@ -3195,7 +3366,8 @@ impl TranscriptView {
                     key: (0, 0),
                     body: Body::WorkLine {
                         turn,
-                        expandable: has_work && ready,
+                        // Unfolded work is always shown; the header only labels it.
+                        expandable: has_work && ready && self.fold_work,
                     },
                     message,
                     first: false,
@@ -3206,13 +3378,23 @@ impl TranscriptView {
                 });
             }
             let phase = activity.at(at);
-            let grouped = phase.is_some_and(|group| group.steps > 1);
+            // A lone tool call gets the same header as a run of them ("Ran a
+            // command"), opened to see the step. A milestone stays its own
+            // line, and a lone thought is shown as it is.
+            let grouped = phase.is_some_and(|group| {
+                group.steps > 1 || (group.calls.len() == 1 && !group.calls[0].is_milestone())
+            });
             let active = phase.is_some_and(|group| {
                 self.streaming
                     && (group.end == self.source.len() || awaiting_answer == Some(group.end))
             });
             let phase_open = phase.is_none_or(|group| {
-                !grouped || self.phases.get(&group.start).copied().unwrap_or(active)
+                !grouped
+                    || self
+                        .phases
+                        .get(&group.start)
+                        .copied()
+                        .unwrap_or(self.phase_opens(active))
             });
             // A running pill turn shows one status line in place of its work
             // and prose; a settled one's card leads its reply.
@@ -3557,7 +3739,10 @@ impl TranscriptView {
                     }
                 };
                 row.key = (at, ordinal);
-                row.work = has_work
+                // Unfolded work lays out like the answer: no rail, indent or
+                // dimmed text. Tool groups keep their own connectors.
+                row.work = self.fold_work
+                    && has_work
                     && ready
                     && role != "visual"
                     && !activity.pinned.contains(&at)
@@ -3582,7 +3767,14 @@ impl TranscriptView {
                 parser,
                 markdown_blocks,
                 user_link,
-                under_line: has_work && final_answer == Some(at),
+                // Only a settled turn folds its work under the receipt line.
+                // While it streams, the newest reply is the answer so far but
+                // still follows open tool rows, so it keeps prose's 12px gap
+                // instead of jumping when the next tool or the end arrives.
+                under_line: has_work
+                    && final_answer == Some(at)
+                    && self.fold_work
+                    && !(self.streaming && turn_end == self.source.len()),
                 turn: if self.mono {
                     self.mono_group_start(turn)
                 } else {
@@ -3601,7 +3793,11 @@ impl TranscriptView {
                 self.push_pending(at);
             }
             if self.mono && !is_prompt && end == turn_end {
-                let settled = !(self.streaming && turn_end == self.source.len());
+                // Starting a provider precedes its hidden notification prompt.
+                // Cards from the completed run stay in place during that gap.
+                let settled = !(self.streaming
+                    && turn_end == self.source.len()
+                    && turn_end > self.live_start);
                 if settled {
                     let mut documents = Vec::new();
                     for row in &self.source[self.prompt_start(turn)..turn_end] {
@@ -3646,29 +3842,13 @@ impl TranscriptView {
                 }
             }
             if !self.document
-                && !self.source[at].is_prompt()
+                && !is_prompt
                 && self.source[at].role != "mono-card"
                 && self.source[at].role != monocode_core::transcript::attachments::ROLE
                 && !reaction
                 && end == turn_end
                 && !(self.mono && self.mono_next_run_continues(turn, turn_end))
             {
-                if !self.mono
-                    && self.review_shown
-                    && self.review.is_some()
-                    && turn_end == self.source.len()
-                {
-                    self.rows.push(UiRow {
-                        key: (at, usize::MAX - 2),
-                        body: Body::Review { turn },
-                        message,
-                        first: false,
-                        last: false,
-                        work: false,
-                        work_tail: false,
-                        thought_phase: None,
-                    });
-                }
                 self.rows.push(UiRow {
                     key: (at, usize::MAX - 1),
                     body: Body::Actions {
@@ -3719,6 +3899,7 @@ impl TranscriptView {
                     row.key,
                 )
             });
+            mono_divider::insert(&mut self.rows, &self.messages, display_start);
         }
         self.push_saved_draft();
         let mut pinned_answers = HashMap::new();
@@ -3775,7 +3956,13 @@ impl TranscriptView {
                 .get(&current_turn)
                 .copied()
                 .flatten()
-                .filter(|_| !self.work_folds.get(&current_turn).copied().unwrap_or(false))
+                .filter(|_| {
+                    !self
+                        .work_folds
+                        .get(&current_turn)
+                        .copied()
+                        .unwrap_or(!self.fold_work)
+                })
                 .filter(|_| layout_changed)
                 .map(|answer| current_turn..answer);
             if replaced_work.is_some() {
@@ -3797,7 +3984,11 @@ impl TranscriptView {
                 Body::Phase { group, active, .. }
                     if active
                         || (self.phase_scrolls.contains_key(&group)
-                            && !self.phases.get(&group).copied().unwrap_or(active)) =>
+                            && !self
+                                .phases
+                                .get(&group)
+                                .copied()
+                                .unwrap_or(self.phase_opens(active))) =>
                 {
                     Some(group)
                 }
@@ -3806,10 +3997,11 @@ impl TranscriptView {
             .collect();
         // A closing live phase keeps its bounded window for the exit. Once
         // settled, an explicitly opened group returns to virtualized rows.
+        let opens_running = self.phase_opens(true);
         for (&group, scroll) in &mut self.phase_scrolls {
             let enabled = self.visible && self.rows.iter().any(|row| {
                 matches!(row.body, Body::Phase { group: id, active: true, .. } if id == group)
-            }) && self.phases.get(&group).copied().unwrap_or(true);
+            }) && self.phases.get(&group).copied().unwrap_or(opens_running);
             scroll.enable(enabled);
         }
         self.index_messages();
@@ -3841,13 +4033,32 @@ impl TranscriptView {
         }
         if following {
             self.list.scroll_to_end();
-        } else if let Some(key) = anchor
-            && let Some(item_ix) = self.rows.iter().position(|r| r.key == key)
-        {
-            self.list.scroll_to(ListOffset {
-                item_ix,
-                offset_in_item: offset.offset_in_item,
-            });
+        } else if let Some(key) = anchor {
+            if let Some(item_ix) = self.rows.iter().position(|r| r.key == key) {
+                self.list.scroll_to(ListOffset {
+                    item_ix,
+                    offset_in_item: offset.offset_in_item,
+                });
+            } else if let Some(turn) = anchor_turn {
+                // The row being read folded away, such as tool calls joining
+                // their turn's work line when the answer arrives. Stay in that
+                // turn, on the nearest surviving row at or above it, else the
+                // first below, rather than on whatever now holds the old
+                // index or the index GPUI's splice moved the scroll to.
+                let in_turn =
+                    |r: &UiRow| self.messages.get(r.message).is_some_and(|m| m.turn == turn);
+                let item_ix = self
+                    .rows
+                    .iter()
+                    .rposition(|r| in_turn(r) && r.key <= key)
+                    .or_else(|| self.rows.iter().position(|r| in_turn(r) && r.key > key));
+                if let Some(item_ix) = item_ix {
+                    self.list.scroll_to(ListOffset {
+                        item_ix,
+                        offset_in_item: px(0.),
+                    });
+                }
+            }
         }
         self.prune_reveals(now);
     }
@@ -3979,9 +4190,9 @@ impl TranscriptView {
             if matches!(
                 row.body,
                 Body::Actions { .. }
+                    | Body::MonoDivider
                     | Body::Pending(_)
                     | Body::Launch(_)
-                    | Body::Review { .. }
                     | Body::SavedDraft
             ) {
                 return false;
@@ -4443,7 +4654,6 @@ impl TranscriptView {
             Body::SavedDraft => return self.saved_draft_row(cx),
             Body::Pending(i) => return self.pending_row(i, cx),
             Body::Launch(id) => return self.launch_row(ix, id, cx),
-            Body::Review { turn } => return self.review_row(turn),
             _ => {}
         }
         let group = self.motions.get(&self.rows[ix].key).and_then(|m| m.group);
@@ -4502,7 +4712,11 @@ impl TranscriptView {
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
         let header = self.row_body(ix, true, window, cx);
-        let open = self.phases.get(&group).copied().unwrap_or(active);
+        let open = self
+            .phases
+            .get(&group)
+            .copied()
+            .unwrap_or(self.phase_opens(active));
         let indices: Vec<_> = (ix + 1..self.rows.len())
             .take_while(|&i| self.rows[i].phase_group() == Some(group))
             .collect();
@@ -4541,6 +4755,17 @@ impl TranscriptView {
             )
             .into_any_element()
     }
+    /// The first reply the user sent after `message`, queued ones included,
+    /// which answers any choices that message offered.
+    fn reply_after(&self, message: usize) -> Option<String> {
+        self.messages
+            .get(message + 1..)?
+            .iter()
+            .find(|m| m.role == "user")
+            .and_then(|m| self.source.get(m.start))
+            .map(|row| row.text.clone())
+            .or_else(|| self.pending.first().map(|p| p.text.to_string()))
+    }
     fn row_body(
         &mut self,
         ix: usize,
@@ -4567,8 +4792,17 @@ impl TranscriptView {
         let nested_phase = row.in_phase();
         let thought_header = matches!(row.body, Body::Reasoning);
         let attachments = message.attachments.clone();
-        let attachment_body = (user && first && !attachments.is_empty())
-            .then(|| self.attachment_row(&attachments, &format!("sent-{message_start}"), cx));
+        // A Mono's chat shows sent images above the bubble, like photos in a
+        // messaging app; only other files stay inside it.
+        let (photos, bubble_files) = if user && first && self.mono {
+            attachments::split_photos(&attachments)
+        } else {
+            (Vec::new(), attachments.to_vec())
+        };
+        let photo_body = (!photos.is_empty())
+            .then(|| self.photo_row(&photos, &format!("sent-{message_start}"), cx));
+        let attachment_body = (user && first && !bubble_files.is_empty())
+            .then(|| self.attachment_row(&bubble_files, &format!("sent-{message_start}"), cx));
         let step_opacity = self
             .motions
             .get(&row.key)
@@ -4732,11 +4966,26 @@ impl TranscriptView {
                     })
                     .into_any_element()
             }
-            Body::MonoCard(ref value) => crate::monos::cards::render(value, cx),
-            Body::Pending(_) | Body::Launch(_) | Body::Review { .. } | Body::SavedDraft => {
-                div().into_any_element()
+            Body::MonoCard(ref value) => {
+                let chosen = self.reply_after(row.message);
+                crate::monos::cards::render(value, chosen.as_deref(), cx)
             }
-            Body::Actions { turn, complete } => self.response_actions(turn, complete, cx),
+            Body::MonoDivider => mono_divider::render(),
+            Body::Pending(_) | Body::Launch(_) | Body::SavedDraft => div().into_any_element(),
+            Body::Actions { turn, complete } => {
+                // Tighten only a visible Mono reply followed by a user bubble;
+                // stacked user messages keep their existing spacing.
+                let before_user = self.mono
+                    && ix > 0
+                    && matches!(self.rows[ix - 1].body, Body::Markdown(_))
+                    && self.messages[self.rows[ix - 1].message].role == "assistant"
+                    && self.rows.get(ix + 1).is_some_and(|next| {
+                        matches!(next.body, Body::Pending(_))
+                            || (matches!(next.body, Body::Plain(_))
+                                && self.messages[next.message].role == "user")
+                    });
+                self.response_actions(turn, complete, before_user, cx)
+            }
             Body::WorkLine { turn, .. } if self.mono => self.mono_turn_header(turn, cx),
             Body::WorkLine { turn, expandable } => {
                 let live = self.streaming
@@ -4763,7 +5012,11 @@ impl TranscriptView {
                     elapsed.map(|duration| duration.as_millis() as u64),
                     live,
                 );
-                let open = self.work_folds.get(&turn).copied().unwrap_or(false);
+                let open = self
+                    .work_folds
+                    .get(&turn)
+                    .copied()
+                    .unwrap_or(!self.fold_work);
                 let label = if expandable {
                     if open {
                         "Hide the work".into()
@@ -4773,6 +5026,30 @@ impl TranscriptView {
                 } else {
                     title.clone()
                 };
+                let provider: SharedString = self
+                    .turns
+                    .get(&turn)
+                    .map(|info| info.provider.as_str())
+                    .filter(|provider| !provider.is_empty())
+                    .unwrap_or(self.provider.as_str())
+                    .to_owned()
+                    .into();
+                let work_tile = self
+                    .work_tiles
+                    .entry(turn)
+                    .or_insert_with(|| cx.new(|_| crate::phase_tile::PhaseTile::new(turn)))
+                    .clone();
+                // Only a fold that opens shows the chevron; a header that just
+                // labels unfolded work keeps the logo.
+                work_tile.update(cx, |tile, cx| {
+                    tile.set(
+                        crate::phase_tile::Mark::Provider(provider),
+                        false,
+                        open && expandable,
+                        if open { 1. } else { 0. },
+                        cx,
+                    )
+                });
                 div()
                     .id(("work-fold", turn))
                     .role(if expandable {
@@ -4785,50 +5062,27 @@ impl TranscriptView {
                     .group("work-fold")
                     .flex()
                     .items_center()
-                    .gap_1p5()
+                    .gap(px(8.))
                     .py_1()
                     .text_size(px(14.))
                     .line_height(px(20.))
                     .text_color(content(0.5))
+                    // The provider's tile; an open fold turns it into the
+                    // chevron, as a tool group's tile does.
                     .child(
-                        div()
-                            .relative()
-                            .size(px(14.))
-                            .flex_shrink_0()
-                            .when(!open, |d| {
-                                d.child(
-                                    provider_icon(
-                                        self.turns
-                                            .get(&turn)
-                                            .map(|info| info.provider.as_str())
-                                            .filter(|provider| !provider.is_empty())
-                                            .unwrap_or(self.provider.as_str()),
-                                        14.,
-                                    )
-                                    .when(expandable, |i| {
-                                        i.group_hover("work-fold", |s| s.opacity(0.))
-                                    }),
-                                )
-                            })
-                            .when(expandable, |d| {
-                                d.child(
-                                    icon(
-                                        if open {
-                                            "chevron-down"
-                                        } else {
-                                            "chevron-right"
-                                        },
-                                        14.,
-                                    )
-                                    .absolute()
-                                    .top_0()
-                                    .left_0()
-                                    .when(!open, |i| {
-                                        i.opacity(0.).group_hover("work-fold", |s| s.opacity(1.))
-                                    }),
-                                )
-                            }),
+                        work_tile.clone().cached(
+                            StyleRefinement::default()
+                                .w(px(crate::tab_tile::ACTIVITY_TILE.w))
+                                .h(px(crate::tab_tile::ACTIVITY_TILE.h))
+                                .flex_shrink_0(),
+                        ),
                     )
+                    .when(expandable, |d| {
+                        let tile = work_tile.clone();
+                        d.on_hover(move |hovered: &bool, _, cx| {
+                            tile.update(cx, |tile, cx| tile.hover(*hovered, cx));
+                        })
+                    })
                     .child(div().min_w_0().flex_1().truncate().child(
                         if live && !cx.reduce_motion() {
                             crate::activity::shimmer(
@@ -4855,12 +5109,32 @@ impl TranscriptView {
                 icon: glyph,
                 active,
             } => {
-                let open = self.phases.get(&group).copied().unwrap_or(active);
+                let open = self
+                    .phases
+                    .get(&group)
+                    .copied()
+                    .unwrap_or(self.phase_opens(active));
                 let rotation = self
                     .motions
                     .values()
                     .find(|m| m.group == Some(group))
                     .map_or(if open { 1. } else { 0. }, |m| m.rotation(self.frame_now));
+                let phase_tile = self
+                    .phase_tiles
+                    .entry(group)
+                    .or_insert_with(|| cx.new(|_| crate::phase_tile::PhaseTile::new(group)))
+                    .clone();
+                let spinning = active && !cx.reduce_motion();
+                // A running phase keeps its spinner unless pointed at.
+                phase_tile.update(cx, |tile, cx| {
+                    tile.set(
+                        crate::phase_tile::Mark::Work(glyph),
+                        spinning,
+                        open && !active,
+                        rotation,
+                        cx,
+                    )
+                });
                 div()
                     .id(("phase", group))
                     .role(Role::Button)
@@ -4872,46 +5146,20 @@ impl TranscriptView {
                     .group("activity-phase")
                     .flex()
                     .items_center()
-                    .gap_1p5()
+                    .gap(px(8.))
                     .py_1()
                     .text_size(px(14.))
                     .line_height(px(20.))
                     .text_color(content(0.5))
+                    // The tile animates itself; the transcript only tells it
+                    // what the phase is doing.
                     .child(
-                        div()
-                            .relative()
-                            .size(px(14.))
-                            .flex_shrink_0()
-                            .child(if active && !cx.reduce_motion() {
-                                // The compaction step's dots stand in for the
-                                // group's icon until its work settles.
-                                div()
-                                    .size_full()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .child(crate::session_mark::spinner(
-                                        ("phase-loader", group),
-                                        crate::pulse::Rate::Half,
-                                    ))
-                                    .group_hover("activity-phase", |s| s.opacity(0.))
-                                    .into_any_element()
-                            } else {
-                                crate::activity::glyph(glyph, 14.)
-                                    .group_hover("activity-phase", |s| s.opacity(0.))
-                                    .into_any_element()
-                            })
-                            .child(
-                                icon("chevron-right", 14.)
-                                    .with_transformation(Transformation::rotate(percentage(
-                                        rotation * 0.25,
-                                    )))
-                                    .absolute()
-                                    .top_0()
-                                    .left_0()
-                                    .opacity(0.)
-                                    .group_hover("activity-phase", |s| s.opacity(1.)),
-                            ),
+                        phase_tile.clone().cached(
+                            StyleRefinement::default()
+                                .w(px(crate::tab_tile::ACTIVITY_TILE.w))
+                                .h(px(crate::tab_tile::ACTIVITY_TILE.h))
+                                .flex_shrink_0(),
+                        ),
                     )
                     .child(div().min_w_0().flex_1().truncate().child(
                         if active && !cx.reduce_motion() {
@@ -4924,6 +5172,12 @@ impl TranscriptView {
                         },
                     ))
                     .hover(|s| s.text_color(content(0.8)))
+                    .on_hover({
+                        let tile = phase_tile.clone();
+                        move |hovered: &bool, _, cx| {
+                            tile.update(cx, |tile, cx| tile.hover(*hovered, cx));
+                        }
+                    })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.toggle_phase(group, !open, cx);
                     }))
@@ -4939,44 +5193,50 @@ impl TranscriptView {
                 // a second step joins it. It keeps spinning after it settles,
                 // until whatever comes next arrives, so the hand-off to the
                 // group header never drops the loader.
-                let loading = group.is_none()
-                    && (call.state == ToolState::Running || live)
-                    && !call.is_milestone()
-                    && call.panel().is_none()
-                    && !cx.reduce_motion();
+                let tiled = group.is_none() && !call.is_milestone() && call.panel().is_none();
+                let loading =
+                    tiled && (call.state == ToolState::Running || live) && !cx.reduce_motion();
                 div()
                     .relative()
                     .w_full()
                     .when(group.is_some(), |d| {
-                        d.pl(px(20.)).child(crate::activity::rail(tail))
+                        d.pl(px(crate::activity::TILE_RAIL_INDENT))
+                            .child(crate::activity::tile_rail(tail))
                     })
-                    .when(loading, |d| {
-                        d.flex().items_start().gap_1p5().child(
+                    // A lone step leads with a tile like a group's, coloured by
+                    // the kind of work; while it runs, its spinner sits there.
+                    .when(tiled, |d| {
+                        let tile = crate::tab_tile::ACTIVITY_TILE;
+                        let lead = if loading {
+                            crate::tab_tile::mark_tile(
+                                &tile,
+                                crate::tab_tile::Face::Neutral,
+                                crate::session_mark::spinner(
+                                    ("tool-loader", message_start),
+                                    crate::pulse::Rate::Half,
+                                ),
+                            )
+                        } else {
+                            let glyph =
+                                crate::activity::summary(std::slice::from_ref(&*call), false).1;
+                            let (face, mark, _) = crate::tab_tile::activity_face(glyph);
+                            crate::tab_tile::mark_tile(&tile, face, mark)
+                        };
+                        d.flex().items_start().gap(px(8.)).child(
                             div()
                                 .h(px(28.))
                                 .flex_shrink_0()
                                 .opacity(step_opacity)
                                 .flex()
                                 .items_center()
-                                .child(
-                                    div()
-                                        .size(px(14.))
-                                        .flex()
-                                        .items_center()
-                                        .justify_center()
-                                        .text_color(content(0.5))
-                                        .child(crate::session_mark::spinner(
-                                            ("tool-loader", message_start),
-                                            crate::pulse::Rate::Half,
-                                        )),
-                                ),
+                                .child(lead),
                         )
                     })
                     .child(
                         div()
-                            .when(loading, |d| d.min_w_0().flex_1())
+                            .when(tiled, |d| d.min_w_0().flex_1())
                             .opacity(step_opacity)
-                            .child(self.tool(*call, message_start, cx)),
+                            .child(self.tool(*call, message_start, tiled, cx)),
                     )
                     .into_any_element()
             }
@@ -5050,6 +5310,10 @@ impl TranscriptView {
                     .into_any_element()
                 };
                 div()
+                    .when(self.mono, |d| {
+                        let key = row.key;
+                        d.debug_selector(move || format!("mono-prose-{}-{}", key.0, key.1))
+                    })
                     .w_full()
                     .flex()
                     .pt(px(if first_prose {
@@ -5093,6 +5357,10 @@ impl TranscriptView {
                     .into_any_element()
             }
             Body::Plain(text) => {
+                let burst = self.burst.filter(|burst| {
+                    user && first && burst.prompt == message_start && burst.active(self.frame_now)
+                });
+                let now = self.frame_now;
                 // UserLinkPreview: the prompt's first link, drawn in its chunk.
                 let message_link = self.messages[row.message].user_link.clone();
                 let link = message_link
@@ -5101,6 +5369,8 @@ impl TranscriptView {
                     .map(|(_, link)| link.clone());
                 let collapsed = !self.expanded_prompts.contains(&message_start);
                 let clamp = user && first && collapsed && message_link.is_none();
+                // Images sent on their own need no bubble beneath them.
+                let bare = photo_body.is_some() && text.is_empty() && attachment_body.is_none();
                 // `overflows`: hidden chunks, or more than four wrapped lines.
                 // React never clamps a message that shows a link preview.
                 let overflows = user
@@ -5109,8 +5379,8 @@ impl TranscriptView {
                     && (!first
                         || self.clamped_prompts.contains(&message_start)
                         || self.prompt_lines(&text, window) > 4);
-                div()
-                    .w_full()
+                let bubble = div()
+                    .when(photo_body.is_none(), |d| d.w_full())
                     .relative()
                     .flex()
                     .flex_col()
@@ -5119,7 +5389,7 @@ impl TranscriptView {
                     } else {
                         content(1.)
                     })
-                    .when(user, |d| {
+                    .when(user && !bare, |d| {
                         // AgentTranscript.tsx: text-sm (14px / 20px), px-3 py-2.
                         // Measurement shapes this font at the same size.
                         d.font(gpui::font(crate::fonts::UI))
@@ -5131,7 +5401,7 @@ impl TranscriptView {
                             .child(
                                 canvas(
                                     |_, _, _| {},
-                                    move |bounds, _, window, _| {
+                                    move |bounds, _, window, cx| {
                                         // Match React's measured single-line bubble, including
                                         // when a window resize makes the same text wrap.
                                         let radius =
@@ -5140,20 +5410,20 @@ impl TranscriptView {
                                             } else {
                                                 12.
                                             };
+                                        let corners = gpui::Corners {
+                                            top_left: px(if first { radius } else { 0. }),
+                                            top_right: px(if first { radius } else { 0. }),
+                                            bottom_left: px(if last { radius } else { 0. }),
+                                            bottom_right: px(if last { radius } else { 0. }),
+                                        };
                                         window.paint_quad(
-                                            gpui::fill(bounds, user_bubble_fill()).corner_radii(
-                                                gpui::Corners {
-                                                    top_left: px(if first { radius } else { 0. }),
-                                                    top_right: px(if first { radius } else { 0. }),
-                                                    bottom_left: px(if last { radius } else { 0. }),
-                                                    bottom_right: px(if last {
-                                                        radius
-                                                    } else {
-                                                        0.
-                                                    }),
-                                                },
-                                            ),
+                                            gpui::fill(bounds, user_bubble_fill())
+                                                .corner_radii(corners),
                                         );
+                                        if let Some(burst) = burst.filter(burst::Burst::behind_text)
+                                        {
+                                            burst.paint(bounds, corners, now, window, cx);
+                                        }
                                     },
                                 )
                                 .absolute()
@@ -5211,40 +5481,32 @@ impl TranscriptView {
                             )
                         })
                     })
-                    .children(
-                        self.burst
-                            .filter(|burst| {
-                                user && first
-                                    && burst.prompt == message_start
-                                    && burst.active(self.frame_now)
-                            })
-                            .map(|burst| {
-                                let now = self.frame_now;
-                                canvas(
-                                    |_, _, _| {},
-                                    move |bounds, _, window, cx| {
-                                        // The same corners the bubble's fill paints.
-                                        let radius = if last && bounds.size.height <= px(37.) {
-                                            f32::from(bounds.size.height) * 0.5
-                                        } else {
-                                            12.
-                                        };
-                                        let bottom = px(if last { radius } else { 0. });
-                                        let corners = gpui::Corners {
-                                            top_left: px(radius),
-                                            top_right: px(radius),
-                                            bottom_left: bottom,
-                                            bottom_right: bottom,
-                                        };
-                                        burst.paint(bounds, corners, now, window, cx);
-                                    },
-                                )
-                                .absolute()
-                                .top_0()
-                                .left_0()
-                                .size_full()
-                            }),
-                    )
+                    .children(burst.filter(|burst| !burst.behind_text()).map(|burst| {
+                        let now = self.frame_now;
+                        canvas(
+                            |_, _, _| {},
+                            move |bounds, _, window, cx| {
+                                // The same corners the bubble's fill paints.
+                                let radius = if last && bounds.size.height <= px(37.) {
+                                    f32::from(bounds.size.height) * 0.5
+                                } else {
+                                    12.
+                                };
+                                let bottom = px(if last { radius } else { 0. });
+                                let corners = gpui::Corners {
+                                    top_left: px(radius),
+                                    top_right: px(radius),
+                                    bottom_left: bottom,
+                                    bottom_right: bottom,
+                                };
+                                burst.paint(bounds, corners, now, window, cx);
+                            },
+                        )
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                    }))
                     .when(overflows, |d| {
                         d.child(
                             div().flex().child(
@@ -5279,17 +5541,30 @@ impl TranscriptView {
                             && (self.hovered_prompt == Some(message_start)
                                 || self.hovered_prompt_actions == Some(message_start)),
                         |d| d.child(self.prompt_actions(message_start, cx)),
-                    )
-                    .into_any_element()
+                    );
+                match photo_body {
+                    // Photos and their bubble enter as one message.
+                    Some(photos) => div()
+                        .min_w_0()
+                        .max_w_full()
+                        .flex()
+                        .flex_col()
+                        .items_end()
+                        .gap_1()
+                        .child(photos)
+                        .child(bubble)
+                        .into_any_element(),
+                    None => bubble.into_any_element(),
+                }
             }
         };
         let body = if let Some((_, tail)) = row.thought_phase {
             div()
                 .relative()
                 .w_full()
-                .pl(px(20.))
+                .pl(px(crate::activity::TILE_RAIL_INDENT))
                 .when(!tail || thought_header, |d| {
-                    d.child(crate::activity::rail_branch(tail, thought_header))
+                    d.child(crate::activity::tile_rail_branch(tail, thought_header))
                 })
                 .child(body)
                 .into_any_element()
@@ -5307,10 +5582,26 @@ impl TranscriptView {
                     ..
                 }
             );
+        // Unfolded work that opens with a tool group: the header's tile
+        // connects down into that group's tile.
+        let leads_into_group = !self.fold_work
+            && matches!(self.rows[ix].body, Body::WorkLine { .. })
+            && matches!(
+                self.rows.get(ix + 1).map(|r| &r.body),
+                Some(Body::Phase { .. })
+            );
         let receipt_open = match self.rows[ix].body {
-            Body::WorkLine { turn, .. } => self.work_folds.get(&turn).copied().unwrap_or(false),
-            _ => false,
+            // Only folding work hangs it from the header on a rail.
+            Body::WorkLine { turn, .. } if self.fold_work => {
+                self.work_folds.get(&turn).copied().unwrap_or(false)
+            }
+            _ => leads_into_group,
         };
+        // The other end of that connector: from the row's top into the tile.
+        let joined_to_header = !self.fold_work
+            && matches!(self.rows[ix].body, Body::Phase { .. })
+            && ix > 0
+            && matches!(self.rows[ix - 1].body, Body::WorkLine { .. });
         let prose = matches!(self.rows[ix].body, Body::Markdown(..));
         let rail_branch = matches!(self.rows[ix].body, Body::Phase { .. })
             || (!nested_phase && (thought_header || (prose && first_prose)))
@@ -5318,13 +5609,19 @@ impl TranscriptView {
         // Keep a phase header the same height whether its body is present or
         // leaving. The last tool carries the group's animated bottom padding.
         let card = matches!(self.rows[ix].body, Body::MonoCard(_));
-        let card_after = card
-            && self
-                .rows
-                .get(ix + 1)
-                .is_some_and(|r| matches!(r.body, Body::MonoCard(_) | Body::Launch(_)));
+        let (card_top, card_bottom) = if card && self.mono {
+            self.mono_card_spacing(ix)
+        } else if self
+            .rows
+            .get(ix + 1)
+            .is_some_and(|r| matches!(r.body, Body::MonoCard(_) | Body::Launch(_)))
+        {
+            (4., 8.)
+        } else {
+            (4., 12.)
+        };
         let bottom = if card {
-            if card_after { 8. } else { 12. }
+            card_bottom
         } else if inside_tools || matches!(self.rows[ix].body, Body::Phase { .. }) {
             0.
         } else if receipt || (last && is_tool) {
@@ -5363,14 +5660,14 @@ impl TranscriptView {
                             .w_full()
                             .max_w(px(COLUMN))
                             .min_w_0()
-                            .px_4()
-                            .pt(px(if first && !is_tool && !prose {
+                            .px(px(COLUMN_PAD))
+                            .pt(px(if card && self.mono {
+                                card_top
+                            } else if first && !is_tool && !prose {
                                 if user {
                                     4.
                                 } else if receipt && !self.mono {
                                     12.
-                                } else if card && self.mono {
-                                    4.
                                 } else {
                                     0.
                                 }
@@ -5392,7 +5689,7 @@ impl TranscriptView {
                             .when(user && self.chat_layout, |d| {
                                 d.pl(px(56.)).flex().justify_end()
                             })
-                            .when(user && self.mono, |d| d.pr(px(16.)))
+                            .when(user && self.mono, |d| d.pr(px(COLUMN_PAD)))
                             .child(
                                 div()
                                     .relative()
@@ -5402,25 +5699,39 @@ impl TranscriptView {
                                     .when(user && !self.chat_layout, |d| d.w_full())
                                     .when(!user, |d| d.w_full())
                                     .when(row.work, |d| {
-                                        d.pl(px(20.)).pb(px(bottom)).when(
-                                            !nested_phase || !row.work_tail,
-                                            |d| {
-                                                d.child(crate::activity::rail_branch(
+                                        d.pl(px(crate::activity::TILE_RAIL_INDENT))
+                                            .pb(px(bottom))
+                                            .when(!nested_phase || !row.work_tail, |d| {
+                                                d.child(crate::activity::tile_rail_branch(
                                                     row.work_tail,
                                                     rail_branch,
                                                 ))
-                                            },
-                                        )
+                                            })
                                     })
                                     .when(receipt_open, |d| {
                                         d.child(
                                             div()
                                                 .absolute()
-                                                .left(px(6.))
-                                                .top(px(22.))
+                                                // From under the header's tile,
+                                                // down its centre.
+                                                .left(px(crate::activity::TILE_RAIL_X))
+                                                .top(px(4. + crate::tab_tile::ACTIVITY_TILE.h))
                                                 .bottom(px(-4.))
                                                 .w(px(1.))
-                                                .bg(rgb(0x323232)),
+                                                .bg(crate::theme::rail_color()),
+                                        )
+                                    })
+                                    .when(joined_to_header, |d| {
+                                        // A tool group's tile sits 5px into its
+                                        // row; the line meets it there.
+                                        d.child(
+                                            div()
+                                                .absolute()
+                                                .left(px(crate::activity::TILE_RAIL_X))
+                                                .top_0()
+                                                .h(px(5.))
+                                                .w(px(1.))
+                                                .bg(crate::theme::rail_color()),
                                         )
                                     })
                                     .child(body),
@@ -5583,17 +5894,25 @@ impl TranscriptView {
     /// Wrapped lines of a user message's text at the bubble's text width.
     fn prompt_lines(&self, text: &str, window: &Window) -> usize {
         let column = self.viewport.size.width.min(px(COLUMN));
-        // Row padding (`pl-14 pr-4` in the chat layout, `px-4` otherwise),
-        // the bubble's 36rem cap and its `px-3`.
+        // Row padding (`pl-14` and `COLUMN_PAD` in the chat layout,
+        // `COLUMN_PAD` both sides otherwise), the bubble's 36rem cap and its
+        // `px-3`.
         let bubble = if self.chat_layout {
-            (column - px(72.)).min(PROMPT_BUBBLE_MAX)
+            (column - px(56. + COLUMN_PAD)).min(PROMPT_BUBBLE_MAX)
         } else {
-            column - px(32.)
+            column - px(2. * COLUMN_PAD)
         };
         let text = SharedString::from(text.trim_end().to_owned());
         measurements::shape_prompt(text, Some(bubble - PROMPT_PAD_X), window)
             .map(|line| line.wrap_boundaries.len() + 1)
             .sum()
+    }
+    /// How far phase `group`'s tile has morphed into its chevron, eased:
+    /// 0 is the tile, 1 the chevron.
+    /// Whether a tool group nobody has opened or closed shows its steps: a
+    /// running one does, unless groups are set to stay collapsed.
+    fn phase_opens(&self, active: bool) -> bool {
+        active && !self.collapse_groups
     }
     fn toggle_phase(&mut self, group: usize, open: bool, cx: &mut Context<Self>) {
         self.phase_toggle = Some(group);
@@ -5605,6 +5924,7 @@ impl TranscriptView {
 impl gpui::EventEmitter<ResponseRequest> for TranscriptView {}
 impl Render for TranscriptView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.perf_scroll(window, cx);
         let top = self.list.logical_scroll_top();
         // Rows that don't fill the viewport can't scroll, so their top being
         // on screen asks for older turns too. Layout must have run first.
@@ -5700,6 +6020,16 @@ impl Render for TranscriptView {
                     move |bounds, window, cx| {
                         let _ = view.update(cx, |this, cx| {
                             if this.viewport != bounds {
+                                // Layout learns the width after the outline
+                                // was built. Redraw after this frame only if
+                                // its visibility changes; an extra layout
+                                // otherwise advances chat motion needlessly.
+                                if this.outline_visible_at(this.viewport.size.width)
+                                    != this.outline_visible_at(bounds.size.width)
+                                {
+                                    let view = cx.entity();
+                                    cx.defer(move |cx| view.update(cx, |_, cx| cx.notify()));
+                                }
                                 this.selection.clear();
                                 this.viewport = bounds;
                                 this.list
@@ -5768,7 +6098,7 @@ impl Render for TranscriptView {
                             div()
                                 .w_full()
                                 .max_w(px(crate::theme::COLUMN))
-                                .px(px(16.))
+                                .px(px(COLUMN_PAD))
                                 .flex()
                                 .map(|d| {
                                     if beside_pill {
@@ -5843,6 +6173,88 @@ fn paint_edge_fade(bounds: Bounds<Pixels>, begin: bool, window: &mut Window) {
     // a seam above the composer. Only the Metal backend supports a real mask.
     #[cfg(not(target_os = "macos"))]
     let _ = (bounds, begin, window);
+}
+
+#[cfg(test)]
+mod mono_status_tests {
+    use super::*;
+
+    fn row(role: &str, text: &str) -> Row {
+        Row {
+            role: role.into(),
+            text: text.into(),
+            first: true,
+            sent_at: None,
+        }
+    }
+    fn tool(name: &str, input: serde_json::Value) -> Row {
+        let mut call = ToolCall::new("t", name);
+        call.input = input.to_string();
+        row("tool", &serde_json::to_string(&call).unwrap())
+    }
+    fn label(rows: Vec<Row>) -> String {
+        mono_work_label(&rows, 0)
+    }
+
+    #[test]
+    fn status_says_what_the_mono_is_doing() {
+        let prompt = row("user", "Review the open PRs");
+        assert_eq!(
+            label(vec![
+                prompt.clone(),
+                row("reasoning", "**Finding the Monocode repo**\n\nLooking…")
+            ]),
+            "Finding the Monocode repo…"
+        );
+        // Raw thinking prose has no heading, so it stays generic.
+        assert_eq!(
+            label(vec![
+                prompt.clone(),
+                row("reasoning", "The user wants me to look at PRs.")
+            ]),
+            "Thinking…"
+        );
+        assert_eq!(
+            label(vec![
+                prompt.clone(),
+                tool(
+                    "Bash",
+                    serde_json::json!({"command":"gh pr list","description":"List open PRs"})
+                )
+            ]),
+            "List open PRs…"
+        );
+        assert_eq!(
+            label(vec![
+                prompt.clone(),
+                tool(
+                    "Bash",
+                    serde_json::json!({"command":"gh pr list --state open"})
+                )
+            ]),
+            "Looking at pull requests…"
+        );
+        assert_eq!(
+            label(vec![
+                prompt.clone(),
+                tool(
+                    "mcp__monocode_app__app",
+                    serde_json::json!({"action":"memory.add","input":{"fact":"x"}})
+                )
+            ]),
+            "Remembering that…"
+        );
+        assert_eq!(
+            label(vec![
+                prompt,
+                tool(
+                    "mcp__github__search_repositories",
+                    serde_json::json!({"query":"monocode"})
+                )
+            ]),
+            "Search repositories…"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -6650,8 +7062,8 @@ mod scroll_tests {
         });
         let start = serde_json::to_string(&ToolCall {
             id: "t".into(),
-            name: "Bash".into(),
-            input: r#"{"command":"monocode app sessions.start --json {}"}"#.into(),
+            name: "exec_command".into(),
+            input: r#"{"cmd":"'/Applications/Monocode Native.app/Contents/MacOS/monocode-gpui' app sessions.start --json '{}'"}"#.into(),
             output: r#"{"ok":true,"result":{"sessionId":776,"accepted":true}}"#.into(),
             state: ToolState::Completed,
             panel: None,
@@ -6694,8 +7106,8 @@ mod scroll_tests {
                 "one set of actions, at the end of the group"
             );
             assert!(
-                view.mono_prose_hidden(1),
-                "prose before later work stays in the trail"
+                !view.mono_prose_hidden(1),
+                "the opening sentence shows before the work"
             );
             assert!(!view.mono_prose_hidden(3));
             assert!(
@@ -6705,9 +7117,23 @@ mod scroll_tests {
                 "the accepted launch gets its card"
             );
             view.streaming(true, cx);
+            assert!(
+                view.rows
+                    .iter()
+                    .any(|r| matches!(r.body, Body::Launch(776))),
+                "starting the next provider run must keep the existing launch card"
+            );
             view.patch(6, vec![row("user", "And another thing")], cx);
             view.patch(7, vec![row("assistant", "Working on it")], cx);
-            assert!(view.mono_prose_hidden(7), "live prose waits in the trail");
+            assert!(
+                view.mono_prose_hidden(7),
+                "a Mono message appears whole, not while it streams"
+            );
+            view.patch(8, vec![row("tool", &start)], cx);
+            assert!(
+                !view.mono_prose_hidden(7),
+                "the finished opening sentence shows while the Mono works"
+            );
             view.set_pending(
                 vec![PendingMessage {
                     id: "q".into(),
@@ -6729,8 +7155,8 @@ mod scroll_tests {
                 .rposition(|r| matches!(r.body, Body::WorkLine { .. }))
                 .unwrap();
             assert!(
-                pending < header,
-                "a queued message sits above the running turn's work"
+                pending > header,
+                "a message queued after the Mono spoke follows its words"
             );
         });
     }

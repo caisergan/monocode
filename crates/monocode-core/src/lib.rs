@@ -14,6 +14,7 @@ pub mod external_editor;
 pub mod files;
 pub mod follow_up;
 pub mod git;
+pub mod github_star;
 pub mod harness_updates;
 pub mod inbox;
 pub mod mobile;
@@ -40,6 +41,7 @@ pub mod visual;
 pub mod visual_bridge;
 
 pub mod composer;
+pub mod contributions;
 pub mod orchestration;
 pub mod skills;
 
