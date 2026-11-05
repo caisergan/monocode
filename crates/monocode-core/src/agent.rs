@@ -246,6 +246,9 @@ pub enum Decision {
     Deny,
     Answer(Vec<Vec<String>>),
     KeepOpen,
+    /// Stop one subagent, by the id of the call that spawned it. The rest of
+    /// the turn keeps going.
+    StopAgent,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct QuestionOption {

@@ -243,6 +243,7 @@ impl Shell {
             }
             let ids = self.sidebar_session_ids(cx);
             self.sync_rails(&ids, cx);
+            self.sync_subagent_trees(&ids, cx);
             let entries = self.session_entries(&ids, cx);
             let listed: HashSet<_> = ids.iter().copied().collect();
             self.session_row_bounds.retain(|id, _| listed.contains(id));

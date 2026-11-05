@@ -1,7 +1,59 @@
 //! Keep delegated traffic under its real parent, rather than merging it into
 //! the assistant's answer or allowing a child completion to finish the turn.
 use super::*;
-use crate::tool::tasks::{AgentRun, AgentStep, Panel, TaskList};
+use crate::tool::subagent_transcript::{self, RequestUsage, SubagentTranscript};
+use crate::tool::tasks::{AgentRun, AgentStep, AgentUsage, Panel, TaskList};
+
+/// How often a running run's own transcript is read again.
+const SUBAGENT_POLL: Duration = Duration::from_millis(1_500);
+/// How many reads a transcript may be missing before the stream's own numbers
+/// stay in charge: Claude names the file before it writes to it.
+const TRANSCRIPT_MISSES: u32 = 15;
+
+/// What is known of one delegated run's tokens, by the call that spawned it.
+struct SubagentTally {
+    /// Usage as the parent's stream mirrored it: output counts are early
+    /// snapshots, so it only stands in until the transcript can be read.
+    streamed: HashMap<String, RequestUsage>,
+    last_streamed: Option<String>,
+    model: Option<String>,
+    /// The task's own report: `total_tokens` is about its context size.
+    task: Option<TaskUsage>,
+    transcript: Option<SubagentTranscript>,
+    read: bool,
+    misses: u32,
+    running: bool,
+}
+impl Default for SubagentTally {
+    fn default() -> Self {
+        Self {
+            streamed: HashMap::new(),
+            last_streamed: None,
+            model: None,
+            task: None,
+            transcript: None,
+            read: false,
+            misses: 0,
+            running: true,
+        }
+    }
+}
+#[derive(Clone, Copy)]
+struct TaskUsage {
+    total_tokens: Option<u64>,
+    tool_uses: Option<u64>,
+    duration_ms: Option<u64>,
+}
+fn task_usage(value: &Value) -> Option<TaskUsage> {
+    let usage = value.as_object()?;
+    let pick = |key: &str| usage.get(key).and_then(Value::as_u64);
+    let (total_tokens, tool_uses) = (pick("total_tokens"), pick("tool_uses"));
+    (total_tokens.is_some() || tool_uses.is_some()).then(|| TaskUsage {
+        total_tokens,
+        tool_uses,
+        duration_ms: pick("duration_ms"),
+    })
+}
 
 #[derive(Default)]
 pub(super) struct Activities {
@@ -16,6 +68,11 @@ pub(super) struct Activities {
     pub(super) claude_tasks: Vec<BackgroundTask>,
     /// What the UI was last told the yielded turn is waiting on.
     pub(super) published: Vec<BackgroundTask>,
+    tallies: HashMap<String, SubagentTally>,
+    model_windows: HashMap<String, u64>,
+    subagents_read_at: Option<Instant>,
+    /// Updates from replying to a control, sent on with the next tick.
+    queued: Vec<Event>,
 }
 fn text(value: &Value) -> Option<&str> {
     value.as_str().filter(|s| !s.trim().is_empty())
@@ -179,7 +236,7 @@ impl Protocol {
                 .entry(owner.into())
                 .or_insert_with(|| ToolCall::new(owner, "collabAgentToolCall"));
             if tool.panel.is_none() {
-                tool.panel = Some(Panel::Agent(AgentRun::default()));
+                tool.panel = Some(Panel::Agent(Box::default()));
             }
             tool.input = item.to_string();
             if let Some(run) = tool.agent_mut() {
@@ -378,6 +435,7 @@ impl Protocol {
         if let Some(parent) = parent {
             match value["type"].as_str() {
                 Some("assistant") => {
+                    self.note_stream_usage(parent, value, events);
                     let model = text(&value["message"]["model"]);
                     let message_id = text(&value["message"]["id"]);
                     for (index, block) in value["message"]["content"]
@@ -531,7 +589,20 @@ impl Protocol {
                     } else if subtype == "task_started" {
                         tool.state = ToolState::Running;
                     }
+                    let tool_id = tool.id.clone();
                     if let Some(run) = tool.agent_mut() {
+                        if subtype == "task_started" {
+                            if let Some(id) = text(&value["task_id"]) {
+                                run.task_id = Some(id.into());
+                            }
+                            run.started_at.get_or_insert_with(crate::time::now_ms);
+                            if let Some(prompt) = text(&value["prompt"]) {
+                                run.prompt = Some(prompt.into());
+                            }
+                            if let Some(kind) = text(&value["subagent_type"]) {
+                                run.agent_type = Some(kind.into());
+                            }
+                        }
                         // Match React: keep the run's name once its trail starts.
                         if run.steps.is_empty() {
                             if let Some(description) = text(&patch["description"]) {
@@ -562,12 +633,283 @@ impl Protocol {
                         tool.output = error.into();
                         tool.bound_output();
                     }
+                    let terminal = subtype == "task_notification"
+                        || matches!(
+                            patch["status"].as_str().map(str::to_lowercase).as_deref(),
+                            Some("completed" | "failed" | "killed" | "stopped")
+                        );
                     events.push(Event::Tool(tool.clone()));
+                    let tally = self.activities.tallies.entry(tool_id.clone()).or_default();
+                    if let Some(usage) = task_usage(&value["usage"]) {
+                        tally.task = Some(usage);
+                    }
+                    if let Some(file) =
+                        text(&value["output_file"]).filter(|_| subtype == "task_notification")
+                    {
+                        self.watch_transcript(&tool_id, file);
+                    }
+                    if terminal {
+                        self.finish_agent_run(&tool_id, events);
+                    } else {
+                        self.emit_agent_usage(&tool_id, events);
+                    }
                 }
             }
             return true;
         }
         false
+    }
+
+    /// Usage a subagent's message carried on the parent's stream.
+    fn note_stream_usage(&mut self, parent: &str, value: &Value, events: &mut Vec<Event>) {
+        let message = &value["message"];
+        let (Some(id), Some(usage)) = (
+            text(&message["id"]),
+            RequestUsage::from_value(&message["usage"]),
+        ) else {
+            return;
+        };
+        let tally = self.activities.tallies.entry(parent.into()).or_default();
+        subagent_transcript::merge_request(&mut tally.streamed, id, usage);
+        tally.last_streamed = Some(id.into());
+        if let Some(model) = text(&message["model"]) {
+            tally.model = Some(model.into());
+        }
+        if !tally.read {
+            self.emit_agent_usage(parent, events);
+        }
+    }
+
+    /// The Agent call's own result carries the run's id and transcript file.
+    pub(super) fn note_agent_launch(
+        &mut self,
+        message: &Value,
+        block: &Value,
+        events: &mut Vec<Event>,
+    ) {
+        // The structured result describes the message's one call; with several
+        // in a message there is no telling which it belongs to.
+        let results = message["message"]["content"]
+            .as_array()
+            .map_or(0, |content| {
+                content
+                    .iter()
+                    .filter(|part| part["type"] == "tool_result")
+                    .count()
+            });
+        if results != 1 {
+            return;
+        }
+        let result = message
+            .get("tool_use_result")
+            .or_else(|| message.get("toolUseResult"))
+            .unwrap_or(&Value::Null);
+        let (agent, file) = (text(&result["agentId"]), text(&result["outputFile"]));
+        if agent.is_none() && file.is_none() {
+            return;
+        }
+        let Some(id) = text(&block["tool_use_id"]) else {
+            return;
+        };
+        let Some(tool) = self.tools.get_mut(id) else {
+            return;
+        };
+        let Some(run) = tool.agent_mut() else {
+            return;
+        };
+        if let Some(agent) = agent {
+            run.task_id = Some(agent.into());
+        }
+        if let Some(prompt) = text(&result["prompt"]) {
+            run.prompt = Some(prompt.into());
+        }
+        events.push(Event::Tool(tool.clone()));
+        if let Some(file) = file {
+            self.watch_transcript(id, file);
+        }
+    }
+
+    /// Start reading a run's transcript; the tick keeps up with it after that.
+    fn watch_transcript(&mut self, call: &str, path: &str) {
+        let tally = self.activities.tallies.entry(call.into()).or_default();
+        if tally.transcript.is_none() {
+            tally.transcript = Some(SubagentTranscript::usage_only(path));
+            tally.read = false;
+            tally.misses = 0;
+        }
+        // Soon, not at the next poll, so a short run shows its tokens at all.
+        self.activities.subagents_read_at = None;
+    }
+
+    /// Read the running runs' transcripts every so often.
+    pub(super) fn subagent_tick(&mut self) -> Vec<Event> {
+        let mut events = std::mem::take(&mut self.activities.queued);
+        let due = self
+            .activities
+            .subagents_read_at
+            .is_none_or(|at| at.elapsed() >= SUBAGENT_POLL);
+        if !due || self.activities.tallies.is_empty() {
+            return events;
+        }
+        self.activities.subagents_read_at = Some(Instant::now());
+        let calls: Vec<String> = self
+            .activities
+            .tallies
+            .iter()
+            .filter(|(_, tally)| tally.transcript.is_some() && (tally.running || !tally.read))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for call in calls {
+            self.refresh_subagent(&call, &mut events);
+        }
+        events
+    }
+
+    fn refresh_subagent(&mut self, call: &str, events: &mut Vec<Event>) {
+        let Some(tally) = self.activities.tallies.get_mut(call) else {
+            return;
+        };
+        let Some(transcript) = tally.transcript.as_mut() else {
+            return;
+        };
+        let first = !tally.read;
+        match transcript.read() {
+            Ok(changed) => {
+                tally.read = true;
+                if let Some(model) = transcript.model() {
+                    tally.model = Some(model.into());
+                }
+                let path = transcript.path().to_string_lossy().into_owned();
+                if first {
+                    if let Some(run) = self.tools.get_mut(call).and_then(ToolCall::agent_mut) {
+                        run.transcript_path = Some(path);
+                    }
+                }
+                if changed || first {
+                    self.emit_agent_usage(call, events);
+                }
+            }
+            Err(_) => {
+                // A file not written yet is looked for again while the run works.
+                tally.misses += 1;
+                if !tally.read && tally.running && tally.misses < TRANSCRIPT_MISSES {
+                    return;
+                }
+                // An unreadable transcript leaves the stream's numbers in charge.
+                tally.transcript = None;
+                self.emit_agent_usage(call, events);
+            }
+        }
+    }
+
+    /// The run is over: one last read picks up its final request.
+    pub(super) fn finish_agent_run(&mut self, call: &str, events: &mut Vec<Event>) {
+        let Some(run) = self.tools.get_mut(call).and_then(ToolCall::agent_mut) else {
+            return;
+        };
+        run.ended_at.get_or_insert_with(crate::time::now_ms);
+        let tally = self.activities.tallies.entry(call.into()).or_default();
+        tally.running = false;
+        if tally.transcript.is_some() {
+            self.refresh_subagent(call, events);
+        }
+        self.emit_agent_usage(call, events);
+    }
+
+    fn emit_agent_usage(&mut self, call: &str, events: &mut Vec<Event>) {
+        let Some(tally) = self.activities.tallies.get(call) else {
+            return;
+        };
+        let counted = tally
+            .transcript
+            .as_ref()
+            .filter(|_| tally.read)
+            .and_then(SubagentTranscript::usage)
+            .or_else(|| {
+                subagent_transcript::usage_from_requests(
+                    &tally.streamed,
+                    tally.last_streamed.as_deref(),
+                )
+            });
+        if counted.is_none() && tally.task.is_none() {
+            return;
+        }
+        let counted = counted.unwrap_or_default();
+        let usage = AgentUsage {
+            context_used: counted
+                .context_used
+                .or(tally.task.and_then(|task| task.total_tokens)),
+            context_window: tally
+                .model
+                .as_deref()
+                .and_then(|model| self.activities.model_windows.get(model))
+                .copied(),
+            tool_uses: tally.task.and_then(|task| task.tool_uses),
+            duration_ms: tally.task.and_then(|task| task.duration_ms),
+            ..counted
+        };
+        let model = tally.model.clone();
+        let Some(tool) = self.tools.get_mut(call) else {
+            return;
+        };
+        let Some(run) = tool.agent_mut() else {
+            return;
+        };
+        if let Some(model) = model {
+            run.model = Some(model);
+        }
+        run.usage = Some(usage);
+        events.push(Event::Tool(tool.clone()));
+    }
+
+    /// Windows arrive on the turn result; subagents on those models learn theirs.
+    pub(super) fn note_model_windows(&mut self, result: &Value, events: &mut Vec<Event>) {
+        let Some(models) = result["modelUsage"].as_object() else {
+            return;
+        };
+        for (model, entry) in models {
+            if let Some(window) = entry["contextWindow"].as_u64().filter(|w| *w > 0) {
+                self.activities.model_windows.insert(model.clone(), window);
+            }
+        }
+        let calls: Vec<String> = self
+            .activities
+            .tallies
+            .iter()
+            .filter(|(_, tally)| {
+                tally
+                    .model
+                    .as_ref()
+                    .is_some_and(|model| self.activities.model_windows.contains_key(model))
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        for call in calls {
+            self.emit_agent_usage(&call, events);
+        }
+    }
+
+    /// Stop one run by the call that spawned it; the turn keeps going.
+    pub(super) fn stop_agent(&mut self, call: &str, stdin: &mut impl Write) -> Result<(), String> {
+        if self.request.kind != Kind::Claude {
+            return Ok(());
+        }
+        let Some(tool) = self.tools.get_mut(call) else {
+            return Ok(());
+        };
+        let Some(run) = tool.agent_mut() else {
+            return Ok(());
+        };
+        let Some(task) = run.task_id.clone().or_else(|| run.ids.first().cloned()) else {
+            return Ok(());
+        };
+        run.stopped = true;
+        self.activities.queued.push(Event::Tool(tool.clone()));
+        write_json(
+            stdin,
+            json!({"type":"control_request","request_id":format!("native-stop-agent-{call}"),
+                   "request":{"subtype":"stop_task","task_id":task}}),
+        )
     }
     /// Mirrors claude.ts's backgroundTasks: a task runs from task_started
     /// until a terminal update, its notification, or a background_tasks_changed
@@ -576,7 +918,14 @@ impl Protocol {
         let tasks = &mut self.activities.claude_tasks;
         match subtype {
             "task_started" if !tasks.iter().any(|task| task.id == id) => {
-                let source = text(&value["tool_use_id"]).and_then(|id| self.tools.get(id));
+                let call = text(&value["tool_use_id"]);
+                let nested = call.is_some_and(|call| {
+                    self.tools.values().any(|tool| {
+                        matches!(tool.panel.as_ref(), Some(Panel::Agent(run))
+                            if run.steps.iter().any(|step| step.id == call))
+                    })
+                });
+                let source = call.and_then(|id| self.tools.get(id));
                 let command = source
                     .filter(|tool| tool.name == "Bash")
                     .and_then(|tool| serde_json::from_str::<Value>(&tool.input).ok())
@@ -593,6 +942,7 @@ impl Protocol {
                     agent: is_agent_task(value["task_type"].as_str()),
                     command,
                     started_at: crate::time::now_ms(),
+                    nested,
                 });
             }
             "task_updated" => {
@@ -639,6 +989,7 @@ impl Protocol {
                     agent: is_agent_task(row["task_type"].as_str()),
                     command: None,
                     started_at: crate::time::now_ms(),
+                    nested: false,
                 });
             }
         }
@@ -945,6 +1296,140 @@ mod tests {
         }
         assert_eq!(p.tools["agent-call"].state, ToolState::Completed);
         assert_eq!(p.tools["agent-call"].output, "No regressions found.");
+    }
+    #[test]
+    fn claude_runs_count_tokens_from_their_transcript_and_stop_by_their_task() {
+        let dir = std::env::temp_dir().join(format!(
+            "subagent-run-{}-{}",
+            std::process::id(),
+            crate::time::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("agent-task.jsonl");
+        std::fs::write(
+            &file,
+            format!(
+                "{}\n",
+                json!({"type":"assistant","message":{"id":"m1","model":"claude-haiku-5-5",
+                    "usage":{"input_tokens":10,"cache_read_input_tokens":100,"output_tokens":188},
+                    "content":[]}})
+            ),
+        )
+        .unwrap();
+        let mut p = protocol(Kind::Claude);
+        let run = |p: &Protocol| {
+            let Some(Panel::Agent(run)) = p.tools["agent"].panel() else {
+                panic!()
+            };
+            run
+        };
+        p.frame(
+            json!({"type":"assistant","message":{"content":[{
+                "type":"tool_use","id":"agent","name":"Agent",
+                "input":{"description":"Review","run_in_background":true}
+            }]}}),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        p.frame(
+            json!({"type":"system","subtype":"task_started","task_id":"task","tool_use_id":"agent",
+                "description":"Review","prompt":"Review the whole diff",
+                "subagent_type":"code-reviewer","is_backgrounded":true,"task_type":"local_agent"}),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(run(&p).task_id.as_deref(), Some("task"));
+        assert_eq!(run(&p).prompt.as_deref(), Some("Review the whole diff"));
+        assert_eq!(run(&p).agent_type.as_deref(), Some("code-reviewer"));
+        assert!(run(&p).started_at.is_some());
+
+        // The mirrored message's output is an early snapshot, standing in for now.
+        p.frame(
+            json!({"type":"assistant","parent_tool_use_id":"agent","message":{
+                "id":"m1","usage":{"input_tokens":10,"output_tokens":5},"content":[]}}),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(run(&p).usage.unwrap().output, 5);
+        p.frame(
+            json!({"type":"system","subtype":"task_progress","task_id":"task",
+                "usage":{"total_tokens":4242,"tool_uses":3,"duration_ms":9000}}),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(run(&p).usage.unwrap().tool_uses, Some(3));
+
+        // The launch receipt names the transcript; the next tick reads it.
+        p.frame(
+            json!({"type":"user","tool_use_result":{"agentId":"task","outputFile":file},
+                "message":{"content":[{"type":"tool_result","tool_use_id":"agent","content":"ok"}]}}),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(!p.subagent_tick().is_empty());
+        let usage = run(&p).usage.unwrap();
+        assert_eq!(usage.output, 188, "the file's final count wins");
+        assert_eq!(usage.cache_read, 100);
+        assert_eq!(usage.context_used, Some(298));
+        assert_eq!(usage.duration_ms, Some(9000));
+        assert!(run(&p).transcript_path.is_some());
+
+        let mut stdin = Vec::new();
+        p.stop_agent("agent", &mut stdin).unwrap();
+        let sent: Value = serde_json::from_slice(&stdin).unwrap();
+        assert_eq!(sent["request"]["subtype"], "stop_task");
+        assert_eq!(sent["request"]["task_id"], "task");
+        assert!(run(&p).stopped);
+        assert!(!p.subagent_tick().is_empty(), "the stop is sent on");
+
+        p.frame(
+            json!({"type":"system","subtype":"task_notification","task_id":"task",
+                "tool_use_id":"agent","status":"killed","summary":"Stopped"}),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(run(&p).ended_at.is_some());
+        assert_eq!(run(&p).status_line(&p.tools["agent"].state), "stopped");
+        p.frame(
+            json!({"type":"result","modelUsage":{"claude-haiku-5-5":{"contextWindow":200000}}}),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(run(&p).usage.unwrap().context_window, Some(200000));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn a_subagents_own_background_command_is_marked_as_nested() {
+        let mut p = protocol(Kind::Claude);
+        p.frame(
+            json!({"type":"assistant","message":{"content":[{
+                "type":"tool_use","id":"agent","name":"Agent","input":{"description":"Idle"}
+            }]}}),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        p.frame(
+            json!({"type":"assistant","parent_tool_use_id":"agent","message":{"id":"m","content":[{
+                "type":"tool_use","id":"child-bash","name":"Bash","input":{"command":"ping"}
+            }]}}),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        p.frame(
+            json!({"type":"system","subtype":"task_started","task_id":"child",
+            "tool_use_id":"child-bash","description":"Run ping","task_type":"local_bash"}),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        p.frame(
+            json!({"type":"system","subtype":"task_started","task_id":"own",
+            "description":"Dev server","task_type":"local_bash"}),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        let tasks = &p.activities.claude_tasks;
+        assert!(tasks.iter().find(|task| task.id == "child").unwrap().nested);
+        assert!(!tasks.iter().find(|task| task.id == "own").unwrap().nested);
     }
     #[test]
     fn claude_task_ids_progress_and_reports_come_from_task_events() {

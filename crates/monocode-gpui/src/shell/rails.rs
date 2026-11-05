@@ -214,16 +214,19 @@ impl Shell {
             return self.classic_session_card_at_depth(id, nested, false, cx);
         }
         let Some(rail) = self.rail(id, &self.rails.started) else {
-            return if nested {
+            let row = if nested {
                 self.session_row_with(id, true, None, cx)
             } else {
                 self.session_row(id, cx)
             };
+            return self.with_subagent_tree(id, nested, row, cx);
         };
         let now = Instant::now();
         let progress = self.rails.motions.get(&id).map_or(0., |m| m.value(now));
         let open = self.rails.motions.get(&id).is_some_and(|m| m.open);
         let row = self.session_row_with(id, nested, Some((&rail, open)), cx);
+        // A started session's rail goes below its runs.
+        let row = self.with_subagent_tree(id, nested, row, cx);
         if progress <= 0. {
             return row;
         }
@@ -280,13 +283,14 @@ impl Shell {
             .motions
             .get(&id)
             .is_some_and(|motion| motion.open);
-        self.classic_session_row_with(
+        let row = self.classic_session_row_with(
             id,
             nested,
             compact,
             rail.as_ref().map(|rail| (rail, open)),
             cx,
-        )
+        );
+        self.with_subagent_tree(id, nested, row, cx)
     }
 
     fn classic_session_row_with(

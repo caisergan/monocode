@@ -364,7 +364,8 @@ fn agent(
     cx: &mut Context<TranscriptView>,
 ) -> AnyElement {
     let name = run.display_name();
-    let failed = matches!(call.state, ToolState::Failed | ToolState::Cancelled);
+    // A run the user stopped is quiet about it; only one that broke is red.
+    let failed = matches!(call.state, ToolState::Failed | ToolState::Cancelled) && !run.stopped;
     let active = view.streaming
         && call.state == ToolState::Running
         && view
@@ -379,7 +380,7 @@ fn agent(
         .is_some_and(|meta| meta["detailOmitted"] == true);
     let has_detail = !run.steps.is_empty() || report.is_some() || omitted;
     let key = format!("agent:{start}:{}", call.id);
-    let open = view.agent_panels.open(&key, failed);
+    let open = view.agent_trail_only || view.agent_panels.open(&key, failed);
     if !open {
         // Work arriving behind the row is history when it opens again.
         for phase in agent_phases(run) {
@@ -431,7 +432,11 @@ fn agent(
         .when(has_detail && open, |d| d.bg(content(0.08)))
         .child(super::mascot::subagent_mascot(
             &name,
-            &call.state,
+            if run.stopped {
+                &ToolState::Completed
+            } else {
+                &call.state
+            },
             active && view.visible,
         ))
         .child(
@@ -501,8 +506,13 @@ fn agent(
                 this.toggle_agent_part(toggle_key.clone(), !open, start, cx);
             }
         }));
-    let mut panel = div().w_full().min_w_0().flex().flex_col().child(header);
-    if has_detail && view.agent_panels.visible(&key, open) {
+    let mut panel = div()
+        .w_full()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .when(!view.agent_trail_only, |d| d.child(header));
+    if has_detail && (view.agent_trail_only || view.agent_panels.visible(&key, open)) {
         let width = available_width.unwrap_or_else(|| panel_width(view, start));
         let trail = agent_trail(view, call, run, start, active, width, cx);
         let mut body = div()
@@ -1019,7 +1029,7 @@ fn markdown_text(
     body.into_any_element()
 }
 
-struct AgentBrief(String);
+pub(crate) struct AgentBrief(pub(crate) String);
 impl gpui::Render for AgentBrief {
     fn render(&mut self, _: &mut gpui::Window, _: &mut Context<Self>) -> impl IntoElement {
         div()

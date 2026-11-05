@@ -1,6 +1,7 @@
 //! Provider-neutral tool presentation, persisted as a native `tool` row.
 use serde::{Deserialize, Serialize};
 mod presentation;
+pub mod subagent_transcript;
 pub mod tasks;
 pub use presentation::{
     app_activity, app_cli_action, app_tool, visual_tool, CommandStep, ToolPresentation, VisualStep,

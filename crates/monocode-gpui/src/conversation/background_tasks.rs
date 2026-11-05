@@ -36,7 +36,13 @@ impl Conversation {
 
     pub(super) fn background_shelf(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         let width = self.composer_anchor.get().map(|bounds| bounds.size.width);
-        let tasks = &self.background.tasks;
+        // A subagent is on the dock already, and what it ran on its own trail.
+        let tasks: Vec<&BackgroundTask> = self
+            .background
+            .tasks
+            .iter()
+            .filter(|task| !task.agent && !task.nested)
+            .collect();
         self.background.motion.retain(
             tasks.iter().map(|task| task.id.as_str()),
             !cx.reduce_motion() && width.is_some(),
@@ -55,7 +61,7 @@ impl Conversation {
         let count = tasks.len();
         // A lone task folds into the header: its title takes the subtitle's
         // place and its clock sits at the end, so the card stays one row.
-        let single = (count == 1).then(|| &tasks[0]);
+        let single = (count == 1).then(|| tasks[0]);
         let collapsible = count > 1;
         let collapsed = collapsible && self.background.collapsed;
         let title = if count == 1 {
@@ -288,6 +294,7 @@ mod tests {
             agent,
             command: (!agent).then(|| "npm run dev".into()),
             started_at: monocode_core::time::now_ms(),
+            nested: false,
         }
     }
 
@@ -310,7 +317,7 @@ mod tests {
                     view.loaded = true;
                     view.summary.has_messages = true;
                     view.busy = true;
-                    view.set_background(vec![task("dev", false), task("review", true)], cx);
+                    view.set_background(vec![task("dev", false), task("build", false)], cx);
                     view
                 })
             })
@@ -319,7 +326,7 @@ mod tests {
         let visual = &mut VisualTestContext::from_window(window.into(), cx);
         visual.refresh().unwrap();
         assert!(visual.debug_bounds("background-task-dev").is_some());
-        assert!(visual.debug_bounds("background-task-review").is_some());
+        assert!(visual.debug_bounds("background-task-build").is_some());
 
         let header = visual.debug_bounds("background-tasks-header").unwrap();
         visual.simulate_click(header.center(), Default::default());

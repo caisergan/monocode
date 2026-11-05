@@ -557,7 +557,7 @@ mod notice_tests {
 #[cfg(test)]
 mod panel_tests {
     use super::*;
-    use crate::tool::tasks::{AgentRun, AgentStep, Panel, TaskList};
+    use crate::tool::tasks::{AgentStep, Panel, TaskList};
     #[test]
     fn native_visuals_survive_chunking_storage_and_later_messages() {
         let document = crate::visual::VisualDocument {
@@ -651,7 +651,7 @@ mod panel_tests {
         assert_eq!(loaded.input, call.input);
         assert_eq!(loaded.panel(), call.panel());
         assert!(
-            matches!(loaded.panel(), Some(Panel::Agent(AgentRun { ids, .. })) if ids == vec!["actual-child-thread"])
+            matches!(loaded.panel(), Some(Panel::Agent(run)) if run.ids == vec!["actual-child-thread"])
         );
     }
 }

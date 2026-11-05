@@ -7,7 +7,8 @@ use serde_json::Value;
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Panel {
     Tasks(TaskList),
-    Agent(AgentRun),
+    /// Boxed: a run is far bigger than a task list and rides on every tool call.
+    Agent(Box<AgentRun>),
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskList {
@@ -111,6 +112,48 @@ pub struct AgentRun {
     pub brief: String,
     #[serde(default)]
     pub steps: Vec<AgentStep>,
+    /// The whole brief the parent wrote, as opposed to the task's short label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+    /// Provider task id, used to stop the run by itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// The run's own transcript on the machine running the provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_path: Option<String>,
+    /// Unix milliseconds the run started and finished, as the app saw them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<u64>,
+    /// The user stopped this run; it did not fail on its own.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub stopped: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<AgentUsage>,
+}
+/// Tokens one delegated run spent in its own context window. `uncached` counts
+/// every prompt token not read from the cache, cache writes included.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentUsage {
+    #[serde(default)]
+    pub uncached: u64,
+    #[serde(default)]
+    pub cache_read: u64,
+    #[serde(default)]
+    pub cache_write: u64,
+    #[serde(default)]
+    pub output: u64,
+    /// Tokens in the run's window after its latest request.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_used: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_uses: Option<u64>,
+    /// Provider-measured run time, preferred over the app's own clock.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
 }
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AgentStep {
@@ -311,6 +354,9 @@ impl AgentRun {
         format!("{trimmed}…")
     }
     pub fn status_line(&self, state: &ToolState) -> String {
+        if self.stopped {
+            return "stopped".into();
+        }
         if matches!(state, ToolState::Failed | ToolState::Cancelled) {
             return "failed".into();
         }
@@ -574,7 +620,7 @@ impl ToolCall {
             if run.name.is_none() && run.brief.is_empty() {
                 run.brief = title.into();
             }
-            return Some(Panel::Agent(run));
+            return Some(Panel::Agent(Box::new(run)));
         }
         None
     }
@@ -656,6 +702,28 @@ pub fn from_desktop(block: &Value) -> Option<Panel> {
         model: agent.get("model").and_then(string),
         agent_type: agent.get("agentType").and_then(string),
         brief,
+        prompt: agent.get("prompt").and_then(string),
+        task_id: agent.get("taskId").and_then(string),
+        transcript_path: agent.get("transcriptPath").and_then(string),
+        started_at: agent.get("startedAt").and_then(Value::as_u64),
+        ended_at: agent.get("endedAt").and_then(Value::as_u64),
+        stopped: agent["stopped"] == true,
+        usage: agent
+            .get("usage")
+            .filter(|usage| usage.is_object())
+            .map(|usage| {
+                let count = |key: &str| usage.get(key).and_then(Value::as_u64);
+                AgentUsage {
+                    uncached: count("uncached").unwrap_or(0),
+                    cache_read: count("cacheRead").unwrap_or(0),
+                    cache_write: count("cacheWrite").unwrap_or(0),
+                    output: count("output").unwrap_or(0),
+                    context_used: count("contextUsed"),
+                    context_window: count("contextWindow"),
+                    tool_uses: count("toolUses"),
+                    duration_ms: count("durationMs"),
+                }
+            }),
         ..AgentRun::default()
     };
     for step in agent
@@ -713,10 +781,41 @@ pub fn from_desktop(block: &Value) -> Option<Panel> {
                 .then_some(display),
         });
     }
-    Some(Panel::Agent(run))
+    Some(Panel::Agent(Box::new(run)))
 }
 
 pub fn desktop_agent(run: &AgentRun) -> Value {
+    let mut agent = desktop_agent_steps(run);
+    if let Some(prompt) = &run.prompt {
+        agent["prompt"] = Value::String(prompt.clone());
+    }
+    if let Some(task) = &run.task_id {
+        agent["taskId"] = Value::String(task.clone());
+    }
+    if let Some(path) = &run.transcript_path {
+        agent["transcriptPath"] = Value::String(path.clone());
+    }
+    if let Some(at) = run.started_at {
+        agent["startedAt"] = at.into();
+    }
+    if let Some(at) = run.ended_at {
+        agent["endedAt"] = at.into();
+    }
+    if run.stopped {
+        agent["stopped"] = Value::Bool(true);
+    }
+    if let Some(usage) = &run.usage {
+        agent["usage"] = serde_json::json!({
+            "uncached":usage.uncached, "cacheRead":usage.cache_read,
+            "cacheWrite":usage.cache_write, "output":usage.output,
+            "contextUsed":usage.context_used, "contextWindow":usage.context_window,
+            "toolUses":usage.tool_uses, "durationMs":usage.duration_ms,
+        });
+    }
+    agent
+}
+
+fn desktop_agent_steps(run: &AgentRun) -> Value {
     serde_json::json!({
         "name":run.name.as_deref().filter(|name| !name.trim().is_empty()).unwrap_or_else(|| if run.brief.is_empty() { "Subagent" } else { &run.brief }),
         "model":run.model, "agentType":run.agent_type, "nativeIds":run.ids, "nativeBrief":run.brief,
@@ -734,23 +833,129 @@ pub fn desktop_agent(run: &AgentRun) -> Value {
     })
 }
 
+/// Where a delegated run stands, as the dock and its sheet tell it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunState {
+    Running,
+    Done,
+    Failed,
+    Stopped,
+}
+impl RunState {
+    /// subagentStateLabel, for accessibility labels.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Running => "working",
+            Self::Done => "done",
+            Self::Failed => "failed",
+            Self::Stopped => "stopped",
+        }
+    }
+}
+
 /// A subagent the current turn started, as the composer's dock lists it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Subagent {
     pub id: String,
     pub run: AgentRun,
     pub running: bool,
+    pub tool_state: ToolState,
+    /// The call as the transcript stores it, for a view of the run on its own.
+    pub source: String,
 }
 impl Subagent {
-    /// The step it is on, or last finished.
-    pub fn latest(&self) -> Option<&str> {
+    /// `live` is whether the session is still working. A run left pending once
+    /// the session has stopped never reported back, so it reads as stopped.
+    pub fn state(&self, live: bool) -> RunState {
+        match self.tool_state {
+            ToolState::Running if live => RunState::Running,
+            ToolState::Running => RunState::Stopped,
+            _ if self.run.stopped => RunState::Stopped,
+            ToolState::Failed | ToolState::Cancelled => RunState::Failed,
+            ToolState::Completed => RunState::Done,
+        }
+    }
+    /// The newest call it made, for "Now …" in its peek.
+    pub fn latest_tool(&self) -> Option<&str> {
         self.run
             .steps
             .iter()
             .rev()
+            .find(|step| step.kind == "tool" && !step.text.trim().is_empty())
             .map(|step| step.text.trim())
-            .find(|text| !text.is_empty())
     }
+    /// How long the run has worked, or worked for, when the app knows.
+    pub fn elapsed_ms(&self, now: u64, running: bool) -> Option<u64> {
+        let duration = self.run.usage.as_ref().and_then(|usage| usage.duration_ms);
+        if !running && duration.is_some() {
+            return duration;
+        }
+        let started = self.run.started_at?;
+        let end = self.run.ended_at.or(running.then_some(now))?;
+        // A run replayed from an import starts and ends in the same instant.
+        let elapsed = end.saturating_sub(started);
+        (elapsed >= 1_000).then_some(elapsed)
+    }
+    /// Type and model, e.g. "code-reviewer · Sonnet 5.5".
+    pub fn kind(&self, provider: crate::provider::Kind) -> String {
+        [self.run.agent_type.clone(), self.run.model_name(provider)]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+    /// Stop goes by the run's task. A run without one of its own can't be
+    /// stopped by itself.
+    pub fn can_stop(&self, live: bool) -> bool {
+        self.state(live) == RunState::Running && self.run.task_id.is_some()
+    }
+}
+
+/// Tokens across several runs, for the dock's running total.
+pub fn token_totals(agents: &[Subagent]) -> Option<(u64, u64, u64)> {
+    let mut found = false;
+    let mut totals = (0, 0, 0);
+    for usage in agents.iter().filter_map(|agent| agent.run.usage.as_ref()) {
+        found = true;
+        totals.0 += usage.uncached;
+        totals.1 += usage.cache_read;
+        totals.2 += usage.output;
+    }
+    found.then_some(totals)
+}
+
+/// The runs that get a chip of their own when not all fit, returned as indices
+/// of (visible, hidden). Order never changes under the reader; what gives way
+/// first is the oldest finished run, so work still going stays in view.
+pub fn visible_subagents(
+    agents: &[Subagent],
+    live: bool,
+    limit: usize,
+    keep: Option<&str>,
+) -> (Vec<usize>, Vec<usize>) {
+    let all = 0..agents.len();
+    if agents.len() <= limit {
+        return (all.collect(), Vec::new());
+    }
+    let excess = agents.len() - limit;
+    let mut drop = std::collections::BTreeSet::new();
+    for (ix, agent) in agents.iter().enumerate() {
+        if drop.len() == excess {
+            break;
+        }
+        if keep != Some(agent.id.as_str()) && agent.state(live) != RunState::Running {
+            drop.insert(ix);
+        }
+    }
+    for (ix, agent) in agents.iter().enumerate() {
+        if drop.len() == excess {
+            break;
+        }
+        if keep != Some(agent.id.as_str()) {
+            drop.insert(ix);
+        }
+    }
+    all.partition(|ix| !drop.contains(ix))
 }
 
 /// The subagents of the latest turn, in the order it started them.
@@ -759,18 +964,34 @@ pub fn subagents(rows: &[crate::transcript::Row]) -> Vec<Subagent> {
         .iter()
         .rposition(|row| row.is_prompt() && row.first)
         .map_or(0, |at| at + 1);
+    subagents_from(rows, start)
+}
+
+/// The subagents among the rows from `start` on. A message steered into a
+/// running turn belongs to that turn, so the caller starts from the turn itself.
+pub fn subagents_from(rows: &[crate::transcript::Row], start: usize) -> Vec<Subagent> {
+    let start = start.min(rows.len());
     rows[start..]
         .iter()
-        .filter(|row| row.role == "tool")
-        .filter_map(|row| {
-            let call: super::ToolCall = serde_json::from_str(&row.text).ok()?;
+        .enumerate()
+        .filter(|(_, row)| row.role == "tool" && row.first)
+        .filter_map(|(at, _)| {
+            // A long call's JSON runs on over the rows after its first.
+            let chunks = rows[start + at..]
+                .iter()
+                .enumerate()
+                .take_while(|(ix, row)| *ix == 0 || !row.first);
+            let text: String = chunks.map(|(_, row)| row.text.as_str()).collect();
+            let call: super::ToolCall = serde_json::from_str(&text).ok()?;
             let Some(Panel::Agent(run)) = call.panel() else {
                 return None;
             };
             Some(Subagent {
-                running: call.state == super::ToolState::Running,
+                running: call.state == ToolState::Running,
                 id: call.id,
-                run,
+                run: *run,
+                tool_state: call.state,
+                source: text,
             })
         })
         .collect()

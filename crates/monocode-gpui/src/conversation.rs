@@ -20,7 +20,8 @@ mod prompt_cache;
 mod remote;
 pub(crate) mod remote_plans;
 mod response_menu;
-mod subagent_dock;
+pub(crate) mod subagent_dock;
+mod subagent_sheet;
 #[cfg(test)]
 mod submission_tests;
 mod title;
@@ -130,6 +131,8 @@ struct OpenMenu {
 use prompt_cache::PromptCacheWarning;
 use response_menu::ResponseMenu;
 pub(crate) struct SessionChanged;
+/// Something the sidebar shows about the turn's runs has changed.
+pub(crate) struct SubagentsChanged;
 pub(crate) struct ChooseFolder(pub(crate) AnchorSlot);
 /// The review card asked to open the session's recorded changes.
 pub(crate) struct OpenSessionChanges(pub(crate) crate::review::ReviewTab);
@@ -174,7 +177,7 @@ pub(crate) struct Conversation {
     /// The running turn's policy, independent of the next composer's mode.
     pub(crate) app_read_only: bool,
     status: String,
-    loaded: bool,
+    pub(crate) loaded: bool,
     history_unloaded: bool,
     history_actions: std::collections::VecDeque<history::HistoryAction>,
     pending_search: Option<(usize, String)>,
@@ -215,8 +218,8 @@ pub(crate) struct Conversation {
     tokens_hovered: bool,
     /// A continued chat's card shows the recap that goes out with its first message.
     handoff_context_open: bool,
-    /// The subagent dock lists each running subagent.
-    subagents_open: bool,
+    subagent_dock: subagent_dock::Dock,
+    subagent_sheet: subagent_sheet::SubagentSheet,
     prompt_cache: PromptCacheWarning,
     /// The submit button's morph between square and labelled pill.
     send_morph: std::cell::RefCell<crate::send_morph::Morph>,
@@ -679,7 +682,8 @@ impl Conversation {
             context_hovered: false,
             tokens_hovered: false,
             handoff_context_open: false,
-            subagents_open: false,
+            subagent_dock: Default::default(),
+            subagent_sheet: Default::default(),
             prompt_cache: PromptCacheWarning::default(),
             send_morph: Default::default(),
             send_alternate: false,
@@ -1306,6 +1310,7 @@ impl Conversation {
                                 v.stop_streaming(cx);
                             }
                         });
+                        this.note_subagents_changed(cx);
                         if let Some(id) = update.provider_turn_id {
                             this.transcript
                                 .update(cx, |view, _| view.record_provider_turn(id));
@@ -1522,6 +1527,7 @@ impl Conversation {
                             this.refresh_git(cx);
                             this.run_history_actions(cx);
                             this.mono_flush_external(cx);
+                            this.note_subagents_changed(cx);
                             cx.emit(SessionChanged);
                         } else if incoming_notification_input
                             || mono_queue_changed
@@ -1564,6 +1570,7 @@ impl Conversation {
 }
 
 impl EventEmitter<SessionChanged> for Conversation {}
+impl EventEmitter<SubagentsChanged> for Conversation {}
 impl EventEmitter<ChooseFolder> for Conversation {}
 impl EventEmitter<OpenSessionChanges> for Conversation {}
 impl EventEmitter<OpenSession> for Conversation {}
@@ -2755,6 +2762,7 @@ impl Conversation {
         self.status = "Ready".into();
         self.transcript
             .update(cx, |view, cx| view.stop_streaming(cx));
+        self.note_subagents_changed(cx);
         self.review
             .update(cx, |review, cx| review.set_busy(false, cx));
         cx.emit(SessionChanged);
@@ -2844,10 +2852,10 @@ impl Conversation {
             .child(self.composer_anchor.probe())
             .children(menu)
             .children(self.model_list_popover(cx))
+            .children(self.subagent_dock(window, cx))
             .children(if self.is_remote() { None } else { self.usage_notice(false, cx) })
             .child(self.changes_shelf(window, cx))
             .child(self.background_shelf(window, cx))
-            .children(self.subagent_dock(cx))
             .child(self.message_queue(window, cx))
             .children(if self.is_remote() { None } else { self.auth_notice(cx) })
             .when(self.settings.worktree_removed,|d|d.child(div().mb_2().p_3().rounded_lg().border_1().border_color(content(0.1)).flex().items_center().gap_3().text_size(px(12.)).child(div().flex_1().child("Worktree deleted. Select a branch or worktree to continue this conversation.")).child(tool_pill("reattach-worktree","Select worktree").child("Select worktree").on_click(cx.listener(|this,_,window,cx|this.open_git(GitMode::Worktree,window,cx))))))
@@ -3950,6 +3958,12 @@ impl Render for Conversation {
                         cx.stop_propagation();
                         return;
                     }
+                    // SubagentSheet: Esc folds the open run back onto its card.
+                    if this.subagent_sheet_open() {
+                        this.close_subagent_sheet(cx);
+                        cx.stop_propagation();
+                        return;
+                    }
                     // BtwSheet: Esc anywhere in this pane folds an open sheet away.
                     if let Some(btw) = this.btw.clone()
                         && btw.update(cx, |btw, cx| btw.dismiss(window, cx))
@@ -4042,6 +4056,7 @@ impl Render for Conversation {
                             }),
                     ),
             )
+            .children(self.subagent_sheet(window, cx))
             .when_some(self.btw.as_ref(), |d, sheet| d.child(sheet.clone()))
             .children(self.remote_plan_reader(cx))
             .into_any()

@@ -14,7 +14,7 @@ mod idle_agents;
 mod image_lightbox_tests;
 mod layout;
 mod linked_panel;
-mod live_agents;
+pub(crate) mod live_agents;
 mod mobile_host;
 mod mono_panes;
 pub(crate) mod monos;
@@ -48,6 +48,7 @@ mod settings;
 mod shortcuts;
 mod sidebar_list;
 mod sidebar_peek;
+mod subagent_tree;
 mod terminal_dock;
 mod terminal_panes;
 use terminal_panes::terminal_drag_ghost;
@@ -57,7 +58,7 @@ mod window_chrome;
 mod worktrees;
 
 use crate::{
-    conversation::{Conversation, SessionChanged},
+    conversation::{Conversation, SessionChanged, SubagentsChanged},
     input,
     notes::Notes,
     pane_layout::{Edge, LayoutLeaf, Rect, SplitDir},
@@ -638,6 +639,7 @@ pub(crate) struct Shell {
     classic_session_search: Entity<input::Input>,
     classic_worktree_picker: Option<classic_sidebar::WorktreePicker>,
     sidebar_list: sidebar_list::SidebarList,
+    subagent_trees: subagent_tree::SubagentTrees,
     sidebar_slide: Option<PaneSlide>,
     sidebar_fraction: f32,
     /// Settings' own nav collapse, apart from the project sidebar's saved
@@ -1052,6 +1054,7 @@ impl Shell {
             classic_session_search,
             classic_worktree_picker: None,
             sidebar_list: sidebar_list::SidebarList::new(cx),
+            subagent_trees: Default::default(),
             sidebar_slide: None,
             sidebar_fraction: if workspace.sidebar_visible { 1. } else { 0. },
             settings_nav_visible: true,
@@ -1407,6 +1410,8 @@ impl Shell {
             view.update(cx, |v, cx| {
                 if shown.contains(&id) {
                     v.load(cx);
+                } else {
+                    v.drop_subagent_sheet(cx);
                 }
                 v.transcript
                     .update(cx, |t, cx| t.visible(shown.contains(&id), cx))
@@ -1448,6 +1453,10 @@ impl Shell {
                 transcript.apply_preferences(&self.workspace.preferences, cx)
             });
         });
+        self.observations
+            .push(cx.subscribe(&view, |this, _, _: &SubagentsChanged, cx| {
+                this.notify_sidebar(cx);
+            }));
         self.observations
             .push(cx.subscribe(&view, move |this, _, _: &SessionChanged, cx| {
                 let Some(view) = this.sessions.get(&id) else {
