@@ -26,7 +26,7 @@ impl Shell {
     pub(super) fn new_projectless_chat(&mut self, cx: &mut Context<Self>) {
         self.workspace.rail_chats_collapsed = false;
         self.workspace.project = "~".into();
-        self.create(self.default_kind(), cx);
+        self.new_chat(cx);
         self.invalidate_chrome(cx);
     }
     pub(super) fn rail_chats(&mut self, cx: &mut Context<Self>) -> AnyElement {

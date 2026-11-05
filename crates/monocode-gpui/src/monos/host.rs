@@ -12,7 +12,6 @@ enum Effect {
         Box<Settings>,
         String,
         bool,
-        bool,
         Option<(i64, crate::pane_layout::Edge)>,
     ),
     Groups(String, Groups),
@@ -113,7 +112,7 @@ impl Monos {
                                 owner.mono_apply_groups(project, groups, cx)
                             });
                         }
-                        Effect::Start(summary, settings, _prompt, draft, reveal, placement) => {
+                        Effect::Start(summary, settings, _prompt, draft, placement) => {
                             let summary = *summary;
                             let id = summary.id;
                             let caller = call.session;
@@ -146,16 +145,18 @@ impl Monos {
                             });
                             this.save(cx);
                             this.group_launch(&mono_id, id, cx);
+                            // Like Tauri, Mono launches stay in the background
+                            // even if the agent asks to reveal a tab. Only an
+                            // explicit split places a new session in the workspace.
                             if placement.is_some() {
                                 let _ = this.owner.update(cx, |owner, cx| {
                                     owner.app_place_launch(id, placement, true, window, cx)
                                 });
-                            } else if reveal {
-                                this.open_workspace(id, window, cx);
                             }
                         }
                     }
                     this.reload_files(&mono_id, cx);
+                    this.refresh_cards(cx);
                     this.changed(cx);
                     value
                 });
@@ -251,8 +252,15 @@ impl Monos {
             self.finish_call(call, Err("Input must be a JSON object".into()), cx);
             return;
         }
-        let input = call.input.clone();
+        let mut input = call.input.clone();
         let action = call.action.clone();
+        // A session it starts without naming a model takes the one set for
+        // its sessions, if any; the receipt still keys on what it sent.
+        if action == "sessions.start"
+            && let Some(subsessions) = &mono.subsessions
+        {
+            subsessions.fill(&mut input);
+        }
         let root = self.root.clone();
         let target = mono.id.clone();
         let project = if action.starts_with("sessions.")
@@ -344,7 +352,6 @@ impl Monos {
                     }
                 };
                 let draft = flag(&input, "draft", false);
-                let reveal = flag(&input, "reveal", false);
                 let request = call.request_id.clone();
                 self.call_work(
                     call,
@@ -385,7 +392,6 @@ impl Monos {
                                 Box::new(settings),
                                 prompt,
                                 draft,
-                                reveal,
                                 placement,
                             ),
                         ))

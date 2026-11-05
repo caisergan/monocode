@@ -1,7 +1,7 @@
-// The right panel's peek, the sidebar's mirror: in the inset layout a closed
-// right panel slides out over the workspace while the pointer rests on the
-// window's right edge or on the panel toggle, and puts itself away once the
-// pointer leaves it.
+// The right panel's peek, the sidebar's mirror: in the Focused layout (rounded
+// or boxy) a closed right panel slides out over the workspace while the pointer
+// rests on the window's right edge or on the panel toggle, and puts itself away
+// once the pointer leaves it.
 use super::{
     Shell,
     sidebar_peek::{PEEK_CLOSE_DELAY, PEEK_DRIFT, PEEK_EDGE, PEEK_INSET, SidebarPeek},
@@ -14,10 +14,10 @@ use gpui::{
 use std::time::Instant;
 
 impl Shell {
-    /// Only the inset layout's closed right panel peeks, and only where it
-    /// could open.
+    /// Only the Focused layout's closed right panel peeks, rounded or boxy, and
+    /// only where it could open.
     fn panel_peek_available(&self, cx: &gpui::App) -> bool {
-        !self.workspace.boxy_layout()
+        !self.workspace.classic_layout
             && !self.workspace.right_panel_open
             && self.right_slide.is_none()
             && self.right_panel.is_some()

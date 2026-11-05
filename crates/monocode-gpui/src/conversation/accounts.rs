@@ -352,37 +352,11 @@ impl Conversation {
     pub(super) fn usage_notice(&self, mono: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
         let limit = self.settings.usage_limit.as_ref()?;
         let now = usage::now_ms();
-        let waiting = limit.resets_at.is_some_and(|at| at > now);
+        let waiting = limit.waiting(now);
         let armed = limit.resume_at_reset;
         let switching = self.account_switching;
         let kind = Kind::from_id(&self.summary.provider);
-        let reset = limit.resets_at.map(|at| {
-            if at <= now {
-                return "Limit has reset".to_owned();
-            }
-            let when = chrono::DateTime::from_timestamp_millis(at)
-                .map(|d| {
-                    let local = d.with_timezone(&chrono::Local);
-                    let today = chrono::Local::now().date_naive() == local.date_naive();
-                    local
-                        .format(if today {
-                            "%-I:%M %p"
-                        } else {
-                            "%b %-d, %-I:%M %p"
-                        })
-                        .to_string()
-                })
-                .unwrap_or_default();
-            format!(
-                "Resets {when} · in {}",
-                usage::Window {
-                    used_percent: 100.,
-                    minutes: 300,
-                    resets_at: Some(at)
-                }
-                .countdown(now)
-            )
-        });
+        let reset = usage_reset_label(limit, now);
         let mut controls = div()
             .flex()
             .when(!mono, |d| d.flex_shrink_0())
@@ -396,6 +370,7 @@ impl Conversation {
                         "Choose another model",
                         false,
                         switching,
+                        true,
                     )
                     .h(px(26.))
                     .gap(px(4.))
@@ -403,7 +378,6 @@ impl Conversation {
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(content(1.))
                     .bg(content(0.1))
-                    .hover(|s| s.bg(content(0.15)))
                     .child("Choose another model")
                     .child(icon("chevron-down", 11.).text_color(content(0.5)))
                     .when(!switching, |d| {
@@ -429,6 +403,7 @@ impl Conversation {
                     "Choose another account",
                     false,
                     switching,
+                    mono,
                 )
                 .relative()
                 .gap(px(4.))
@@ -437,7 +412,6 @@ impl Conversation {
                         .text_size(px(11.))
                         .text_color(content(1.))
                         .bg(content(0.1))
-                        .hover(|s| s.bg(content(0.15)))
                 })
                 .child(self.account_anchor.probe())
                 .child(if switching {
@@ -475,6 +449,7 @@ impl Conversation {
                     },
                     waiting && armed,
                     switching,
+                    false,
                 )
                 .when(mono && !(waiting && armed), |d| d.text_color(content(0.6)))
                 .child(
@@ -490,10 +465,9 @@ impl Conversation {
                 .when(!switching, |d| {
                     d.on_click(cx.listener(move |this, _, _, cx| {
                         if waiting {
-                            if let Some(limit) = &mut this.settings.usage_limit {
-                                limit.resume_at_reset = !limit.resume_at_reset;
-                                this.save_settings(cx);
-                                cx.notify();
+                            if let Some(limit) = &this.settings.usage_limit {
+                                let enabled = !limit.resume_at_reset;
+                                this.set_usage_resume_at_reset(enabled, cx);
                             }
                         } else {
                             this.resume_usage(cx);
@@ -506,6 +480,7 @@ impl Conversation {
                     usage_button(
                         "dismiss-usage-limit",
                         "Dismiss usage limit notice",
+                        false,
                         false,
                         false,
                     )
@@ -594,6 +569,7 @@ fn usage_button(
     label: &'static str,
     primary: bool,
     disabled: bool,
+    raised: bool,
 ) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)
@@ -619,9 +595,42 @@ fn usage_button(
         })
         .when(disabled, |d| d.opacity(0.45))
         .when(!disabled, |d| {
-            d.cursor_pointer()
-                .hover(move |s| s.bg(content(0.1)).text_color(content(1.)))
+            d.cursor_pointer().hover(move |s| {
+                s.bg(content(if raised { 0.15 } else { 0.1 }))
+                    .text_color(content(1.))
+            })
         })
+}
+
+/// Shared reset wording for desktop and its paired phone.
+pub(super) fn usage_reset_label(limit: &Limit, now: i64) -> Option<String> {
+    limit.resets_at.map(|at| {
+        if at <= now {
+            return "Limit has reset".to_owned();
+        }
+        let when = chrono::DateTime::from_timestamp_millis(at)
+            .map(|d| {
+                let local = d.with_timezone(&chrono::Local);
+                let today = chrono::Local::now().date_naive() == local.date_naive();
+                local
+                    .format(if today {
+                        "%-I:%M %p"
+                    } else {
+                        "%b %-d, %-I:%M %p"
+                    })
+                    .to_string()
+            })
+            .unwrap_or_default();
+        format!(
+            "Resets {when} · in {}",
+            usage::Window {
+                used_percent: 100.,
+                minutes: 300,
+                resets_at: Some(at)
+            }
+            .countdown(now)
+        )
+    })
 }
 
 #[cfg(test)]
