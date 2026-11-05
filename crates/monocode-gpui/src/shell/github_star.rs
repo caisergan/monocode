@@ -19,6 +19,11 @@ pub(super) struct State {
     task: Option<gpui::Task<()>>,
 }
 
+/// Fork builds never ask anyone to star the upstream repository, which is
+/// what this prompt is hardcoded to. It stays off here rather than deleted so
+/// upstream merges keep applying.
+const SHOW_PROMPT: bool = false;
+
 /// Tailwind's orange-400, the colour of the desktop prompt.
 fn orange(alpha: f32) -> gpui::Hsla {
     gpui::Hsla::from(gpui::rgb(0xfb923c)).opacity(alpha)
@@ -28,6 +33,10 @@ impl Shell {
     /// Checks once at launch, and again on each window focus when `force`,
     /// so starring in the browser hides the prompt on return.
     pub(super) fn check_github_star(&mut self, force: bool, cx: &mut Context<Self>) {
+        if !SHOW_PROMPT {
+            self.github_star.phase = Phase::Hidden;
+            return;
+        }
         if cfg!(test) {
             return;
         }
@@ -184,5 +193,24 @@ impl Shell {
                 .child(dismiss)
                 .into_any(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    #[gpui::test]
+    fn fork_builds_never_check_or_show_the_star_prompt(cx: &mut TestAppContext) {
+        let (window, _, _) = super::super::tests::window(cx);
+        window
+            .update(cx, |shell, _, cx| {
+                shell.check_github_star(true, cx);
+                assert_eq!(shell.github_star.phase, Phase::Hidden);
+                assert!(shell.github_star.task.is_none());
+                assert!(shell.github_star_prompt(cx).is_none());
+            })
+            .unwrap();
     }
 }
