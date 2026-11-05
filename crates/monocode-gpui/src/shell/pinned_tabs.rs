@@ -72,7 +72,6 @@ pub(super) struct PinDeck {
 /// What a pinned card shows.
 struct PinCard {
     tab: TitleTab,
-    face: Face,
     mark: AnyElement,
     title: SharedString,
 }
@@ -128,14 +127,14 @@ impl Shell {
                 .text_color(crate::tab_tile::tile_ink())
                 .into_any_element()
         };
-        let (face, mark, title): (Face, AnyElement, SharedString) = match tab {
+        let (mark, title): (AnyElement, SharedString) = match tab {
             TitleTab::Session(id) => {
                 let copy = self.tab_copy(*id, cx);
-                let (face, mark) = match copy.panes.get(copy.focus) {
+                let mark = match copy.panes.get(copy.focus) {
                     Some(pane) => self.pane_tile(&pane.mark, live),
-                    None => (Face::Neutral, div().into_any_element()),
+                    None => div().into_any_element(),
                 };
-                (face, mark, copy.headline.clone().into())
+                (mark, copy.headline.clone().into())
             }
             TitleTab::Mono { id, .. } => {
                 let mono = self
@@ -144,20 +143,18 @@ impl Shell {
                     .and_then(|m| m.read(cx).roster.get(id).cloned());
                 match mono {
                     Some(mono) => (
-                        Face::Neutral,
                         crate::monos::avatar::avatar(&mono.mascot, mono.color, "idle", 14., true)
                             .into_any_element(),
                         mono.label().into(),
                     ),
-                    None => (Face::Neutral, div().into_any_element(), "Mono".into()),
+                    None => (div().into_any_element(), "Mono".into()),
                 }
             }
-            TitleTab::Search => (Face::Neutral, neutral("search"), "Search".into()),
-            TitleTab::App(view) => (Face::Neutral, neutral(view.icon()), view.label().into()),
+            TitleTab::Search => (neutral("search"), "Search".into()),
+            TitleTab::App(view) => (neutral(view.icon()), view.label().into()),
         };
         PinCard {
             tab: tab.clone(),
-            face,
             mark,
             title,
         }
@@ -260,12 +257,7 @@ impl Shell {
         let plate_top = (TITLE_BAR_HEIGHT - TAB_PLATE_HEIGHT) / 2.;
         let card_elements = order.into_iter().filter_map(|ix| {
             let (card, place) = cards[ix].take()?;
-            let PinCard {
-                tab,
-                face,
-                mark,
-                title,
-            } = card;
+            let PinCard { tab, mark, title } = card;
             let selected = active.as_ref() == Some(&tab);
             let hovered = hovered_card.as_ref() == Some(&tab);
             let (open, menu, close, hover) = (tab.clone(), tab.clone(), tab.clone(), tab.clone());
@@ -284,7 +276,7 @@ impl Shell {
                     .w(px(TAB_TILE.w))
                     .h(px(TAB_TILE.h))
                     .when(place.opacity < 1., |d| d.opacity(place.opacity))
-                    .child(fan_tile(&TAB_TILE, &place, face, mark))
+                    .child(fan_tile(&TAB_TILE, &place, mark))
                     // The selected card carries a short accent bar under it,
                     // as a tab plate does with its fill.
                     .when(selected, |d| {

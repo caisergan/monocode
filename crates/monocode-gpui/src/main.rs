@@ -56,7 +56,6 @@ mod notifications;
 mod pane_layout;
 mod pane_motion;
 mod particle_text;
-mod phase_tile;
 mod pickers;
 mod popover;
 mod project_background;

@@ -1,25 +1,8 @@
-//! The icon tile on a pinned tab's card and a transcript work phase: a small
-//! raised solid rectangle, a touch wider than tall, holding one mark. Pinned
-//! cards stack into a deck, the front one on top and the rest tucked behind
-//! it, each peeking out a little further right.
+//! A pinned tab's card: a small raised solid rectangle, a touch wider than
+//! tall, holding one mark. Pinned cards stack into a deck, the front one on
+//! top and the rest tucked behind it, each peeking out a little further right.
 use crate::theme::*;
 use gpui::{AnyElement, Corners, Div, Hsla, canvas, div, prelude::*, px};
-
-/// What a tile is made of.
-#[derive(Clone, Copy)]
-pub(crate) enum Face {
-    /// A solid neutral grey, under the theme's ink or a full-colour mark.
-    Neutral,
-    /// A solid brand colour, top to bottom, under a white mark.
-    Fill(Hsla, Hsla),
-}
-
-impl Face {
-    /// A provider's brand tile, or neutral for a multicolour logo.
-    pub(crate) fn provider(provider: &str) -> Self {
-        provider_tile(provider).map_or(Self::Neutral, |(top, bottom)| Self::Fill(top, bottom))
-    }
-}
 
 pub(crate) struct TileSize {
     pub w: f32,
@@ -47,30 +30,19 @@ pub(crate) fn tab_tile_inset() -> f32 {
 }
 
 /// The whole tile surface, painted in one pass over one rect so every layer
-/// lines up: a hairline lift below it, the solid fill (brand colour or
-/// neutral), a faint sheen and the border. Every tile is opaque, so the
+/// lines up: a hairline lift below it, the solid neutral fill, a faint sheen
+/// and the border. Every tile is opaque, so the
 /// ones further back in a stack never show through it. `tilt` (degrees,
 /// clockwise) turns the card about its centre mid-shuffle; quads can't
 /// rotate, so a tilted card is painted as paths instead.
-fn surface(radius: f32, depth: usize, face: Face, lifted: f32, tilt: f32) -> impl IntoElement {
+fn surface(radius: f32, depth: usize, lifted: f32, tilt: f32) -> impl IntoElement {
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
             let light = is_light();
-            let sheen = white(match face {
-                Face::Fill(..) => 0.16,
-                Face::Neutral if light => 0.35,
-                Face::Neutral => 0.05,
-            });
-            let rim = match face {
-                // A light rim, as on an app icon.
-                Face::Fill(..) => white(0.14),
-                Face::Neutral => content(if depth == 0 { 0.1 } else { 0.06 }),
-            };
-            let (top, bottom) = match face {
-                Face::Fill(top, bottom) => (top, bottom),
-                Face::Neutral => neutral_shades(depth),
-            };
+            let sheen = white(if light { 0.35 } else { 0.05 });
+            let rim = content(if depth == 0 { 0.1 } else { 0.06 });
+            let (top, bottom) = neutral_shades(depth);
             if tilt.abs() > 0.05 {
                 paint_tilted(
                     bounds,
@@ -257,23 +229,10 @@ fn neutral_shades(depth: usize) -> (Hsla, Hsla) {
     }
 }
 
-/// One tile at `depth` in a stack (0 is the front); a shuffle passes
-/// depths in between. Each step back is smaller; the front tile alone
-/// carries the lift and the brighter border.
-fn tile(size: &TileSize, depth: f32, face: Face, mark: AnyElement) -> Div {
-    tile_lifted(size, depth, face, mark, 0., 0.)
-}
-
-/// [`tile`] partway off the stack: `lifted` 0 resting to 1 held up high,
-/// turned `tilt` degrees clockwise.
-fn tile_lifted(
-    size: &TileSize,
-    depth: f32,
-    face: Face,
-    mark: AnyElement,
-    lifted: f32,
-    tilt: f32,
-) -> Div {
+/// One tile at `depth` in a stack (0 is the front), each step back smaller;
+/// the front tile alone carries the lift and the brighter border. `lifted`
+/// runs from 0 resting to 1 held up high, turned `tilt` degrees clockwise.
+fn tile_lifted(size: &TileSize, depth: f32, mark: AnyElement, lifted: f32, tilt: f32) -> Div {
     let shrink = depth * SHRINK;
     div()
         .w(px(size.w - shrink))
@@ -285,16 +244,10 @@ fn tile_lifted(
         .child(surface(
             size.radius,
             depth.max(0.).round() as usize,
-            face,
             lifted,
             tilt,
         ))
         .child(mark)
-}
-
-/// A single mark on a tile.
-pub(crate) fn mark_tile(size: &TileSize, face: Face, mark: impl IntoElement) -> Div {
-    tile(size, 0., face, mark.into_any_element()).flex_shrink_0()
 }
 
 /// How far each of the two swapping cards in a shuffle is pulled out to
@@ -350,87 +303,13 @@ fn shuffled(from: f32, to: f32, depth: f32, t: f32) -> Shuffled {
     }
 }
 
-/// The ink for a mark on a neutral tile: white on dark, near-black on
-/// light. Coloured tiles carry white marks.
+/// The ink for a mark on a tile: white on dark, near-black on light.
 pub(crate) fn tile_ink() -> Hsla {
     if is_light() {
         black(0.85)
     } else {
         gpui::white()
     }
-}
-
-/// A work phase in the transcript ("Ran 5 commands"), sized to its 20px line.
-pub(crate) const ACTIVITY_TILE: TileSize = TileSize {
-    w: 22.,
-    h: 18.,
-    radius: 5.,
-};
-
-/// A transcript work phase's tile, coloured by the kind of work like an
-/// app icon: commands on a dark terminal tile, edits amber, reading and
-/// searching blue, sub-agents violet, the app's own visuals neutral.
-/// A work phase's tile face, its mark and the ink that suits other marks
-/// on it: white on a coloured tile, the theme's ink on a neutral one.
-pub(crate) fn activity_face(glyph: &'static str) -> (Face, AnyElement, Hsla) {
-    let fill = |top: u32, bottom: u32| Face::Fill(gpui::rgb(top).into(), gpui::rgb(bottom).into());
-    let white = |name: &'static str, side: f32| {
-        gpui::svg()
-            .path(name)
-            .size(px(side))
-            .text_color(gpui::white())
-            .into_any_element()
-    };
-    let ink: Hsla = gpui::white();
-    match glyph {
-        "terminal" => (fill(0x3A3A3C, 0x1C1C1E), white("prompt.svg", 12.), ink),
-        "pencil-line" => (fill(0xF6B44B, 0xE08A12), white("pencil-line", 12.), ink),
-        "search" => (fill(0x6AAEFF, 0x2F6FE4), white("search", 12.), ink),
-        "bot" => (fill(0xA98BF5, 0x7246E0), white("bot", 12.), ink),
-        // The app's own logo keeps its colours.
-        "monocode" => (
-            Face::Neutral,
-            crate::activity::glyph("monocode", 12.).into_any_element(),
-            tile_ink(),
-        ),
-        other => (
-            Face::Neutral,
-            icon(other, 12.).text_color(tile_ink()).into_any_element(),
-            tile_ink(),
-        ),
-    }
-}
-
-/// A tile whose mark is being pushed out to the right by `incoming` sliding
-/// in from the left, `t` (eased, 0 to 1) of the way. The tile itself holds
-/// still; only what sits on it moves.
-pub(crate) fn push_tile(
-    size: &TileSize,
-    face: Face,
-    outgoing: AnyElement,
-    incoming: AnyElement,
-    t: f32,
-) -> Div {
-    let slot = |mark: AnyElement, x: f32| {
-        div()
-            .absolute()
-            .top_0()
-            .left(px(x))
-            .w(px(size.w))
-            .h(px(size.h))
-            .flex()
-            .items_center()
-            .justify_center()
-            .child(mark)
-    };
-    let lane = div()
-        .w(px(size.w))
-        .h(px(size.h))
-        .relative()
-        .overflow_hidden()
-        .when(t < 1., |d| d.child(slot(outgoing, t * size.w)))
-        .when(t > 0., |d| d.child(slot(incoming, (t - 1.) * size.w)));
-    mark_tile(size, face, lane)
 }
 
 /// Between pinned cards once they fan out.
@@ -511,8 +390,8 @@ pub(crate) fn fan_width(size: &TileSize, count: usize, fan: f32) -> f32 {
 }
 
 /// One pinned card's tile, placed by [`fan_card`].
-pub(crate) fn fan_tile(size: &TileSize, card: &FanCard, face: Face, mark: AnyElement) -> Div {
-    tile_lifted(size, card.depth, face, mark, card.lifted, card.tilt)
+pub(crate) fn fan_tile(size: &TileSize, card: &FanCard, mark: AnyElement) -> Div {
+    tile_lifted(size, card.depth, mark, card.lifted, card.tilt)
 }
 
 #[cfg(test)]
