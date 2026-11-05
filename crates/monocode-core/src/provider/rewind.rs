@@ -45,6 +45,7 @@ pub fn rewind_last_turn(
     request: Request,
     before_turn: Option<&str>,
 ) -> Result<String, RewindError> {
+    let request = request.with_expanded_cwd();
     if !supports_rewind(request.kind) || request.settings.text_only {
         return Err("This provider does not support editing the last turn".into());
     }

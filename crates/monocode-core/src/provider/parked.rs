@@ -50,6 +50,14 @@ pub(super) struct Wire {
 impl Wire {
     pub fn spawn(command: &mut Command, request: &Request) -> Result<Self, String> {
         let mut child = command.spawn().map_err(|e| {
+            // A missing working folder fails exactly like a missing binary.
+            if let Some(folder) = command.get_current_dir().filter(|dir| !dir.is_dir()) {
+                return format!(
+                    "Cannot start {} in {}: the folder does not exist",
+                    request.kind.label(),
+                    folder.display()
+                );
+            }
             format!(
                 "Cannot start {} at {}: {e}",
                 request.kind.label(),
