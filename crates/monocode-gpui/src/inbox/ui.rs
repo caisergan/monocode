@@ -106,6 +106,25 @@ pub(crate) fn relative_time(iso: &str) -> String {
         }
     }
 }
+/// Space between entries of a detail's meta row, with a "·" in the middle.
+const META_ENTRY_GAP: f32 = 19.;
+
+/// One entry of a detail's meta row. Its "·" hangs in the gap before it, so the
+/// row's clipping hides the dot of whichever entry starts a line and wrapping
+/// never leaves a stray one at either edge.
+fn meta_entry() -> Div {
+    div().relative().min_w_0().flex().items_center().child(
+        div()
+            .absolute()
+            .top_0()
+            .bottom_0()
+            .left(px(-11.))
+            .flex()
+            .items_center()
+            .child("·"),
+    )
+}
+
 fn review_label(state: &str) -> String {
     match state.trim().to_uppercase().as_str() {
         "APPROVED" => "Approved".into(),
@@ -974,33 +993,40 @@ impl Inbox {
                         div()
                             .min_w_0()
                             .flex()
+                            .flex_wrap()
                             .items_center()
-                            .gap(px(8.))
+                            .gap_x(px(META_ENTRY_GAP))
+                            .gap_y(px(4.))
                             .overflow_hidden()
                             .text_size(px(12.))
                             .text_color(content(0.5))
-                            // People keep their names; the branch truncates first.
                             .when(!details.author.is_empty(), |d| {
-                                d.child(div().flex_shrink_0().child(avatar::person(
-                                    &item.provider,
-                                    &details.author,
-                                    &details.author_avatar_url,
-                                    16.,
-                                    window,
-                                    cx,
-                                )))
+                                d.child(
+                                    meta_entry()
+                                        .debug_selector(|| "inbox-meta-author".into())
+                                        .child(avatar::person(
+                                            &item.provider,
+                                            &details.author,
+                                            &details.author_avatar_url,
+                                            16.,
+                                            window,
+                                            cx,
+                                        )),
+                                )
                             })
                             .when(!assignees.is_empty(), |d| {
-                                d.child("·").children(assignees.iter().map(|person| {
-                                    div().flex_shrink_0().child(avatar::person(
-                                        &item.provider,
-                                        &person.login,
-                                        &person.avatar_url,
-                                        16.,
-                                        window,
-                                        cx,
-                                    ))
-                                }))
+                                d.child(meta_entry().flex_wrap().gap(px(8.)).children(
+                                    assignees.iter().map(|person| {
+                                        avatar::person(
+                                            &item.provider,
+                                            &person.login,
+                                            &person.avatar_url,
+                                            16.,
+                                            window,
+                                            cx,
+                                        )
+                                    }),
+                                ))
                             })
                             .when(
                                 item.assignees.is_empty()
@@ -1008,29 +1034,38 @@ impl Inbox {
                                         item.provider.as_str(),
                                         "github" | "gitlab" | "azuredevops"
                                     ),
-                                |d| d.child("·").child("Unassigned"),
+                                |d| d.child(meta_entry().child("Unassigned")),
                             )
                             .when(!item.created_at.is_empty(), |d| {
-                                d.child("·")
-                                    .child(format!("Created {}", relative_time(&item.created_at)))
+                                d.child(
+                                    meta_entry().child(format!(
+                                        "Created {}",
+                                        relative_time(&item.created_at)
+                                    )),
+                                )
                             })
                             .when(!item.updated_at.is_empty(), |d| {
-                                d.child("·")
-                                    .child(format!("Updated {}", relative_time(&item.updated_at)))
+                                d.child(
+                                    meta_entry().child(format!(
+                                        "Updated {}",
+                                        relative_time(&item.updated_at)
+                                    )),
+                                )
                             })
                             .when(!base_ref.is_empty() && !head_ref.is_empty(), |d| {
                                 let branch = head_ref.to_owned();
-                                d.child("·").child(
-                                    div()
-                                        .min_w_0()
-                                        .flex()
-                                        .items_center()
+                                d.child(
+                                    meta_entry()
+                                        .debug_selector(|| "inbox-meta-branches".into())
                                         .gap(px(4.))
-                                        .child(icon("git-compare", 12.).text_color(content(0.5)))
+                                        .child(div().flex_shrink_0().child(
+                                            icon("git-compare", 12.).text_color(content(0.5)),
+                                        ))
+                                        // Wraps inside its own line when even that is too narrow:
+                                        // the branches are what this row is read for.
                                         .child(
                                             div()
                                                 .min_w_0()
-                                                .truncate()
                                                 .child(format!("{base_ref} ← {head_ref}")),
                                         )
                                         .child(
@@ -1039,6 +1074,7 @@ impl Inbox {
                                                 "Copy branch name",
                                                 "response-copy",
                                             )
+                                            .flex_shrink_0()
                                             .size(px(18.))
                                             .on_click(
                                                 move |_, _, cx| {
@@ -1051,7 +1087,7 @@ impl Inbox {
                                 )
                             })
                             .when(!details.review_decision.is_empty(), |d| {
-                                d.child("·").child(review_label(&details.review_decision))
+                                d.child(meta_entry().child(review_label(&details.review_decision)))
                             }),
                     )
                     .when(!related.is_empty(), |d| {
@@ -3450,8 +3486,8 @@ impl Inbox {
 mod tests {
     use super::*;
     use gpui::{
-        AssetSource, Bounds, Render, TestAppContext, WindowBounds, WindowHandle, WindowOptions,
-        point, size,
+        AssetSource, Bounds, Render, TestAppContext, VisualTestContext, WindowBounds, WindowHandle,
+        WindowOptions, point, size,
     };
     use std::sync::{Arc, Mutex};
 
@@ -3499,6 +3535,93 @@ mod tests {
         window.update(cx, |_, _, cx| cx.notify()).unwrap();
         cx.refresh().unwrap();
         cx.run_until_parked();
+    }
+    struct HeaderFixture {
+        inbox: Entity<Inbox>,
+        item: Item,
+    }
+    impl Render for HeaderFixture {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.inbox.update(cx, |inbox, cx| {
+                div()
+                    .size_full()
+                    .child(inbox.detail_header(&self.item, window, cx))
+            })
+        }
+    }
+    #[gpui::test]
+    fn a_narrow_header_moves_the_branches_to_their_own_line_instead_of_hiding_them(
+        cx: &mut TestAppContext,
+    ) {
+        let width = px(420.);
+        let window = cx.update(|cx| {
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        point(px(0.), px(0.)),
+                        size(width, px(500.)),
+                    ))),
+                    ..Default::default()
+                },
+                |_, cx| {
+                    cx.new(|cx| {
+                        let item = Item {
+                            provider: "github".into(),
+                            kind: "pr".into(),
+                            state: "open".into(),
+                            number: 49,
+                            title: "A tab dragged in the sidebar".into(),
+                            created_at: "2026-11-05T15:00:00Z".into(),
+                            updated_at: "2026-11-05T15:00:00Z".into(),
+                            ..Default::default()
+                        };
+                        let inbox = cx.new(|cx| {
+                            let store = Arc::new(Mutex::new(
+                                monocode_core::store::Store::open(std::path::Path::new(":memory:"))
+                                    .unwrap(),
+                            ));
+                            let mut view = Inbox::new_inner(
+                                store,
+                                vec![],
+                                PathBuf::from("/private/tmp/inbox-regression"),
+                                false,
+                                cx,
+                            );
+                            view.details = Some(Details {
+                                author: "caisergan".into(),
+                                base_ref_name: "personal".into(),
+                                head_ref_name: "fix/tab-drag-flicker".into(),
+                                ..Default::default()
+                            });
+                            view
+                        });
+                        HeaderFixture { inbox, item }
+                    })
+                },
+            )
+            .unwrap()
+        });
+        let visual = &mut VisualTestContext::from_window(window.into(), cx);
+        visual.refresh().unwrap();
+        let author = visual.debug_bounds("inbox-meta-author").unwrap();
+        let branches = visual.debug_bounds("inbox-meta-branches").unwrap();
+        assert!(
+            branches.top() >= author.bottom(),
+            "branches stay beside the dates: {branches:?} vs {author:?}",
+        );
+        assert_eq!(
+            branches.left(),
+            author.left(),
+            "the wrapped line starts at the row's edge"
+        );
+        assert!(
+            branches.right() <= width,
+            "branches run out of the panel: {branches:?}"
+        );
+        assert!(
+            branches.size.width > px(100.),
+            "branches were squeezed: {branches:?}"
+        );
     }
     #[gpui::test]
     fn the_inbox_opens_scoped_to_its_project_and_labels_projects_by_appearance(
