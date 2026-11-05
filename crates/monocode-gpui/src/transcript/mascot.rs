@@ -1,7 +1,7 @@
 //! ProjectMascot / SubagentMascot: the React transcript's two-frame pixel faces.
 use crate::theme::content;
-use gpui::{AnyElement, canvas, div, prelude::*, px, rgb};
-use monocode_core::tool::ToolState;
+use gpui::{AnyElement, Hsla, SharedString, canvas, div, prelude::*, px, rgb};
+use monocode_core::tool::{ToolState, tasks::RunState};
 use std::time::Duration;
 
 type Frame = [&'static str; 8];
@@ -108,23 +108,41 @@ pub(super) fn subagent_mascot(name: &str, state: &ToolState, active: bool) -> An
         .items_center()
         .justify_center()
         .text_color(color)
-        .child(project_mascot(name, active))
+        .child(project_mascot(name, active, 12.))
         .into_any_element()
 }
 
-fn project_mascot(name: &str, active: bool) -> AnyElement {
+/// SubagentFace: the run's face, hopping while it works, faded once it stopped.
+pub(crate) fn subagent_face(name: &str, state: RunState, side: f32) -> AnyElement {
+    let color: Hsla = match state {
+        RunState::Failed => rgb(0xf87171).into(),
+        RunState::Running => content(0.75),
+        RunState::Done | RunState::Stopped => content(0.40),
+    };
+    div()
+        .size(px(side))
+        .flex_shrink_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .text_color(color)
+        .child(project_mascot(name, state == RunState::Running, side))
+        .into_any_element()
+}
+
+fn project_mascot(name: &str, active: bool, side: f32) -> AnyElement {
     // JavaScript charCodeAt iterates UTF-16 code units, rather than UTF-8 bytes
     // or Unicode scalars. Wrapping u32 arithmetic mirrors `>>> 0` exactly.
     let hash = name.encode_utf16().fold(0u32, |hash, ch| {
         hash.wrapping_mul(131).wrapping_add(u32::from(ch))
     });
     let index = hash as usize % REST.len();
-    let slot = div().size(px(12.)).flex_shrink_0();
+    let slot = div().size(px(side)).flex_shrink_0();
     if active {
         // Two poses, so the low clock rate is plenty. Reduced motion holds
         // the first pose and stops asking for frames.
         crate::pulse::looping(
-            "subagent-mascot",
+            SharedString::from(format!("subagent-mascot-{name}")),
             Duration::from_millis(460),
             crate::pulse::Rate::Low,
             move |phase| slot.child(sprite(index, phase >= 0.5)),

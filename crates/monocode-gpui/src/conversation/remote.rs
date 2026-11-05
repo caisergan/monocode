@@ -23,7 +23,7 @@ impl State {
     }
 }
 impl Conversation {
-    pub(super) fn is_remote(&self) -> bool {
+    pub(crate) fn is_remote(&self) -> bool {
         self.summary.cwd.starts_with("remote://")
     }
     /// Whether the running turn takes a message now. A remote one does when its

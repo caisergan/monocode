@@ -618,7 +618,9 @@ impl State {
                                 }
                             });
                     if matches!(call.name.as_str(), "task" | "agent" | "subagent") {
-                        call.panel = Some(Panel::Agent(AgentRun::from_input(&state["input"])));
+                        call.panel = Some(Panel::Agent(Box::new(AgentRun::from_input(
+                            &state["input"],
+                        ))));
                     }
                     AgentStep::from_tool_call(&call)
                 } else if matches!(kind, "text" | "reasoning") {
@@ -711,7 +713,7 @@ impl State {
                     if tool.panel.is_none() {
                         let mut run = AgentRun::from_input(&state["input"]);
                         run.ids.push(child.into());
-                        tool.panel = Some(Panel::Agent(run));
+                        tool.panel = Some(Panel::Agent(Box::new(run)));
                     }
                     bound_child = Some(child.to_owned());
                 }

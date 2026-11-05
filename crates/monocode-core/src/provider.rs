@@ -135,6 +135,8 @@ pub struct BackgroundTask {
     pub command: Option<String>,
     /// Unix milliseconds.
     pub started_at: u64,
+    /// Started by a subagent, so it belongs to that run's trail, not the ledge.
+    pub nested: bool,
 }
 
 fn codex_error(error: &Value, fallback: &str) -> String {
@@ -947,6 +949,7 @@ impl Protocol {
                     "user" => {
                         for block in v["message"]["content"].as_array().into_iter().flatten() {
                             if block["type"] == "tool_result" {
+                                self.note_agent_launch(&v, block, &mut events);
                                 // A background Agent's launch receipt is not its final report.
                                 if block["is_error"] != true
                                     && block["tool_use_id"].as_str().is_some_and(|id| {
@@ -977,7 +980,11 @@ impl Protocol {
                                     } else {
                                         ToolState::Completed
                                     };
+                                    let id = tool.id.clone();
                                     events.push(Event::Tool(tool.clone()));
+                                    // An inline agent reports back here and gets
+                                    // no task record of its own.
+                                    self.finish_agent_run(&id, &mut events);
                                 }
                             }
                         }
@@ -1010,6 +1017,7 @@ impl Protocol {
                             .and_then(|iterations| iterations.last())
                             .unwrap_or(&v["usage"]);
                         let used = crate::context::claude_used(last);
+                        self.note_model_windows(&v, &mut events);
                         let window = v["modelUsage"]
                             .as_object()
                             .into_iter()
@@ -1181,6 +1189,9 @@ impl Protocol {
         Ok(())
     }
     fn respond(&mut self, control: Control, stdin: &mut impl Write) -> Result<(), String> {
+        if matches!(control.decision, Decision::StopAgent) {
+            return self.stop_agent(&control.id, stdin);
+        }
         if matches!(control.decision, Decision::KeepOpen) {
             if let Some((_, _, _, question)) = self.questions.get_mut(&control.id) {
                 question.auto_resolve_at = None;
@@ -1740,6 +1751,7 @@ fn run_operation(
                     }
                 }
                 pending.extend(protocol.expire_steering());
+                pending.extend(protocol.subagent_tick());
                 pending.extend(protocol.lifecycle_tick(started, &mut stdin)?);
                 if protocol.ready() && !ready_emitted {
                     ready_emitted = true;

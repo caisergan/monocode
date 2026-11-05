@@ -9,7 +9,7 @@ mod history;
 pub(crate) use history::{HistoryPager, PreparedHistory};
 mod links;
 mod live_phase;
-mod mascot;
+pub(crate) mod mascot;
 mod measurements;
 mod mono_divider;
 mod outline;
@@ -212,6 +212,9 @@ impl UiRow {
     }
 }
 const TOP_INSET: f32 = 20.;
+/// A subagent sheet's trail sits under its tabs: `px-4 pt-1`.
+const AGENT_TRAIL_PAD: f32 = 16.;
+const AGENT_TRAIL_TOP: f32 = 4.;
 // Saved drafts are presentation rows, outside the provider transcript.
 const SAVED_DRAFT_START: usize = usize::MAX - 1;
 const BOTTOM_INSET: f32 = 40.;
@@ -758,6 +761,16 @@ pub(crate) struct TranscriptView {
     pub(crate) target_action: Option<(usize, monocode_core::response::TransferKind)>,
     document: bool,
     side_question: bool,
+    /// A subagent's sheet: its one run shows as the trail alone, always open.
+    pub(crate) agent_trail_only: bool,
+    /// The latest turn's runs, kept until the rows change: reading them means
+    /// parsing every tool call of the turn, and the sidebar asks on each frame.
+    turn_subagents: std::cell::RefCell<
+        Option<(
+            usize,
+            std::rc::Rc<Vec<monocode_core::tool::tasks::Subagent>>,
+        )>,
+    >,
     pub(crate) file_link_base: Option<String>,
     expanded: HashSet<usize>,
     agent_panels: tasks::AgentPanels,
@@ -813,6 +826,52 @@ pub(crate) struct TranscriptView {
 impl TranscriptView {
     pub(crate) fn side_question(&mut self) {
         self.side_question = true;
+    }
+    fn top_inset(&self) -> f32 {
+        if self.agent_trail_only {
+            AGENT_TRAIL_TOP
+        } else {
+            TOP_INSET
+        }
+    }
+    /// A subagent's sheet: its one run, as the trail alone with nothing around it.
+    pub(crate) fn agent_trail(&mut self) {
+        self.side_question = true;
+        self.document = true;
+        self.agent_trail_only = true;
+    }
+    /// The latest turn's subagents. A message steered into the running turn
+    /// belongs to that turn, so it is walked past.
+    pub(crate) fn subagents(&self) -> std::rc::Rc<Vec<monocode_core::tool::tasks::Subagent>> {
+        if let Some((len, runs)) = self.turn_subagents.borrow().as_ref()
+            && *len == self.source.len()
+        {
+            return runs.clone();
+        }
+        let prompt = self
+            .source
+            .iter()
+            .rposition(|row| row.is_prompt() && row.first)
+            .map_or(0, |at| at + 1);
+        let start = if self.streaming || self.live_start > 0 {
+            prompt.min(self.live_start)
+        } else {
+            prompt
+        };
+        let runs = std::rc::Rc::new(monocode_core::tool::tasks::subagents_from(
+            &self.source,
+            start,
+        ));
+        *self.turn_subagents.borrow_mut() = Some((self.source.len(), runs.clone()));
+        runs
+    }
+    /// A view of a run that began before the view did: its clock runs from then.
+    pub(crate) fn turn_started_at(&mut self, started_at: Option<u64>) {
+        let (Some(started_at), true) = (started_at, self.started.is_some()) else {
+            return;
+        };
+        let ago = monocode_core::time::now_ms().saturating_sub(started_at);
+        self.started = Instant::now().checked_sub(std::time::Duration::from_millis(ago));
     }
     pub(crate) fn activity(rows: Vec<Row>, cx: &mut Context<Self>) -> Self {
         let mut view = Self::new();
@@ -1531,7 +1590,7 @@ impl TranscriptView {
         }
         if !self.mono {
             measured.footer = f32::from(self.footer_height(window, cx));
-            let mut height = TOP_INSET
+            let mut height = self.top_inset()
                 + measured.footer
                 + measured.rows.iter().map(|(_, height)| height).sum::<f32>();
             // A short tail can still belong to a long conversation. Measure
@@ -1556,7 +1615,7 @@ impl TranscriptView {
                 Some(0.)
             } else if first >= from {
                 Some(
-                    (TOP_INSET
+                    (self.top_inset()
                         + BOTTOM_INSET
                         + measured.rows[first - from..]
                             .iter()
@@ -2531,6 +2590,8 @@ impl TranscriptView {
             target_action: None,
             document: false,
             side_question: false,
+            agent_trail_only: false,
+            turn_subagents: Default::default(),
             file_link_base: None,
             expanded: HashSet::new(),
             agent_panels: Default::default(),
@@ -2676,6 +2737,7 @@ impl TranscriptView {
         if streaming {
             self.active_provider_turn_id = None;
             self.live_start = self.source.len();
+            *self.turn_subagents.borrow_mut() = None;
             // The provider starts before its prompt arrives. Keep an ordinary
             // chat's existing spacer and scroll position until patch accepts
             // that prompt, just as React pins on lastUserId rather than busy.
@@ -2898,6 +2960,16 @@ impl TranscriptView {
     fn patch_view(&mut self, start: usize, rows: Vec<Row>, cx: &mut Context<Self>) {
         if rows.is_empty() {
             return;
+        }
+        // Text streaming into a reply leaves the turn's runs as they were.
+        let runs_of = |row: &Row| row.role == "tool" || row.is_prompt();
+        if rows.iter().any(runs_of)
+            || self.source[start.min(self.source.len())..]
+                .iter()
+                .take(rows.len())
+                .any(runs_of)
+        {
+            *self.turn_subagents.borrow_mut() = None;
         }
         assert!(
             start <= self.source.len(),
@@ -5660,7 +5732,11 @@ impl TranscriptView {
                             .w_full()
                             .max_w(px(COLUMN))
                             .min_w_0()
-                            .px(px(COLUMN_PAD))
+                            .px(px(if self.agent_trail_only {
+                                AGENT_TRAIL_PAD
+                            } else {
+                                COLUMN_PAD
+                            }))
                             .pt(px(if card && self.mono {
                                 card_top
                             } else if first && !is_tool && !prose {
@@ -5836,7 +5912,8 @@ impl TranscriptView {
     fn footer_height(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Pixels {
         let mut remaining = 0.;
         if let Some(first) = self.anchor_row() {
-            remaining = (f32::from(self.viewport.size.height) - TOP_INSET - BOTTOM_INSET).max(0.);
+            remaining =
+                (f32::from(self.viewport.size.height) - self.top_inset() - BOTTOM_INSET).max(0.);
             for ix in first..self.rows.len() {
                 if remaining <= 0. {
                     break;
@@ -6060,7 +6137,7 @@ impl Render for TranscriptView {
                         }
                     }),
                 )
-                .pt(px(TOP_INSET))
+                .pt(px(self.top_inset()))
                 .size_full(),
             )
             .child(

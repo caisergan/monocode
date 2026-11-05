@@ -476,3 +476,58 @@ mod tests {
         assert_eq!(reopened.value(later + reopened.duration), (1., 1.));
     }
 }
+
+/// A value eased between two ends on a bezier, redirected from wherever it is.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Tween {
+    from: f32,
+    pub(crate) to: f32,
+    start: Instant,
+    duration: f32,
+    ease: (f32, f32, f32, f32),
+}
+impl Tween {
+    pub(crate) fn settled(value: f32, now: Instant) -> Self {
+        Self {
+            from: value,
+            to: value,
+            start: now,
+            duration: 0.,
+            ease: (0., 0., 1., 1.),
+        }
+    }
+    pub(crate) fn toward(
+        self,
+        to: f32,
+        ms: f32,
+        ease: (f32, f32, f32, f32),
+        reduced: bool,
+        now: Instant,
+    ) -> Self {
+        if (self.to - to).abs() < f32::EPSILON {
+            return self;
+        }
+        if reduced {
+            return Self::settled(to, now);
+        }
+        Self {
+            from: self.value(now),
+            to,
+            start: now,
+            duration: ms / 1000.,
+            ease,
+        }
+    }
+    pub(crate) fn value(&self, now: Instant) -> f32 {
+        if self.duration <= 0. {
+            return self.to;
+        }
+        let t = (now.saturating_duration_since(self.start).as_secs_f32() / self.duration).min(1.);
+        let (x1, y1, x2, y2) = self.ease;
+        self.from + (self.to - self.from) * bezier(t, x1, y1, x2, y2)
+    }
+    pub(crate) fn done(&self, now: Instant) -> bool {
+        self.duration <= 0.
+            || now.saturating_duration_since(self.start).as_secs_f32() >= self.duration
+    }
+}
