@@ -53,6 +53,7 @@ impl Shell {
                     Command::Panel => window.dispatch_action(Box::new(ToggleRightPanel), cx),
                     Command::Terminal => window.dispatch_action(Box::new(ToggleTerminal), cx),
                     Command::Layout => window.dispatch_action(Box::new(ToggleLayout), cx),
+                    Command::Chats => window.dispatch_action(Box::new(ShowChats), cx),
                     Command::WorkspaceStyle => {
                         window.dispatch_action(Box::new(ToggleWorkspaceStyle), cx)
                     }

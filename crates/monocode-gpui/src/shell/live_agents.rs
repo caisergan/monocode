@@ -67,6 +67,19 @@ fn next_age_change(ms: u64) -> u64 {
 }
 
 impl Shell {
+    /// A chat without a project is working, wants an approval or has a reply
+    /// nobody has read. Nothing else shows this from inside a project.
+    pub(super) fn chats_need_attention(&self, cx: &App) -> bool {
+        self.live_agents(cx).iter().any(|agent| agent.cwd == "~")
+            || self.unseen_finished.iter().any(|id| {
+                (self.sessions.contains_key(id) || self.session_summaries.contains_key(id))
+                    && !self.deleting.contains(id)
+                    && {
+                        let summary = self.session_metadata(*id, cx).summary;
+                        summary.cwd == "~" && !summary.archived
+                    }
+            })
+    }
     fn live_agents(&self, cx: &App) -> Vec<LiveAgent> {
         let mut agents: Vec<_> = self
             .order

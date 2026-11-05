@@ -158,6 +158,11 @@ impl Shell {
         if self.workspace.project.starts_with("remote://") {
             return None;
         }
+        // Actions are a project's commands. Keep any saved here before Chats
+        // became a space of its own.
+        if self.workspace.project == "~" && self.project_actions().is_empty() {
+            return None;
+        }
         let classic = self.workspace.boxy_layout();
         let current = self.current_action().cloned();
         let menu_open = self.menu_open(&MenuTarget::Actions);

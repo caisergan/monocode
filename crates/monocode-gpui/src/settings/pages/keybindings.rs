@@ -229,6 +229,12 @@ pub(crate) const BINDINGS: &[Binding] = &[
         fixed: false,
     },
     Binding {
+        command: "Project: Chats",
+        keys: "⌘⇧H",
+        when: "!overlay && (!textFocus || emptyComposer)",
+        fixed: false,
+    },
+    Binding {
         command: "Pane: Close",
         keys: "⌘W",
         when: "Always",

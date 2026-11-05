@@ -286,7 +286,11 @@ impl Shell {
         }
         let groups = self.project_groups();
         let now = monocode_core::time::now_ms();
-        let mut rows = vec![Row::Navigation, Row::Monos];
+        let mut rows = vec![Row::Navigation];
+        // Monos belong to a project.
+        if self.workspace.project != "~" {
+            rows.push(Row::Monos);
+        }
         let mut folders = false;
         for entry in entries {
             let (members, collapsed) = match entry {
@@ -361,7 +365,11 @@ impl Shell {
         }
         if first {
             rows.push(Row::Heading {
-                label: "Sessions",
+                label: if self.workspace.project == "~" {
+                    "Chats"
+                } else {
+                    "Sessions"
+                },
                 first: true,
             });
             if entries.is_empty() {
@@ -536,6 +544,44 @@ impl Shell {
                     .into_any();
             }
             Row::ClassicGap(height) => return div().h(px(height as f32)).into_any(),
+            Row::Empty
+                if self.workspace.project == "~"
+                    && self.query.is_empty()
+                    && !self.workspace.classic_layout =>
+            {
+                div()
+                    .px_2()
+                    .py_2()
+                    .text_size(px(12.))
+                    .text_color(rgb(MUTED))
+                    .child("Chats without a project show here.")
+                    .child(
+                        div()
+                            .id("chats-empty-new")
+                            .debug_selector(|| "chats-empty-new".into())
+                            .role(Role::Button)
+                            .aria_label("New chat")
+                            .mt_2()
+                            .w_full()
+                            .h(px(28.))
+                            .px_2()
+                            .rounded_md()
+                            .flex()
+                            .items_center()
+                            .gap_1p5()
+                            .cursor_pointer()
+                            .bg(content(0.06))
+                            .text_color(content(0.8))
+                            .hover(|s| s.bg(content(0.1)))
+                            .child(icon("plus", 14.))
+                            .child("New chat")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.create_session(this.default_kind(), true, cx);
+                                this.focus_active(window, cx);
+                            })),
+                    )
+                    .into_any()
+            }
             Row::Empty => div()
                 .px_2()
                 .py_2()

@@ -204,16 +204,16 @@ mod tests {
                 assert_eq!(shell.project_label("~"), "Chats");
                 let before = shell.session_summaries.len();
                 shell.new_projectless_chat(cx);
-                (before, shell.workspace.projects.contains(&"~".to_owned()))
-            })
-            .map(|(before, listed)| {
-                assert!(!listed, "~ never joins the project rail");
                 before
             })
             .and_then(|before| {
                 cx.run_until_parked();
                 window.update(cx, move |shell, _, cx| {
                     assert_eq!(shell.session_summaries.len(), before + 1);
+                    assert!(
+                        !shell.workspace.projects.contains(&"~".to_owned()),
+                        "~ never joins the project rail"
+                    );
                     let id = shell.workspace.active.unwrap();
                     assert_eq!(shell.session_metadata(id, cx).summary.cwd, "~");
                 })

@@ -173,7 +173,7 @@ impl Shell {
             let _ = this.update_in(cx, |this, window, cx| match result {
                 Ok((summary, settings, attachments)) => {
                     let id = summary.id;
-                    if !this.workspace.projects.contains(&launch.cwd) {
+                    if launch.cwd != "~" && !this.workspace.projects.contains(&launch.cwd) {
                         this.workspace.projects.push(launch.cwd.clone());
                     }
                     this.add(summary, cx);
