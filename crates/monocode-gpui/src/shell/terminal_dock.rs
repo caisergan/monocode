@@ -740,8 +740,8 @@ impl Shell {
                                             .flex_1()
                                             .flex()
                                             .items_center()
-                                            .gap(px(crate::tab_tile::TAB_TILE_GAP))
-                                            .pl(px(crate::tab_tile::tab_tile_inset()))
+                                            .gap(px(6.))
+                                            .px_2()
                                             .pr(px(28.))
                                             .rounded_md()
                                             .text_size(px(13.))
@@ -755,7 +755,18 @@ impl Shell {
                                                     d.text_color(content(0.5))
                                                 }
                                             })
-                                            .child(crate::tab_tile::terminal_tile(agent))
+                                            .child(match agent {
+                                                Some(provider) => {
+                                                    provider_icon(provider, 14.).into_any_element()
+                                                }
+                                                None => icon("terminal", 14.)
+                                                    .text_color(if active || hovered {
+                                                        content(1.)
+                                                    } else {
+                                                        content(0.5)
+                                                    })
+                                                    .into_any_element(),
+                                            })
                                             .child(
                                                 div()
                                                     .flex_1()
@@ -850,15 +861,23 @@ impl Shell {
                                                         .w_full()
                                                         .flex()
                                                         .items_center()
-                                                        .gap(px(crate::tab_tile::TAB_TILE_GAP))
-                                                        .pl(px(crate::tab_tile::tab_tile_inset()))
-                                                        .pr_2()
+                                                        .gap(px(6.))
+                                                        .px_2()
                                                         .rounded_md()
                                                         .text_size(px(13.))
                                                         .text_color(content(0.5))
-                                                        .child(crate::tab_tile::terminal_tile(
-                                                            crate::terminal::agent_cli(&ghost),
-                                                        ))
+                                                        .child(
+                                                            match crate::terminal::agent_cli(&ghost)
+                                                            {
+                                                                Some(provider) => {
+                                                                    provider_icon(provider, 14.)
+                                                                        .into_any_element()
+                                                                }
+                                                                None => icon("terminal", 14.)
+                                                                    .text_color(content(0.5))
+                                                                    .into_any_element(),
+                                                            },
+                                                        )
                                                         .child(
                                                             div().min_w_0().truncate().child(ghost),
                                                         ),

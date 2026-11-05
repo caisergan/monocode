@@ -1,7 +1,7 @@
-//! The icon tile that stands for a tab or a session: a small raised solid
-//! rectangle, a touch wider than tall, holding one mark. A split tab
-//! stacks one tile per pane, the focused one in front and the rest tucked
-//! behind it, each peeking out a little further right.
+//! The icon tile on a pinned tab's card and a transcript work phase: a small
+//! raised solid rectangle, a touch wider than tall, holding one mark. Pinned
+//! cards stack into a deck, the front one on top and the rest tucked behind
+//! it, each peeking out a little further right.
 use crate::theme::*;
 use gpui::{AnyElement, Corners, Div, Hsla, canvas, div, prelude::*, px};
 
@@ -34,19 +34,14 @@ pub(crate) const TAB_TILE: TileSize = TileSize {
     radius: 5.,
 };
 
-/// Between a tab's tile and its title.
-pub(crate) const TAB_TILE_GAP: f32 = 8.;
-/// Below this width a tab shows only its tile, centred.
-pub(crate) const NARROW_TAB: f32 = 40.;
-
 /// How far each tile behind sticks out past the one in front.
 const PEEK: f32 = 4.;
 /// How much smaller each tile behind is, on each axis.
 const SHRINK: f32 = 2.;
-/// Tiles drawn for one stack; further panes fold into the count.
+/// Cards drawn in the deck; further pins wait out of sight behind it.
 pub(crate) const STACK_MAX: usize = 3;
 
-/// The left inset that matches a tile's gap above and below in a tab plate.
+/// The left inset that matches a pinned card's gap above and below it.
 pub(crate) fn tab_tile_inset() -> f32 {
     (TAB_PLATE_HEIGHT - TAB_TILE.h) / 2.
 }
@@ -302,15 +297,6 @@ pub(crate) fn mark_tile(size: &TileSize, face: Face, mark: impl IntoElement) -> 
     tile(size, 0., face, mark.into_any_element()).flex_shrink_0()
 }
 
-/// One pane's tile in a stack, and where it sits before and after a
-/// focus change: 0 is the front, and [`STACK_MAX`] or more is out of sight.
-pub(crate) struct StackTile {
-    pub face: Face,
-    pub mark: AnyElement,
-    pub from: usize,
-    pub to: usize,
-}
-
 /// How far each of the two swapping cards in a shuffle is pulled out to
 /// its side, how far the outgoing one rises, and how far each tilts
 /// (degrees).
@@ -364,63 +350,6 @@ fn shuffled(from: f32, to: f32, depth: f32, t: f32) -> Shuffled {
     }
 }
 
-/// A split tab's tiles, shuffled like a deck: `t` (linear, 0 to 1) of
-/// the way from each tile's old depth to its new one. The card leaving the
-/// front is pulled out to the left, tilting back, while the card being
-/// dealt is drawn out to the right, tilting the other way; once they are
-/// apart they swap places in the deck and push back together, the new
-/// card on top. Settled, `from` equals `to`.
-pub(crate) fn tile_stack(size: &TileSize, tiles: Vec<StackTile>, t: f32) -> Div {
-    let t = t.clamp(0., 1.);
-    // Ease in and out, so cards gather speed and settle.
-    let travel = t * t * (3. - 2. * t);
-    let last = (STACK_MAX - 1) as f32;
-    let shown = tiles
-        .iter()
-        .filter(|t| t.to < STACK_MAX)
-        .count()
-        .clamp(1, STACK_MAX);
-    // (z, depth, tile): drawn from the highest z down.
-    let mut placed: Vec<(f32, f32, Div)> = tiles
-        .into_iter()
-        .filter(|t| t.from < STACK_MAX || t.to < STACK_MAX)
-        // A fully faded tile has nothing left to draw.
-        .filter_map(|tile| {
-            let (from, to) = (tile.from as f32, tile.to as f32);
-            let depth = from + (to - from) * travel;
-            // A card out of sight waits behind the last one and fades.
-            let opacity = (1. - (depth - last)).clamp(0., 1.);
-            let depth = depth.min(last);
-            let Shuffled {
-                dx,
-                dy,
-                lifted,
-                tilt,
-                z,
-            } = shuffled(from, to, depth, t);
-            let shrink = depth * SHRINK;
-            let element = tile_lifted(size, depth, tile.face, tile.mark, lifted, tilt)
-                .absolute()
-                .left(px(depth * PEEK + shrink + dx))
-                .top(px(shrink / 2. + dy))
-                .when(opacity < 1., |d| d.opacity(opacity));
-            (opacity > 0.).then_some((z, depth, element))
-        })
-        .collect();
-    placed.sort_by(|a, b| b.0.total_cmp(&a.0).then(b.1.total_cmp(&a.1)));
-    div()
-        .relative()
-        .flex_shrink_0()
-        .w(px(size.w + (shown - 1) as f32 * PEEK))
-        .h(px(size.h))
-        .children(placed.into_iter().map(|(_, _, tile)| tile))
-}
-
-/// A tab's icon on a neutral tile: app views, Search, Monos, files and diffs.
-pub(crate) fn neutral_tile(mark: impl IntoElement) -> Div {
-    mark_tile(&TAB_TILE, Face::Neutral, mark)
-}
-
 /// The ink for a mark on a neutral tile: white on dark, near-black on
 /// light. Coloured tiles carry white marks.
 pub(crate) fn tile_ink() -> Hsla {
@@ -428,36 +357,6 @@ pub(crate) fn tile_ink() -> Hsla {
         black(0.85)
     } else {
         gpui::white()
-    }
-}
-
-/// A file tab's tile: its type icon on a neutral tile, or the compare mark for a diff.
-pub(crate) fn file_tile(name: Option<&str>) -> Div {
-    neutral_tile(match name {
-        Some(name) => crate::file_icons::file_type_glyph(name, 14., tile_ink()),
-        None => icon("git-compare", 14.)
-            .text_color(tile_ink())
-            .into_any_element(),
-    })
-}
-
-/// A terminal tab's tile: the agent CLI running in it on its brand colour,
-/// or a white prompt on a dark tile, like a terminal app's icon.
-pub(crate) fn terminal_tile(agent: Option<&str>) -> Div {
-    match agent {
-        Some(provider) => mark_tile(
-            &TAB_TILE,
-            Face::provider(provider),
-            provider_glyph(provider, 14.),
-        ),
-        None => mark_tile(
-            &TAB_TILE,
-            Face::Fill(gpui::rgb(0x3A3A3C).into(), gpui::rgb(0x1C1C1E).into()),
-            gpui::svg()
-                .path("prompt.svg")
-                .size(px(13.))
-                .text_color(gpui::white()),
-        ),
     }
 }
 
@@ -552,11 +451,10 @@ pub(crate) struct FanCard {
 
 /// The deck the pinned tabs rest in, and the row they fan out into. `front`
 /// is the card on top of the deck; the rest tuck behind it in pin order,
-/// as a split tab's panes do. Fanning out, every card slides straight
+/// Fanning out, every card slides straight
 /// along into its own slot in pin order, growing back to full size.
 /// `shuffle` is the card that was on top and how far (linear, 0 to 1) the
-/// deck is through dealing `front` in its place, as a split tab's tiles
-/// shuffle.
+/// deck is through dealing `front` in its place.
 pub(crate) fn fan_card(
     size: &TileSize,
     ix: usize,
@@ -622,7 +520,7 @@ mod fan_tests {
     use super::*;
 
     #[test]
-    fn a_resting_deck_stacks_like_a_split_tab_and_spreads_into_a_row() {
+    fn a_resting_deck_stacks_and_spreads_into_a_row() {
         // At rest the front card is on top at the left; the others peek out.
         let front = fan_card(&TAB_TILE, 2, 2, 0., None);
         assert_eq!((front.x, front.depth, front.z), (0., 0., 0.));

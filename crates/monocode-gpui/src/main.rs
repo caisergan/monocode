@@ -77,7 +77,6 @@ mod review;
 mod right_panel;
 mod runtime;
 mod search;
-mod send_morph;
 mod session_mark;
 mod session_review;
 mod settings;
