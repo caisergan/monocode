@@ -289,6 +289,17 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.close_title_tabs_by(CloseBy::User, tabs, preferred, window, cx);
+    }
+
+    pub(super) fn close_title_tabs_by(
+        &mut self,
+        by: CloseBy,
+        tabs: &[TitleTab],
+        preferred: Option<TitleTab>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let panes = tabs
             .iter()
             .filter(|tab| self.workspace.title_order.contains(tab))
@@ -296,7 +307,7 @@ impl Shell {
             .flat_map(|id| self.workspace.layout(id).leaf_ids())
             .collect::<Vec<_>>();
         let tabs = tabs.to_vec();
-        self.confirm_close_terminal_panes(&panes, window, cx, move |this, window, cx| {
+        self.confirm_close_panes(by, &panes, window, cx, move |this, window, cx| {
             this.finish_close_title_tabs(&tabs, preferred, window, cx);
         });
     }

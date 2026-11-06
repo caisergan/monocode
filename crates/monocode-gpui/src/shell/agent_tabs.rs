@@ -473,6 +473,102 @@ mod tests {
             .unwrap();
     }
 
+    fn set_working(shell: &mut Shell, id: i64, cx: &mut Context<Shell>) {
+        shell.sessions[&id].update(cx, |session, _| session.busy = true);
+    }
+
+    #[gpui::test]
+    fn closing_a_working_agent_tab_asks_first(cx: &mut TestAppContext) {
+        let (window, lead, [api, docs], other) = group(cx);
+        let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        for answer in ["Cancel", "Close"] {
+            window
+                .update(visual, |shell, w, cx| {
+                    set_working(shell, api, cx);
+                    shell.close(api, w, cx);
+                    assert!(shell.workspace.tab_of(api).is_some());
+                })
+                .unwrap();
+            visual.run_until_parked();
+            assert!(visual.has_pending_prompt());
+            visual.simulate_prompt_answer(answer);
+            visual.run_until_parked();
+            let expected = if answer == "Cancel" {
+                vec![lead, api, docs, other]
+            } else {
+                vec![lead, docs, other]
+            };
+            window
+                .update(visual, |shell, _, cx| {
+                    assert_eq!(sessions(shell.strip_tabs(cx)), expected);
+                    assert!(
+                        shell.sessions[&api].read(cx).busy,
+                        "the agent keeps working without its tab"
+                    );
+                })
+                .unwrap();
+        }
+    }
+
+    #[gpui::test]
+    fn closing_an_idle_lead_asks_about_its_working_agents_once(cx: &mut TestAppContext) {
+        let (window, lead, [api, docs], other) = group(cx);
+        let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        window
+            .update(visual, |shell, w, cx| {
+                set_working(shell, api, cx);
+                set_working(shell, docs, cx);
+                shell.close(lead, w, cx);
+            })
+            .unwrap();
+        visual.run_until_parked();
+        let (message, _) = visual
+            .pending_prompt()
+            .expect("the group's work is at stake");
+        assert_eq!(message, "Close 2 working chats?");
+        visual.simulate_prompt_answer("Close");
+        visual.run_until_parked();
+        assert!(!visual.has_pending_prompt());
+        window
+            .update(visual, |shell, _, cx| {
+                assert_eq!(sessions(shell.strip_tabs(cx)), [other]);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn close_others_asks_once_and_a_lead_closing_its_agent_never_asks(cx: &mut TestAppContext) {
+        let (window, lead, [api, docs], other) = group(cx);
+        let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        window
+            .update(visual, |shell, w, cx| {
+                set_working(shell, api, cx);
+                shell.close_pane_for_app(api, w, cx);
+                assert_eq!(sessions(shell.strip_tabs(cx)), [lead, docs, other]);
+            })
+            .unwrap();
+        visual.run_until_parked();
+        assert!(!visual.has_pending_prompt());
+        window
+            .update(visual, |shell, w, cx| {
+                set_working(shell, docs, cx);
+                set_working(shell, other, cx);
+                shell.run_title_tab_menu(TitleTab::Session(lead), "others", w, cx);
+            })
+            .unwrap();
+        visual.run_until_parked();
+        let (message, detail) = visual.pending_prompt().expect("two chats are working");
+        assert_eq!(message, "Close 2 working chats?");
+        assert_eq!(detail.matches('•').count(), 2);
+        visual.simulate_prompt_answer("Close");
+        visual.run_until_parked();
+        window
+            .update(visual, |shell, _, cx| {
+                assert_eq!(sessions(shell.strip_tabs(cx)), [lead]);
+            })
+            .unwrap();
+    }
+
     #[gpui::test]
     fn a_lead_carries_its_group_and_an_agent_stays_inside_it(cx: &mut TestAppContext) {
         let (window, lead, [api, docs], other) = group(cx);

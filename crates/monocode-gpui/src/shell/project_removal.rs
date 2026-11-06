@@ -167,7 +167,7 @@ impl Shell {
             .filter(|pane| sessions.contains(&self.workspace.session_for_pane(*pane)))
             .collect();
         for pane in panes {
-            self.close_pane(pane, window, cx);
+            self.close_pane_for_app(pane, window, cx);
         }
         self.workspace.projects.retain(|p| p != path);
         self.workspace.project_rail_pinned.remove(path);

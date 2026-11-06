@@ -120,7 +120,7 @@ impl Shell {
                             }
                             this.refresh_session_mark(id, cx);
                             if this.workspace.tab_of(id).is_some() {
-                                this.close_pane(id, window, cx);
+                                this.close_pane_for_app(id, window, cx);
                             }
                         }
                     }
