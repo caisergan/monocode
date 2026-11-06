@@ -8519,10 +8519,14 @@ impl Render for Shell {
             git.set_polling(poll_git && git.available(), cx)
         });
         if let Some(panel) = &self.right_panel {
-            let classic = self.workspace.boxy_layout();
+            let inset = if self.workspace.boxy_layout() && !self.panel_peek_showing(cx) {
+                TITLE_BAR_HEIGHT
+            } else {
+                0.
+            };
             let tab_width = self.project_tabs_width(cx);
             panel.update(cx, |p, cx| {
-                p.set_top_inset(if classic { TITLE_BAR_HEIGHT } else { 0. }, cx);
+                p.set_top_inset(inset, cx);
                 p.set_tab_width(tab_width, cx);
                 p.set_show_excluded(self.workspace.preferences.show_excluded_files, cx);
             });
@@ -8544,7 +8548,10 @@ impl Render for Shell {
                 monos.set_original_chrome(self.workspace.classic_layout, cx)
             });
             let details = monos.read(cx).details.clone();
-            let inset = if self.workspace.boxy_layout() && !self.workspace.classic_layout {
+            let inset = if self.workspace.boxy_layout()
+                && !self.workspace.classic_layout
+                && !self.panel_peek_showing(cx)
+            {
                 TITLE_BAR_HEIGHT
             } else {
                 0.
@@ -11058,6 +11065,44 @@ mod tests {
         cx.simulate_mouse_move(edge, None, Default::default());
         cx.run_until_parked();
         assert!(!open(cx));
+    }
+    #[gpui::test]
+    fn boxy_peek_card_does_not_clear_the_title_bar_twice(cx: &mut TestAppContext) {
+        let (window, _, _) = window(cx);
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        cx.run_until_parked();
+        let viewport = window
+            .update(cx, |shell, _, cx| {
+                shell.workspace.new_layout_boxy = true;
+                shell.layout_changed(cx);
+                shell.viewport_width
+            })
+            .unwrap();
+        cx.run_until_parked();
+        let inset = |cx: &mut gpui::VisualTestContext| {
+            window
+                .update(cx, |shell, _, cx| {
+                    shell.right_panel.as_ref().unwrap().read(cx).top_inset()
+                })
+                .unwrap()
+        };
+        assert_eq!(inset(cx), TITLE_BAR_HEIGHT);
+        cx.simulate_mouse_move(
+            gpui::point(px(viewport - 2.), px(300.)),
+            None,
+            Default::default(),
+        );
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("right-panel-peek").is_some());
+        assert_eq!(inset(cx), 0.);
+        // Opening from the peek puts the panel back under the title bar.
+        window
+            .update(cx, |shell, window, cx| shell.toggle_right_panel(window, cx))
+            .unwrap();
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("right-panel-peek").is_none());
+        assert_eq!(inset(cx), TITLE_BAR_HEIGHT);
     }
     #[gpui::test]
     fn boxy_collapsed_sidebar_peeks_too(cx: &mut TestAppContext) {

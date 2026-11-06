@@ -31,6 +31,13 @@ impl Shell {
         self.panel_peek.as_ref().is_some_and(|peek| peek.open)
     }
 
+    /// The card floats below the title bar and heads itself, so the panel has
+    /// no title bar to clear while it peeks. Asks what `panel_peek_watch` will
+    /// conclude, so a panel opening from its peek clears the bar straight away.
+    pub(super) fn panel_peek_showing(&self, cx: &gpui::App) -> bool {
+        self.panel_peek.is_some() && self.panel_peek_available(cx)
+    }
+
     pub(super) fn set_panel_peek(
         &mut self,
         open: bool,
