@@ -762,7 +762,7 @@ impl Shell {
         }
         self.refresh_session_mark(id, cx);
         if self.workspace.tab_of(id).is_some() {
-            self.close_pane(id, window, cx);
+            self.close_pane_for_app(id, window, cx);
         }
         let name = call.input["name"].clone();
         let store = self.store.clone();

@@ -30,55 +30,6 @@ pub(super) fn terminal_drag_ghost(position: Point<Pixels>, title: String) -> Any
 }
 
 impl Shell {
-    /// Pane and title-tab closes must ask before dropping a running shell,
-    /// just like closing a terminal in the dock.
-    pub(super) fn confirm_close_terminal_panes(
-        &mut self,
-        panes: &[i64],
-        window: &mut Window,
-        cx: &mut Context<Self>,
-        close: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) + 'static,
-    ) {
-        let running = panes
-            .iter()
-            .filter_map(|pane| self.terminal_pane_views.get(pane))
-            .filter_map(|terminal| {
-                let terminal = terminal.read(cx);
-                let process = terminal.foreground.as_deref()?;
-                Some((project_name(&terminal.cwd), process.to_owned()))
-            })
-            .collect::<Vec<_>>();
-        let message = match running.as_slice() {
-            [] => {
-                close(self, window, cx);
-                return;
-            }
-            [(label, process)] => {
-                format!("\"{process}\" is still running in {label}. Close this terminal anyway?")
-            }
-            many => format!(
-                "These terminals are still running:\n{}\n\nClose them anyway?",
-                many.iter()
-                    .map(|(label, process)| format!("• {label} ({process})"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            ),
-        };
-        let answer = window.prompt(
-            gpui::PromptLevel::Warning,
-            &message,
-            None,
-            &["Close", "Cancel"],
-            cx,
-        );
-        cx.spawn_in(window, async move |this, cx| {
-            if matches!(answer.await, Ok(0)) {
-                let _ = this.update_in(cx, close);
-            }
-        })
-        .detach();
-    }
-
     /// A terminal pane's shell, reopened in its directory after a restart.
     fn terminal_pane_view(
         &mut self,
