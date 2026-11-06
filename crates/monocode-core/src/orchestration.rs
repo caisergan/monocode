@@ -828,7 +828,7 @@ Each agent sees only its prompt, none of your conversation: say what to do, what
 agents.start {name, prompt, title?, harness?, model?, effort?, modelSettings?, runtimeMode?, workspace?, base?, checkout?, reveal?}
   Start an agent on prompt. workspace "worktree" (default) gives it its own git worktree, in the <repo>-worktrees folder beside the repository, on branch mc/agent-<name>-<sessionId> from base (a branch or commit; default: your checkout's HEAD); "shared" runs it in your checkout; checkout reuses an existing worktree path (worktrees.list). The result names its checkout and branch. harness is claude, codex, ….
   model: an alias or ID from models.list (an alias's resolvesTo names the model it runs today), or for claude and codex any model ID their CLI takes, such as claude-haiku-4-5 or claude-opus-4-6[1m]. effort: claude takes low, medium, high, xhigh, max, ultrathink or ultracode; codex takes none, minimal, low, medium, high or xhigh. Without effort, a model from models.list (an alias, or the ID its resolvesTo names) runs at the default it shows there, and any other model at its CLI's default. modelSettings takes other values from models.list.
-  runtimeMode: read-only, supervised (asks before changes), auto-accept-edits, auto or full-access. The agent inherits your model with its effort, your access policy and your account unless you set them. reveal opens it in a tab.
+  runtimeMode: read-only, supervised (asks before changes), auto-accept-edits, auto or full-access. The agent inherits your model with its effort, your access policy and your account unless you set them. It opens as a tab beside yours without taking the user's focus; reveal selects that tab.
 agents.list {}
   Every agent: name, sessionId, state, since, checkout, branch, harness, model, resolvedModel (once an alias resolved to another ID), effort, runtimeMode, needsInput (its pending requests), error, queuedMessages or heldMessages. A field without a value is left out. Also closedAgents, how many are closed, and closedAgentNames, the closed agents agents.read can still read.
 agents.read {name, view?, maxChars?, before?, limit?}
@@ -844,7 +844,7 @@ agents.answer {name, requestId?, answers | skip:true}
 agents.stop {name}
   Stop its running turn and hold its queued messages.
 agents.open {name}
-  Open its chat in a tab for the user, for example when you ask them to look at it.
+  Select its tab for the user, for example when you ask them to look at it.
 agents.close {name}
   Stop it and archive its session. agents.read can still read it; the other actions cannot reach it. Its worktree and branch stay; remove them with git when merged.
 

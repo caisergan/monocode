@@ -808,6 +808,26 @@ impl Workspace {
         }
         self.active = Some(id);
     }
+    /// Give a session its own tab right after tab `after`, leaving the
+    /// selection where it is.
+    pub fn add_tab_beside(&mut self, id: i64, after: i64) {
+        if self.tab_of(id).is_some() {
+            return;
+        }
+        let tab_at = self
+            .tabs
+            .iter()
+            .position(|tab| *tab == after)
+            .map_or(self.tabs.len(), |ix| ix + 1);
+        self.tabs.insert(tab_at, id);
+        let entry = TitleTab::Session(after);
+        let title_at = self
+            .title_order
+            .iter()
+            .position(|tab| *tab == entry)
+            .map_or(self.title_order.len(), |ix| ix + 1);
+        self.title_order.insert(title_at, TitleTab::Session(id));
+    }
     /// Close the whole title tab holding `id`; its sessions keep running.
     pub fn close(&mut self, id: i64) {
         let Some(tab) = self.tab_of(id) else {

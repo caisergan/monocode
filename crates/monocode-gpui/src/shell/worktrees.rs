@@ -24,6 +24,11 @@ impl Shell {
             .unwrap_or(&session.summary.cwd)
     }
     pub(super) fn in_worktree_scope(&self, id: i64, cx: &App) -> bool {
+        // An agent works in a worktree of its own but sits beside its lead,
+        // so its tab shows wherever the lead's does.
+        let id = self
+            .agent_anchor_tab(self.workspace.session_for_pane(id))
+            .map_or(id, |tab| self.workspace.tab_focus(tab));
         let scope = self
             .workspace
             .tab_of(id)
@@ -44,6 +49,10 @@ impl Shell {
         // Opening a saved chat must not silently narrow the sidebar. Only an
         // explicit workspace selection changes that project-wide filter.
         if let Some(tab) = self.workspace.tab_of(id) {
+            self.workspace.tab_workspaces.insert(tab, path.clone());
+        }
+        // Opening an agent brings its lead's tab along, so the group stays whole.
+        if let Some(tab) = self.agent_anchor_tab(id) {
             self.workspace.tab_workspaces.insert(tab, path.clone());
         }
         self.worktree_returns.insert((project, path), id);

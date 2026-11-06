@@ -1,4 +1,5 @@
 use super::*;
+use crate::workspace::TitleTab;
 use gpui::{TestAppContext, WindowHandle};
 use monocode_core::agent::{Approval, Settings};
 use std::sync::mpsc;
@@ -162,6 +163,60 @@ fn an_ordinary_thread_delegates_and_its_first_agent_makes_it_the_lead(cx: &mut T
                 .starts_with("Agents cannot use MonoCode app actions")
         );
     }
+}
+
+#[gpui::test]
+fn a_started_agent_opens_as_a_tab_beside_its_lead_and_leaves_with_close(cx: &mut TestAppContext) {
+    let (window, _, lead) = lead(cx);
+    let start = |name: &str, extra: Value, cx: &mut TestAppContext| {
+        let mut input = json!({"name":name,"prompt":"Do it","workspace":"shared"});
+        input
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        let started = call(window, lead, name, "agents.start", input, cx).unwrap();
+        started["sessionId"].as_i64().unwrap()
+    };
+    let tabs = |cx: &mut TestAppContext| {
+        window
+            .update(cx, |shell, _, cx| {
+                shell
+                    .strip_tabs(cx)
+                    .iter()
+                    .filter_map(TitleTab::session)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap()
+    };
+    let active = |cx: &mut TestAppContext| {
+        window
+            .update(cx, |shell, _, _| shell.workspace.active.unwrap())
+            .unwrap()
+    };
+    let api = start("api", json!({}), cx);
+    let docs = start("docs", json!({}), cx);
+    assert_eq!(tabs(cx), [lead, api, docs]);
+    assert_eq!(active(cx), lead, "a new agent leaves the lead in view");
+
+    let web = start("web", json!({"reveal":true}), cx);
+    assert_eq!(tabs(cx), [lead, api, docs, web]);
+    assert_eq!(active(cx), web, "reveal still opens it");
+
+    window
+        .update(cx, |shell, w, cx| shell.open(lead, w, cx))
+        .unwrap();
+    cx.run_until_parked();
+    call(
+        window,
+        lead,
+        "close",
+        "agents.close",
+        json!({"name":"docs"}),
+        cx,
+    )
+    .unwrap();
+    assert_eq!(tabs(cx), [lead, api, web]);
+    assert_eq!(active(cx), lead);
 }
 
 #[gpui::test]

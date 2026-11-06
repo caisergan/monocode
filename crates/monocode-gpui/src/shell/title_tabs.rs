@@ -406,8 +406,11 @@ impl Shell {
         let Some(from) = visible.iter().position(|entry| entry == tab) else {
             return;
         };
-        let entry = visible.remove(from);
-        visible.insert(to.min(visible.len()), entry);
+        // A lead carries its group; `to` is where the first of them lands.
+        let (block, _) = self.drag_extent(&visible, from);
+        let entries: Vec<_> = visible.drain(block).collect();
+        let at = to.min(visible.len());
+        visible.splice(at..at, entries);
         let set: HashSet<_> = visible.iter().cloned().collect();
         let mut ordered = visible.into_iter();
         for entry in &mut self.workspace.title_order {
@@ -415,12 +418,7 @@ impl Shell {
                 *entry = ordered.next().unwrap();
             }
         }
-        self.workspace.tabs = self
-            .workspace
-            .title_order
-            .iter()
-            .filter_map(TitleTab::session)
-            .collect();
+        self.settle_agent_tabs();
     }
 }
 

@@ -34,6 +34,19 @@ scopes on its own.
   Each can be opened and talked to directly. The rail's Stop stops the
   agent's turn like its own Stop button; the lead hears about it. Deleting an
   agent's session closes it for its lead.
+- Each new agent also opens as a tab attached to its lead in the title strip,
+  without taking focus (`reveal: true` selects it). One outline frames the lead
+  and its agents, and only the selected tab has a fill (`shell/agent_tabs.rs`).
+  Agents show their short names while the lead or an agent is in view, and fold
+  to their marks otherwise or when the strip runs out of room. An agent's tab
+  follows its lead's worktree scope, also when the agent has a worktree of its
+  own. Dragging the lead moves the group, and an agent reorders inside it.
+  Closing an agent's tab leaves it running and on the rail, and it does not
+  come back by itself; opening it from the rail puts it back in the group.
+  Closing the lead's tab closes the group's tabs with every agent still
+  running, and opening the lead again restores them. With the lead pinned, its
+  agents stay framed at the start of the strip. A lead whose tab is closed gets
+  no tab for a new agent, and an agent split into a pane leaves the group.
 - A lead keeps its orchestrator mark (the `share` glyph, "Orchestrator, 1
   agent, 3 past") and its rail for good, also after every agent closed and
   across restarts: the roster is saved per lead. Closed agents fold under
@@ -62,7 +75,7 @@ prints the reference (`orchestration::HELP`).
 | `agents.wait {names?, until?, timeoutSeconds?}` | Returns unreported events, waiting up to 45 s for one. Returned events are not sent again as a wake-up. |
 | `agents.approve {name, requestId?, decision}` / `agents.answer {name, requestId?, answers \| skip}` | Decide an agent's approval or question through the same path as its cards. Request ids are the plain provider ids; the user can decide the same request in the agent's chat or an approval toast, and a request decided there is no longer pending. `session` (the card's "Allow for this session") sends Claude back its own permission suggestions with every destination set to `session`, and `needsInput` lists them as `sessionAllows` (`Bash(python3 -c 'print(1)')`, `acceptEdits mode`). Claude suggests a Bash rule for that exact command or its prefix, so a different command asks again. Claude's suggestions target `localSettings`; sent as they came, they were saved in the project's `.claude/settings.local.json`, for a worktree in the main checkout's. Without a suggestion, a Claude request does not offer `session`. |
 | `agents.stop {name}` / `agents.close {name}` | Stop the turn and hold queued messages; close also archives the session, which `agents.read` can still read. Worktrees stay. |
-| `agents.open {name}` | Open the agent's chat in a tab for the user. |
+| `agents.open {name}` | Select the agent's tab, opening it if the user closed it. |
 
 States: `starting`, `working`, `blocked`, `idle`, `stopped`, `failed`,
 `usageLimited`.
