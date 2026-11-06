@@ -72,6 +72,29 @@ impl Shell {
             })
             .ok_or_else(|| format!("No open agent is named {name}; run agents.list"))
     }
+    /// The newest closed agent with this name whose session still exists, and
+    /// how its work ended. Closing frees a name, so several can share one.
+    fn closed_agent_named(&self, lead: i64, name: &str) -> Result<(i64, Option<String>), String> {
+        let mut named = self
+            .orchestration_summaries
+            .get(&lead)
+            .into_iter()
+            .flat_map(|summary| summary.tasks.iter().rev())
+            .filter(|t| !t.open() && t.name == name)
+            .peekable();
+        if named.peek().is_none() {
+            return Err(format!(
+                "No open or closed agent is named {name}; run agents.list"
+            ));
+        }
+        named
+            .find_map(|t| {
+                t.session
+                    .filter(|id| self.session_summaries.contains_key(id))
+                    .map(|id| (id, t.outcome.clone()))
+            })
+            .ok_or_else(|| format!("The session of closed agent {name} was deleted"))
+    }
     fn agent_state(&self, session: i64, cx: &App) -> (State, u64) {
         if let Some(watch) = self.orchestrations.watches.get(&session) {
             return (watch.state, watch.since);
@@ -496,17 +519,38 @@ impl Shell {
             })
             .collect();
         let closed = tasks.iter().filter(|t| !t.open()).count();
-        json!({"agents":agents,"closedAgents":closed,"unreportedEvents":unreported})
+        let mut readable: Vec<&str> = Vec::new();
+        for task in tasks
+            .iter()
+            .rev()
+            .filter(|t| !t.open() && !t.name.is_empty())
+        {
+            if task
+                .session
+                .is_some_and(|id| self.session_summaries.contains_key(&id))
+                && !readable.contains(&task.name.as_str())
+            {
+                readable.push(&task.name);
+            }
+        }
+        json!({"agents":agents,"closedAgents":closed,"closedAgentNames":readable,"unreportedEvents":unreported})
     }
 
     fn read_agent(&mut self, call: Call, cx: &mut Context<Self>) {
         let input = call.input.clone();
         let name = input["name"].as_str().unwrap_or_default().to_owned();
-        let (id, view) = match self.agent_named(call.session, &name).and_then(|(_, id)| {
-            self.ensure_session(id, cx)
-                .map(|view| (id, view))
-                .ok_or_else(|| "Session not found".to_owned())
-        }) {
+        let target = match self.agent_named(call.session, &name) {
+            Ok((_, id)) => self
+                .ensure_session(id, cx)
+                .map(|view| (id, Some(view), None))
+                .ok_or_else(|| "Session not found".to_owned()),
+            // A closed agent reads from its saved transcript, without loading
+            // a chat for it, unless the user has its chat loaded.
+            Err(_) => self
+                .closed_agent_named(call.session, &name)
+                .map(|(id, outcome)| (id, self.sessions.get(&id).cloned(), Some(outcome))),
+        };
+        let (id, view, closed) = match target {
             Ok(found) => found,
             Err(e) => return self.finish_app_call(call, Err(e), cx),
         };
@@ -532,25 +576,38 @@ impl Shell {
                 .retain(|e| e.session != id || matches!(e.kind, EventKind::Blocked(_)));
         }
         let max_chars = input["maxChars"].as_u64().map(|n| n as usize);
-        let chat = view.read(cx);
-        let observation = chat.agent_observation(cx);
+        let chat = view.as_ref().map(|view| view.read(cx));
+        let observation = chat
+            .map(|chat| chat.agent_observation(cx))
+            .unwrap_or_default();
         let busy = observation.busy;
-        let draft = chat.has_saved_draft();
-        let live = chat
-            .agent_rows(cx)
-            .map(|rows| (chat.agent_steers(cx), rows));
+        let draft = chat.is_some_and(|chat| chat.has_saved_draft());
+        let live = chat.and_then(|chat| {
+            chat.agent_rows(cx)
+                .map(|rows| (chat.agent_steers(cx), rows))
+        });
         let mut head = json!({"name":name,"sessionId":id,"state":state.id(),"view":mode});
         if since > 0 {
             head["since"] = json!(since);
         }
-        if !observation.requests.is_empty() {
-            head["needsInput"] = json!(
-                observation
-                    .requests
-                    .iter()
-                    .map(|r| r.json())
-                    .collect::<Vec<_>>()
-            );
+        match &closed {
+            // Requests of a closed agent can no longer be decided from here.
+            Some(outcome) => {
+                head["state"] = json!("closed");
+                if let Some(outcome) = outcome {
+                    head["outcome"] = json!(outcome);
+                }
+            }
+            None if !observation.requests.is_empty() => {
+                head["needsInput"] = json!(
+                    observation
+                        .requests
+                        .iter()
+                        .map(|r| r.json())
+                        .collect::<Vec<_>>()
+                );
+            }
+            None => {}
         }
         if let Some(error) = &observation.error {
             head["error"] = json!(monocode_core::response::limit(error, 2_000));
