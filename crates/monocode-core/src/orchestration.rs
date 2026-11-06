@@ -830,9 +830,9 @@ agents.start {name, prompt, title?, harness?, model?, effort?, modelSettings?, r
   model: an alias or ID from models.list (an alias's resolvesTo names the model it runs today), or for claude and codex any model ID their CLI takes, such as claude-haiku-4-5 or claude-opus-4-6[1m]. effort: claude takes low, medium, high, xhigh, max, ultrathink or ultracode; codex takes none, minimal, low, medium, high or xhigh. Without effort, a model from models.list (an alias, or the ID its resolvesTo names) runs at the default it shows there, and any other model at its CLI's default. modelSettings takes other values from models.list.
   runtimeMode: read-only, supervised (asks before changes), auto-accept-edits, auto or full-access. The agent inherits your model with its effort, your access policy and your account unless you set them. reveal opens it in a tab.
 agents.list {}
-  Every agent: name, sessionId, state, since, checkout, branch, harness, model, resolvedModel (once an alias resolved to another ID), effort, runtimeMode, needsInput (its pending requests), error, queuedMessages or heldMessages. A field without a value is left out.
+  Every agent: name, sessionId, state, since, checkout, branch, harness, model, resolvedModel (once an alias resolved to another ID), effort, runtimeMode, needsInput (its pending requests), error, queuedMessages or heldMessages. A field without a value is left out. Also closedAgents, how many are closed, and closedAgentNames, the closed agents agents.read can still read.
 agents.read {name, view?, maxChars?, before?, limit?}
-  view "activity": what it is doing in its latest turn (prompt, tool steps, latest text, last tool output). "last": its final message and the files it edited. "history": earlier exchanges (before/limit page back). "auto" (default): activity while working or blocked, otherwise last.
+  view "activity": what it is doing in its latest turn (prompt, tool steps, latest text, last tool output). "last": its final message and the files it edited. "history": earlier exchanges (before/limit page back). "auto" (default): activity while working or blocked, otherwise last. A closed agent stays readable: state is "closed", outcome says how its work ended, and an open agent with the same name wins, then the newest closed one.
 agents.prompt {name, prompt, mode?}
   Idle, stopped or failed agent: starts its next turn. Working agent: mode "steer" (default when the provider supports it) adds the message to the running turn; "queue" runs it after the turn. Blocked agents refuse; decide the request first.
 agents.wait {names?, until?, timeoutSeconds?}
@@ -846,7 +846,7 @@ agents.stop {name}
 agents.open {name}
   Open its chat in a tab for the user, for example when you ask them to look at it.
 agents.close {name}
-  Stop it and archive its session. Its worktree and branch stay; remove them with git when merged.
+  Stop it and archive its session. agents.read can still read it; the other actions cannot reach it. Its worktree and branch stay; remove them with git when merged.
 
 States: starting, working, blocked (needsInput), idle, stopped, failed (error), usageLimited.
 Wake-ups: when an agent finishes a turn, stops, fails, hits a usage limit or needs input, MonoCode sends you an [Orchestration update] turn once you are idle. You do not need to wait or poll.

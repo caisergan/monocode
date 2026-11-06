@@ -329,30 +329,128 @@ fn a_started_agent_reports_its_failed_turn_to_the_lead(cx: &mut TestAppContext) 
             );
         })
         .unwrap();
+    // A closed agent stays readable by name, from its saved transcript, but
+    // nothing else can drive it.
+    window
+        .update(cx, |shell, _, _| {
+            shell.sessions.remove(&id);
+        })
+        .unwrap();
+    let list = call(window, lead, "list-closed", "agents.list", json!({}), cx).unwrap();
+    assert_eq!(list["agents"], json!([]));
+    assert_eq!(list["closedAgentNames"], json!(["api"]));
+    let read = call(
+        window,
+        lead,
+        "read-closed",
+        "agents.read",
+        json!({"name":"api"}),
+        cx,
+    )
+    .unwrap();
+    assert_eq!(read["sessionId"], id);
+    assert_eq!(read["state"], "closed");
+    assert_eq!(read["outcome"], "failed");
+    assert_eq!(read["view"], "last");
+    assert!(
+        read["finalMessage"]
+            .as_str()
+            .unwrap()
+            .contains("Unknown provider")
+    );
+    let history = call(
+        window,
+        lead,
+        "read-closed-history",
+        "agents.read",
+        json!({"name":"api","view":"history"}),
+        cx,
+    )
+    .unwrap();
+    assert_eq!(history["state"], "closed");
+    assert_eq!(history["sessionId"], id);
+    assert!(history.to_string().contains("Fix the login bug"));
+    window
+        .update(cx, |shell, _, _| {
+            assert!(
+                !shell.sessions.contains_key(&id),
+                "reading a closed agent does not load its chat"
+            );
+        })
+        .unwrap();
     assert!(
         call(
             window,
             lead,
-            "read-closed",
-            "agents.read",
-            json!({"name":"api"}),
+            "prompt-closed",
+            "agents.prompt",
+            json!({"name":"api","prompt":"More"}),
             cx
         )
         .unwrap_err()
         .contains("No open agent")
     );
-    // A closed agent's name is free again.
     assert!(
         call(
             window,
             lead,
-            "start-reuse",
-            "agents.start",
-            json!({"name":"api","prompt":"Second try","workspace":"shared"}),
+            "read-unknown",
+            "agents.read",
+            json!({"name":"nobody"}),
             cx
         )
-        .is_ok()
+        .unwrap_err()
+        .contains("No open or closed agent")
     );
+    // A closed agent's name is free again, and the open agent wins the read.
+    let second = call(
+        window,
+        lead,
+        "start-reuse",
+        "agents.start",
+        json!({"name":"api","prompt":"Second try","workspace":"shared"}),
+        cx,
+    )
+    .unwrap()["sessionId"]
+        .as_i64()
+        .unwrap();
+    assert_ne!(second, id);
+    let read = call(
+        window,
+        lead,
+        "read-reused",
+        "agents.read",
+        json!({"name":"api"}),
+        cx,
+    )
+    .unwrap();
+    assert_eq!(read["sessionId"], second);
+    assert_ne!(read["state"], "closed");
+    assert!(read.get("outcome").is_none());
+    // With both closed, the name means the newest.
+    call(
+        window,
+        lead,
+        "close-reused",
+        "agents.close",
+        json!({"name":"api"}),
+        cx,
+    )
+    .unwrap();
+    let read = call(
+        window,
+        lead,
+        "read-newest",
+        "agents.read",
+        json!({"name":"api"}),
+        cx,
+    )
+    .unwrap();
+    assert_eq!(read["sessionId"], second);
+    assert_eq!(read["state"], "closed");
+    let list = call(window, lead, "list-both", "agents.list", json!({}), cx).unwrap();
+    assert_eq!(list["closedAgents"], 2);
+    assert_eq!(list["closedAgentNames"], json!(["api"]));
 }
 
 #[gpui::test]
@@ -745,6 +843,7 @@ fn deleting_an_agents_session_retires_it_from_its_lead(cx: &mut TestAppContext) 
     let list = call(window, lead, "list", "agents.list", json!({}), cx).unwrap();
     assert_eq!(list["agents"], json!([]));
     assert_eq!(list["closedAgents"], 1);
+    assert_eq!(list["closedAgentNames"], json!([]));
     assert!(
         call(
             window,
@@ -755,7 +854,7 @@ fn deleting_an_agents_session_retires_it_from_its_lead(cx: &mut TestAppContext) 
             cx
         )
         .unwrap_err()
-        .contains("No open agent")
+        .contains("was deleted")
     );
 }
 
