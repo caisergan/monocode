@@ -1,5 +1,6 @@
 mod accounts;
 mod actions;
+mod agent_tabs;
 mod app_commands;
 mod app_views;
 mod automation_runs;
@@ -464,6 +465,10 @@ struct TabDrag {
     id: TitleTab,
     from: usize,
     to: usize,
+    /// The slots that move together: a lead and its agents, or just `from`.
+    block: std::ops::Range<usize>,
+    /// Where the block's first tab may land.
+    landing: std::ops::Range<usize>,
     origin: Pixels,
     offset: Pixels,
     active: bool,
@@ -4213,8 +4218,12 @@ impl Shell {
             return;
         }
         self.navigation_revision += 1;
+        let reopened = self.workspace.tab_of(id).is_none();
         self.replace_blank_pane(id, cx);
         self.activate_session(id, window, cx);
+        if reopened {
+            self.tab_reopened(id);
+        }
     }
     /// Opening a conversation that has no tab takes over a blank pane in the
     /// active tab instead of adding a tab, as in the desktop app.
@@ -4307,7 +4316,9 @@ impl Shell {
             return;
         }
         self.close_menu(cx);
-        self.close_tabs(&[id], None, window, cx);
+        let mut ids = vec![id];
+        ids.extend(self.group_tabs_closing_with(id));
+        self.close_tabs(&ids, None, window, cx);
     }
     /// Apply a close operation to one snapshot. Intermediate neighbours must
     /// never change the project used for the final selection or blank tab.
@@ -7157,7 +7168,10 @@ impl Shell {
                 let lit = session.responding()
                     || session.needs_approval()
                     || self.unseen_finished.contains(&id);
-                let title = title(&id);
+                let title = (!multi_pane)
+                    .then(|| self.agent_tab_name(id))
+                    .flatten()
+                    .unwrap_or_else(|| title(&id));
                 panes.push(TabPane {
                     key: (id, false),
                     title: if title.is_empty() {
@@ -7416,10 +7430,13 @@ impl Shell {
         if bounds.len() != tabs.len() {
             return;
         }
+        let (block, landing) = self.drag_extent(&tabs, from);
         self.tab_drag = Some(TabDrag {
             id,
             from,
             to: from,
+            block,
+            landing,
             origin: event.position.x,
             offset: px(0.),
             active: false,
@@ -7459,23 +7476,34 @@ impl Shell {
             drag.offset = px(0.);
             drag.to = drag.from;
         } else {
-            let start = drag.bounds[drag.from].left();
+            let start = drag.bounds[drag.block.start].left();
+            let span = drag.bounds[drag.block.end - 1].right() - start;
+            // Where the block's left edge sits with its first tab in `slot`.
+            let bounds = &drag.bounds;
+            let (first, count) = (drag.block.start, drag.block.len());
+            let left_at = |slot: usize| {
+                if count == 1 || slot <= first {
+                    bounds[slot].left()
+                } else {
+                    bounds[slot + count - 1].right() - span
+                }
+            };
+            let last_landing = drag.landing.end - 1;
             drag.offset = delta.clamp(
-                drag.bounds[0].left() - start,
-                drag.bounds.last().unwrap().left() - start,
+                left_at(drag.landing.start) - start,
+                left_at(last_landing) - start,
             );
+            let offset = drag.offset;
             drag.to = drag
-                .bounds
-                .iter()
-                .enumerate()
-                .min_by(|(_, a), (_, b)| {
-                    (a.left() - start - drag.offset)
+                .landing
+                .clone()
+                .min_by(|a, b| {
+                    (left_at(*a) - start - offset)
                         .abs()
-                        .partial_cmp(&(b.left() - start - drag.offset).abs())
+                        .partial_cmp(&(left_at(*b) - start - offset).abs())
                         .unwrap_or(std::cmp::Ordering::Equal)
                 })
-                .map(|(ix, _)| ix)
-                .unwrap_or(drag.from);
+                .unwrap_or(first);
         }
         let (id, armed) = (drag.id.clone(), drag.armed);
         // The active tab has no other pane to land on, but its title still
@@ -7615,8 +7643,19 @@ impl Shell {
         let Some(d) = self.tab_drag.as_ref().filter(|d| d.active) else {
             return px(0.);
         };
-        if ix == d.from {
+        if d.block.contains(&ix) {
             return d.offset;
+        }
+        if d.block.len() > 1 {
+            // The tabs the group passes step over by its whole width.
+            let span = d.bounds[d.block.end - 1].right() - d.bounds[d.block.start].left() + px(2.);
+            if d.to > d.block.start && ix >= d.block.end && ix < d.to + d.block.len() {
+                return -span;
+            }
+            if d.to < d.block.start && ix >= d.to && ix < d.block.start {
+                return span;
+            }
+            return px(0.);
         }
         if d.from < d.to && ix > d.from && ix <= d.to {
             return d.bounds[ix - 1].left() - d.bounds[ix].left();
@@ -7673,22 +7712,6 @@ impl Shell {
             .pinned_dock(&closing, window, cx)
             .map_or((None, 0.), |(dock, w)| (Some(dock), w));
         let viewport = (strip_width - dock_width).max(0.);
-        // Every tab fits: they share the strip, however many there are. A tab
-        // easing in or out holds its share of a slot, so the others give way
-        // to it gradually, as flex-shrink does in TitleBar.tsx.
-        let share: f32 = slots
-            .iter()
-            .map(|s| match s {
-                crate::tab_motion::Slot::Live { open, .. }
-                | crate::tab_motion::Slot::Closing { open, .. } => *open,
-            })
-            .sum();
-        let avail = viewport - STRIP_PAD - STRIP_NEW_TAB - share * 2.;
-        let width = if share <= 0. {
-            TITLE_TAB_MAX_WIDTH
-        } else {
-            (avail / share).clamp(0., TITLE_TAB_MAX_WIDTH)
-        };
         // The selected tab keeps a wider share; the others split the rest.
         let selected = self.active_title_tab(cx);
         let now = std::time::Instant::now();
@@ -7714,21 +7737,108 @@ impl Shell {
                 0.
             }
         };
+        let groups: HashMap<TitleTab, agent_tabs::GroupTab> = tabs
+            .iter()
+            .cloned()
+            .zip(self.strip_groups(&tabs))
+            .filter_map(|(tab, group)| group.map(|group| (tab, group)))
+            .collect();
+        // Agents show their names while their lead's group is in view, and
+        // ease down to their marks as it leaves.
+        let group_lead = |tab: Option<&TitleTab>| tab.and_then(|tab| self.tab_group_lead(tab));
+        let viewing = group_lead(selected.as_ref());
+        let left_view = group_lead(leaving.as_ref());
+        let group_open = |lead: i64| match (left_view == Some(lead), viewing == Some(lead)) {
+            (true, true) => 1.,
+            (false, true) => {
+                if switching {
+                    switch
+                } else {
+                    1.
+                }
+            }
+            (true, false) => 1. - switch,
+            (false, false) => 0.,
+        };
+        let agent_widths: HashMap<TitleTab, (f32, f32)> = groups
+            .iter()
+            .filter_map(|(tab, group)| {
+                let name = group.agent.as_ref()?;
+                Some((tab.clone(), self.agent_tab_widths(name, window)))
+            })
+            .collect();
+        let agent_width = |tab: &TitleTab, (named, chosen): (f32, f32), crowded: bool| {
+            let open = groups.get(tab).map_or(0., |group| group_open(group.lead));
+            let shown = if crowded {
+                agent_tabs::FOLDED_WIDTH
+            } else {
+                agent_tabs::FOLDED_WIDTH + (named - agent_tabs::FOLDED_WIDTH) * open
+            };
+            shown + (chosen - shown) * weight(tab)
+        };
+        // Every tab fits: they share the strip, however many there are. A tab
+        // easing in or out holds its share of a slot, so the others give way
+        // to it gradually, as flex-shrink does in TitleBar.tsx. Agents take
+        // what they need first; the rest split what remains.
+        let slot_open = |s: &crate::tab_motion::Slot<TitleTab, ()>| match s {
+            crate::tab_motion::Slot::Live { key, open }
+            | crate::tab_motion::Slot::Closing { key, open, .. } => (key.clone(), *open),
+        };
+        let share: f32 = slots.iter().map(|s| slot_open(s).1).sum();
+        let plain_share: f32 = slots
+            .iter()
+            .map(slot_open)
+            .filter(|(key, _)| !agent_widths.contains_key(key))
+            .map(|(_, open)| open)
+            .sum();
+        let margins: f32 = groups
+            .values()
+            .map(|group| {
+                let (lead, trail) = group.margins();
+                lead + trail
+            })
+            .sum();
+        let room = viewport - STRIP_PAD - STRIP_NEW_TAB - share * 2. - margins;
+        let agents_taking = |crowded: bool| -> f32 {
+            slots
+                .iter()
+                .map(slot_open)
+                .filter_map(|(key, open)| {
+                    let widths = *agent_widths.get(&key)?;
+                    Some(agent_width(&key, widths, crowded) * open)
+                })
+                .sum()
+        };
+        // Names give way before the other tabs become unreadable.
+        let agents_crowded = plain_share > 0.
+            && (room - agents_taking(false)) / plain_share < agent_tabs::NEIGHBOUR_MIN_WIDTH;
+        let avail = room - agents_taking(agents_crowded);
+        let width = if plain_share <= 0. {
+            TITLE_TAB_MAX_WIDTH
+        } else {
+            (avail / plain_share).clamp(0., TITLE_TAB_MAX_WIDTH)
+        };
         let held: f32 = slots
             .iter()
             .map(|s| match s {
-                crate::tab_motion::Slot::Live { key, open } => weight(key) * open,
-                crate::tab_motion::Slot::Closing { .. } => 0.,
+                crate::tab_motion::Slot::Live { key, open } if !agent_widths.contains_key(key) => {
+                    weight(key) * open
+                }
+                _ => 0.,
             })
             .sum();
         // The selected tab shrinks with the rest down to a floor, then holds
         // there while the others keep giving way.
-        let (width, floor) = if width < SELECTED_TAB_MIN_WIDTH && held > 0. && share - held > 0. {
-            let floor = SELECTED_TAB_MIN_WIDTH.min(avail.max(0.));
-            (((avail - floor * held) / (share - held)).max(0.), floor)
-        } else {
-            (width, width)
-        };
+        let (width, floor) =
+            if width < SELECTED_TAB_MIN_WIDTH && held > 0. && plain_share - held > 0. {
+                let floor = SELECTED_TAB_MIN_WIDTH.min(avail.max(0.));
+                (
+                    ((avail - floor * held) / (plain_share - held)).max(0.),
+                    floor,
+                )
+            } else {
+                (width, width)
+            };
         // Fractional widths round differently from tab to tab and the error
         // adds up along the strip, so a full strip's new-tab button would
         // wander as tabs come and go. Every slot snaps to device pixels and
@@ -7736,7 +7846,10 @@ impl Shell {
         let scale = window.scale_factor();
         let snap = |x: f32| (x * scale).floor() / scale;
         let crowded = width < TITLE_TAB_MAX_WIDTH;
-        let base_width = |tab: &TitleTab| snap(width + (floor - width) * weight(tab));
+        let base_width = |tab: &TitleTab| match agent_widths.get(tab) {
+            Some(widths) => snap(agent_width(tab, *widths, agents_crowded)),
+            None => snap(width + (floor - width) * weight(tab)),
+        };
         let slot_size = |tab: &TitleTab, open: f32| {
             (
                 snap(base_width(tab) * open),
@@ -7762,7 +7875,7 @@ impl Shell {
         let mut extra: HashMap<TitleTab, f32> = HashMap::new();
         let mut new_tab_lead = 2.;
         if crowded {
-            let leftover = (viewport - STRIP_PAD - STRIP_NEW_TAB - used).max(0.);
+            let leftover = (viewport - STRIP_PAD - STRIP_NEW_TAB - margins - used).max(0.);
             let settled: Vec<&TitleTab> = slots
                 .iter()
                 .filter_map(|s| match s {
@@ -7786,6 +7899,11 @@ impl Shell {
             .as_ref()
             .filter(|d| d.active && !d.armed)
             .map(|d| d.id.clone());
+        let carried = self
+            .tab_drag
+            .as_ref()
+            .filter(|d| d.active && !d.armed)
+            .map_or(0..0, |d| d.block.clone());
         let mut moving = false;
         let shifts: Vec<Pixels> = tabs
             .clone()
@@ -7794,7 +7912,7 @@ impl Shell {
             .map(|(ix, id)| {
                 let target = self.tab_shift(ix).as_f32();
                 let (value, active) =
-                    self.eased_shift(id.clone(), target, dragged.as_ref() == Some(&id), reduced);
+                    self.eased_shift(id.clone(), target, carried.contains(&ix), reduced);
                 moving |= active;
                 px(value)
             })
@@ -7863,12 +7981,27 @@ impl Shell {
                     .into_iter()
                     .filter(|pane| self.session_summaries.contains_key(pane))
                     .any(|pane| self.session_metadata(pane, cx).has_saved_draft());
+                let group = groups.get(&TitleTab::Session(id)).cloned();
+                let group_member = group.is_some();
+                let lead_tab = group.as_ref().is_some_and(|g| g.agent.is_none());
+                let agent_tab = group.as_ref().is_some_and(|g| g.agent.is_some());
+                let tip = copy.headline.clone();
+                let plate = match &group {
+                    Some(group) => group.plate(active, hovered),
+                    None => title_tab_plate(active, hovered),
+                };
                 let tab = div()
                     .id(("tab", id as usize))
                     .debug_selector(move || format!("title-tab-{id}"))
                     .group("title-tab")
                     .role(Role::Tab)
                     .aria_label(copy.headline.clone())
+                    // Folded to a mark, this is the only place its name shows.
+                    .when(agent_tab, |d| {
+                        d.tooltip(move |_, cx| {
+                            cx.new(|_| project_rail::ProjectTooltip(tip.clone())).into()
+                        })
+                    })
                     .aria_selected(active)
                     .cursor_pointer()
                     .w(px(tab_width(&TitleTab::Session(id))))
@@ -7878,8 +8011,9 @@ impl Shell {
                     .left(shifts[ix])
                     .flex()
                     .items_center()
+                    .when_some(group.as_ref(), |d, group| d.child(group.frame()))
                     .child(
-                        title_tab_plate(active, hovered)
+                        plate
                             .id(("tab-plate", id as usize))
                             .w_full()
                             .min_w_0()
@@ -7894,7 +8028,13 @@ impl Shell {
                                 d.px(px(((tab_width(&TitleTab::Session(id)) - 14.) / 2.).max(0.)))
                             })
                             .gap(px(6.))
-                            .group_hover("title-tab", |s| s.bg(title_tab_fill(active, true)))
+                            .group_hover("title-tab", move |s| {
+                                s.bg(if group_member {
+                                    agent_tabs::GroupTab::fill(active, true)
+                                } else {
+                                    title_tab_fill(active, true)
+                                })
+                            })
                             // Overlaid so the dashes take no room from the content.
                             .when(draft, |d| {
                                 d.relative().child(
@@ -7934,6 +8074,21 @@ impl Shell {
                                 .items_center()
                                 .justify_center()
                                 .hover(|s| s.bg(content(0.1)))
+                                // The same glyph as the lead's sidebar row.
+                                .when(lead_tab && copy.panes.len() <= 1, |d| {
+                                    d.child(
+                                        div()
+                                            .debug_selector(move || {
+                                                format!("title-tab-lead-mark-{id}")
+                                            })
+                                            .absolute()
+                                            .top_1()
+                                            .left_1()
+                                            .size(px(12.))
+                                            .group_hover("title-tab", |s| s.opacity(0.))
+                                            .child(icon("share", 12.).text_color(content(0.45))),
+                                    )
+                                })
                                 .when(copy.panes.len() > 1, |d| {
                                     d.child(
                                         div()
@@ -8093,6 +8248,24 @@ impl Shell {
         if moving || opening || switching {
             window.request_animation_frame();
         }
+        // A frame stands apart from the tabs beside it. These wrappers add no
+        // children, so the tabs keep their child indices for drags.
+        let elements: Vec<AnyElement> = tabs
+            .iter()
+            .zip(elements)
+            .map(
+                |(tab, element)| match groups.get(tab).map(|g| g.margins()) {
+                    Some((lead, trail)) if lead > 0. || trail > 0. => div()
+                        .flex_shrink_0()
+                        .h(px(TITLE_BAR_HEIGHT))
+                        .ml(px(lead))
+                        .mr(px(trail))
+                        .child(element)
+                        .into_any_element(),
+                    _ => element,
+                },
+            )
+            .collect();
         let mut live: HashMap<TitleTab, AnyElement> = tabs.iter().cloned().zip(elements).collect();
         // TabWidthMotion: the slot's width eases while the tab keeps its own.
         let slot = |tab: &TitleTab, open: f32| {

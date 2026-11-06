@@ -46,8 +46,12 @@ struct Wait {
 }
 
 impl Shell {
+    /// The lead of an agent's session.
+    pub(super) fn agent_lead(&self, session: i64) -> Option<i64> {
+        self.agent_of(session).map(|(lead, _)| lead)
+    }
     /// The lead and roster index of an agent's session.
-    fn agent_of(&self, session: i64) -> Option<(i64, usize)> {
+    pub(super) fn agent_of(&self, session: i64) -> Option<(i64, usize)> {
         self.orchestration_summaries
             .iter()
             .find_map(|(lead, summary)| {
@@ -130,7 +134,7 @@ impl Shell {
     }
 
     /// Store the lead's roster and repaint its rail when it changed.
-    fn save_summary(&mut self, lead: i64, mut summary: Summary, cx: &mut Context<Self>) {
+    pub(super) fn save_summary(&mut self, lead: i64, mut summary: Summary, cx: &mut Context<Self>) {
         summary.live = summary
             .tasks
             .iter()
@@ -1018,6 +1022,7 @@ impl Shell {
                             }
                             view.update(cx, |v, cx| v.install_app_launch(settings, true, cx));
                         }
+                        this.attach_agent_tab(lead, id);
                         if reveal {
                             this.open(id, window, cx);
                         }

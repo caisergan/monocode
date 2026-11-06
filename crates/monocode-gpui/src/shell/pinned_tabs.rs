@@ -94,6 +94,7 @@ impl Shell {
         } else {
             self.workspace.pinned_tabs.push(tab);
         }
+        self.settle_agent_tabs();
         self.tab_drag = None;
         self.tab_shifts.clear();
         self.pin_card_hover = None;
