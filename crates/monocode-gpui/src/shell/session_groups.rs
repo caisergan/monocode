@@ -858,7 +858,7 @@ impl Shell {
             view.update(cx, |session, cx| session.stop_if_busy(cx));
         }
         if self.workspace.tab_of(id).is_some() {
-            self.close_pane(id, window, cx);
+            self.close_pane_for_app(id, window, cx);
         }
         if self.workspace.tab_of(id).is_some() {
             self.deleting.remove(&id);

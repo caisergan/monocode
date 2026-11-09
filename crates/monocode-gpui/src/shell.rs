@@ -8,6 +8,7 @@ mod classic_sidebar;
 #[cfg(test)]
 mod classic_surface_tests;
 mod classic_surfaces;
+mod close_confirm;
 mod file_panes;
 mod github_star;
 mod idle_agents;
@@ -52,6 +53,7 @@ mod sidebar_peek;
 mod subagent_tree;
 mod terminal_dock;
 mod terminal_panes;
+use close_confirm::CloseBy;
 use terminal_panes::terminal_drag_ghost;
 mod title_tabs;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -1627,7 +1629,7 @@ impl Shell {
                         }
                         this.refresh_session_mark(id, cx);
                         if archived && this.workspace.tab_of(id).is_some() {
-                            this.close_pane(id, window, cx);
+                            this.close_pane_for_app(id, window, cx);
                         } else {
                             this.invalidate_chrome(cx);
                             cx.notify();
@@ -2309,7 +2311,7 @@ impl Shell {
                     if this.workspace.layout(tab).is_split() {
                         this.close_pane(id, window, cx);
                     } else {
-                        this.close_tabs(&[id], None, window, cx);
+                        this.close_tabs(CloseBy::User, &[id], None, window, cx);
                     }
                 });
             })
@@ -3561,15 +3563,27 @@ impl Shell {
     }
     /// Close one pane of a split tab; the tab's only pane closes the tab.
     fn close_pane(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_pane_by(CloseBy::User, id, window, cx);
+    }
+    /// `close_pane` for a close the app decided on: see `CloseBy::App`.
+    pub(super) fn close_pane_for_app(
+        &mut self,
+        id: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.close_pane_by(CloseBy::App, id, window, cx);
+    }
+    fn close_pane_by(&mut self, by: CloseBy, id: i64, window: &mut Window, cx: &mut Context<Self>) {
         if !self
             .workspace
             .tab_of(id)
             .is_some_and(|tab| self.workspace.layout(tab).is_split())
         {
-            self.close(id, window, cx);
+            self.close_by(by, id, window, cx);
             return;
         }
-        self.confirm_close_terminal_panes(&[id], window, cx, move |this, window, cx| {
+        self.confirm_close_panes(by, &[id], window, cx, move |this, window, cx| {
             this.finish_close_pane(id, window, cx);
         });
     }
@@ -3577,7 +3591,8 @@ impl Shell {
         let active = self.workspace.active;
         let before = self.active_leaves();
         if !self.workspace.close_pane(id) {
-            self.close(id, window, cx);
+            // Already answered for, or the app's own close.
+            self.close_by(CloseBy::App, id, window, cx);
             return;
         }
         self.history
@@ -4312,18 +4327,22 @@ impl Shell {
         cx.notify();
     }
     pub(crate) fn close(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_by(CloseBy::User, id, window, cx);
+    }
+    fn close_by(&mut self, by: CloseBy, id: i64, window: &mut Window, cx: &mut Context<Self>) {
         if !self.tab_can_close(id, cx) {
             return;
         }
         self.close_menu(cx);
         let mut ids = vec![id];
         ids.extend(self.group_tabs_closing_with(id));
-        self.close_tabs(&ids, None, window, cx);
+        self.close_tabs(by, &ids, None, window, cx);
     }
     /// Apply a close operation to one snapshot. Intermediate neighbours must
     /// never change the project used for the final selection or blank tab.
     fn close_tabs(
         &mut self,
+        by: CloseBy,
         ids: &[i64],
         preferred: Option<i64>,
         window: &mut Window,
@@ -4337,7 +4356,7 @@ impl Shell {
         let preferred = preferred
             .and_then(|id| self.workspace.tab_of(id))
             .map(TitleTab::Session);
-        self.close_title_tabs(&tabs, preferred, window, cx);
+        self.close_title_tabs_by(by, &tabs, preferred, window, cx);
     }
     fn visit(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
         // Settings sit over the history: Back leaves them, and Forward
@@ -9822,7 +9841,8 @@ mod tests {
                         i.replace_text_in_range(None, "Keep this draft", w, cx)
                     });
                 });
-                shell.close(b, w, cx);
+                // What a working tab keeps once closed; asking is close_confirm's.
+                shell.close_by(CloseBy::App, b, w, cx);
                 assert!(shell.focus.is_focused(w));
             })
             .unwrap();
@@ -13537,7 +13557,8 @@ mod tests {
                         i.replace_text_in_range(None, "A retained draft 🙂", w, cx)
                     });
                 });
-                shell.close(b, w, cx);
+                // What a working tab keeps once closed; asking is close_confirm's.
+                shell.close_by(CloseBy::App, b, w, cx);
                 assert_eq!(shell.workspace.active, None);
                 assert_eq!(shell.workspace.project, "/work/monocode");
                 assert!(shell.sessions[&b].read(cx).busy);
@@ -13549,7 +13570,7 @@ mod tests {
                     "A retained draft 🙂"
                 );
                 shell.close(a, w, cx);
-                shell.close(b, w, cx);
+                shell.close_by(CloseBy::App, b, w, cx);
                 assert!(shell.workspace.tabs.is_empty());
                 assert!(shell.workspace.active.is_none());
                 assert_eq!(shell.sessions.len(), 2);
