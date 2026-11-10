@@ -418,6 +418,12 @@ pub(crate) const INDEX: &[(&str, Section, &str, &str)] = &[
         "prompt cache expired ttl re-read context tokens warning",
     ),
     (
+        "resume-usage-at-reset",
+        Section::Chat,
+        "Resume after usage limits",
+        "usage limit rate limit reset quota auto resume continue automatically",
+    ),
+    (
         "composer-autocorrect",
         Section::Chat,
         "Autocorrect",

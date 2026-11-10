@@ -121,6 +121,20 @@ impl SettingsView {
                 )],
             ),
             self.row(
+                Some("resume-usage-at-reset"),
+                false,
+                "Resume after usage limits",
+                Some("Continue a chat by itself when its usage limit resets. You can still cancel it from the limit notice.".into()),
+                vec![self.toggle(
+                    "resume-usage-at-reset",
+                    "Resume after usage limits",
+                    p.resume_usage_at_reset,
+                    false,
+                    cx,
+                    |this, on, cx| this.update(cx, |p| p.resume_usage_at_reset = on),
+                )],
+            ),
+            self.row(
                 Some("composer-autocorrect"),
                 false,
                 "Autocorrect",

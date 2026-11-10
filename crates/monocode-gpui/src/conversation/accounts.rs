@@ -101,12 +101,20 @@ impl Conversation {
         cx.emit(SessionChanged);
         cx.notify();
     }
+    /// A limit this chat has just hit resumes at reset when Settings says so.
+    /// Remote sessions leave scheduling to their host.
+    pub(super) fn arm_new_limit(&self, mut limit: Limit, cx: &App) -> Limit {
+        limit.resume_at_reset = !self.is_remote()
+            && cx
+                .try_global::<crate::settings::Preferences>()
+                .is_none_or(|prefs| prefs.resume_usage_at_reset);
+        limit
+    }
     pub(super) fn detect_usage_limit(&mut self, cx: &mut Context<Self>) {
-        if let Some(limit) = self
-            .settings
-            .usage_limit
-            .clone()
-            .or_else(|| Limit::from_error(&self.status))
+        if let Some(limit) =
+            self.settings.usage_limit.clone().or_else(|| {
+                Limit::from_error(&self.status).map(|limit| self.arm_new_limit(limit, cx))
+            })
         {
             if let Some(pending) = &mut self.settings.pending_provider_switch {
                 pending.skip_outgoing_recap = true;
@@ -710,6 +718,43 @@ mod tests {
     }
 
     #[gpui::test]
+    fn new_limits_follow_the_resume_preference_and_keep_a_later_choice(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let store = Arc::new(std::sync::Mutex::new(
+            monocode_core::store::Store::open(Path::new(":memory:")).unwrap(),
+        ));
+        for on in [true, false] {
+            cx.update(|cx| {
+                cx.set_global(crate::settings::Preferences {
+                    resume_usage_at_reset: on,
+                    ..Default::default()
+                })
+            });
+            let summary = locked(&store)
+                .unwrap()
+                .create("claude", "/fixture")
+                .unwrap();
+            let view = cx.new(|cx| Conversation::new(summary, store.clone(), cx));
+            view.update(cx, |view, cx| {
+                view.status = "rate_limit".into();
+                view.detect_usage_limit(cx);
+                assert_eq!(
+                    view.settings.usage_limit.as_ref().unwrap().resume_at_reset,
+                    on
+                );
+                // Cancelling or arming from the notice sticks across later checks.
+                view.settings.usage_limit.as_mut().unwrap().resume_at_reset = !on;
+                view.detect_usage_limit(cx);
+                assert_eq!(
+                    view.settings.usage_limit.as_ref().unwrap().resume_at_reset,
+                    !on
+                );
+            });
+        }
+    }
+
+    #[gpui::test]
     fn usage_banner_matches_the_composer_and_can_arm_cancel_and_dismiss(
         cx: &mut gpui::TestAppContext,
     ) {
@@ -839,8 +884,9 @@ mod tests {
             });
             v.status = "Usage limit reached: Fixture subscription exhausted".into();
             v.detect_usage_limit(cx);
-            assert!(v.settings.usage_limit.is_some());
+            assert!(v.settings.usage_limit.as_ref().unwrap().resume_at_reset);
             assert!(v.follow_ups.state.paused);
+            v.settings.usage_limit.as_mut().unwrap().resume_at_reset = false;
         });
         cx.run_until_parked();
         assert!(
