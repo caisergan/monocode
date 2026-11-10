@@ -69,6 +69,8 @@ pub(crate) struct Preferences {
     pub autocorrect: bool,
     /// Ask before a send re-reads a Claude chat whose prompt cache expired.
     pub confirm_expired_cache_send: bool,
+    /// A chat that hits its usage limit continues by itself once it resets.
+    pub resume_usage_at_reset: bool,
     pub format_on_save: bool,
     pub autosave: bool,
     pub diff_view: String,
@@ -161,6 +163,7 @@ impl Default for Preferences {
             model_controls: "menu".into(),
             autocorrect: false,
             confirm_expired_cache_send: true,
+            resume_usage_at_reset: true,
             format_on_save: true,
             autosave: false,
             diff_view: "editor".into(),

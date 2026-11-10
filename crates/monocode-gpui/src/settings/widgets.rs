@@ -264,6 +264,7 @@ impl SettingsView {
                     | "collapse-tool-groups"
                     | "fold-finished-work"
                     | "composer-autocorrect"
+                    | "resume-usage-at-reset"
                     | "format-on-save"
                     | "composer-mascot"
                     | "empty-session-games"

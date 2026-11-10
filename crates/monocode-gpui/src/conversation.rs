@@ -1477,7 +1477,7 @@ impl Conversation {
                             }
                             this.preparing_worktree = false;
                             if !stopping && let Some(limit) = update.usage_limit {
-                                this.settings.usage_limit = Some(limit);
+                                this.settings.usage_limit = Some(this.arm_new_limit(limit, cx));
                             }
                             if !this.is_remote() {
                                 this.detect_usage_limit(cx);
