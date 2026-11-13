@@ -69,6 +69,72 @@ fn workspace_style_is_only_offered_under_the_new_layout(cx: &mut TestAppContext)
 }
 
 #[gpui::test]
+fn hermes_memory_lists_its_entries_and_forgets_one_on_the_second_click(cx: &mut TestAppContext) {
+    let home = std::env::temp_dir().join(format!(
+        "monocode-memory-page-{}-{}",
+        std::process::id(),
+        monocode_core::time::now_ms()
+    ));
+    std::fs::create_dir_all(home.join("memories")).unwrap();
+    std::fs::write(home.join("memories/USER.md"), "Short answers").unwrap();
+    std::fs::write(
+        home.join("memories/MEMORY.md"),
+        "M5, 16GB\n§\nOrnith runs locally",
+    )
+    .unwrap();
+    let window = window(Section::General, cx);
+    let visual = &mut VisualTestContext::from_window(window.into(), cx);
+    window
+        .update(visual, |view, _, cx| {
+            view.memory.home = Some(home.clone());
+            view.select_section(Section::Memory, cx);
+        })
+        .unwrap();
+    visual.run_until_parked();
+    assert!(
+        visual
+            .debug_bounds("settings-memory-budget-USER.md")
+            .is_some()
+    );
+    assert!(
+        visual
+            .debug_bounds("settings-memory-forget-USER.md-0")
+            .is_some()
+    );
+    assert!(
+        visual
+            .debug_bounds("settings-memory-forget-MEMORY.md-1")
+            .is_some()
+    );
+    let forget = visual
+        .debug_bounds("settings-memory-forget-MEMORY.md-0")
+        .expect("the first note");
+    // The first click asks; the file is untouched.
+    visual.simulate_click(forget.center(), Default::default());
+    visual.run_until_parked();
+    assert_eq!(
+        std::fs::read_to_string(home.join("memories/MEMORY.md")).unwrap(),
+        "M5, 16GB\n§\nOrnith runs locally"
+    );
+    let forget = visual
+        .debug_bounds("settings-memory-forget-MEMORY.md-0")
+        .unwrap();
+    visual.simulate_click(forget.center(), Default::default());
+    visual.run_until_parked();
+    assert_eq!(
+        std::fs::read_to_string(home.join("memories/MEMORY.md")).unwrap(),
+        "Ornith runs locally"
+    );
+    assert!(
+        visual
+            .debug_bounds("settings-memory-forget-MEMORY.md-1")
+            .is_none()
+    );
+    assert!(visual.debug_bounds("settings-memory-error").is_none());
+    std::fs::remove_dir_all(home).unwrap();
+}
+
+#[gpui::test]
 fn skills_document_has_its_own_full_height_pane_and_compact_actions(cx: &mut TestAppContext) {
     let window = window(Section::Skills, cx);
     window

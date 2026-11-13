@@ -1008,6 +1008,7 @@ impl Protocol {
                                 && input + read + write > 0)
                                 .then(|| read as f64 / (input + read + write) as f64 * 100.),
                             cache_ttl_seconds: crate::prompt_cache::claude_ttl(usage),
+                            ..Default::default()
                         };
                         if metrics.reported() {
                             events.push(Event::Metrics(metrics));
@@ -1948,7 +1949,8 @@ fn run_operation(
         parked::settle_cancelled(wire, protocol);
     } else if eligible
         && ((result.is_ok() && !cancel.load(Ordering::Relaxed))
-            || (stop_confirmed && protocol.request.kind != Kind::Antigravity))
+            || (stop_confirmed && protocol.request.kind != Kind::Antigravity)
+            || (result.is_err() && !cancel.load(Ordering::Relaxed) && protocol.acp_keeps_retry()))
     {
         parked::put(wire, protocol);
     }

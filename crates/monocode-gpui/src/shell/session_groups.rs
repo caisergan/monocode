@@ -420,6 +420,9 @@ impl Shell {
             self.selected_sessions.clear();
             self.selection_anchor = Some(id);
             self.open(id, window, cx);
+            if let Some(view) = self.sessions.get(&id) {
+                view.update(cx, |view, cx| view.close_subagent_sheet(cx));
+            }
         }
         if modifiers.shift || additive {
             window.focus(&self.sidebar_focus, cx);
@@ -558,7 +561,14 @@ impl Shell {
                 handoff: Some(monocode_core::agent::Handoff {
                     from: source.provider.clone(),
                     brief: monocode_core::response::continuation(&rows, None),
-                    continued: Some(monocode_core::agent::ContinuedChat { session: id, title }),
+                    continued: Some(monocode_core::agent::ContinuedChat {
+                        session: id,
+                        title,
+                        // Hermes branches its own session; the recap is the fallback.
+                        fork: (Kind::from_id(&source.provider) == Kind::Hermes)
+                            .then(|| source.provider_id.clone())
+                            .flatten(),
+                    }),
                 }),
                 ..Default::default()
             };

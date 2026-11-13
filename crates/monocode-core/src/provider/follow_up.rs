@@ -109,10 +109,16 @@ impl Protocol {
                 self.text_key = None;
                 return Ok(vec![Event::FollowUp(message)]);
             }
-            Kind::Hermes | Kind::OpenCode => write_json(
-                stdin,
-                json!({"jsonrpc":"2.0","id":wire,"method":"session/prompt","params":{"sessionId":self.acp_active_session(),"prompt":request.acp_content()?}}),
-            )?,
+            Kind::Hermes | Kind::OpenCode => {
+                let mut content = request.acp_content()?;
+                if request.kind == Kind::Hermes {
+                    super::acp::hermes_steer(&mut content);
+                }
+                write_json(
+                    stdin,
+                    json!({"jsonrpc":"2.0","id":wire,"method":"session/prompt","params":{"sessionId":self.acp_active_session(),"prompt":content}}),
+                )?
+            }
             _ => unreachable!(),
         }
         self.steering.insert(wire, (message, Instant::now()));
@@ -129,15 +135,31 @@ impl Protocol {
         if !response {
             return None;
         }
+        if let Some(events) = self.hermes_trailed(wire, value) {
+            return Some(events);
+        }
         // A timed-out request can answer later. It must never be interpreted as
         // a fatal error for the unrelated turn still running.
         if wire.starts_with("native-steer-") && !self.steering.contains_key(wire) {
             return Some(Vec::new());
         }
         let (message, _) = self.steering.remove(wire)?;
+        // Hermes answers a message it ran as a prompt of its own when that
+        // prompt ends: one that Stop cancelled was never delivered.
+        let cancelled = self.request.kind == Kind::Hermes
+            && error.is_none()
+            && value["result"]["stopReason"] == "cancelled";
+        if cancelled {
+            return Some(vec![Event::FollowUpFailed {
+                id: message.id,
+                error: "Stopped before this message ran".into(),
+            }]);
+        }
         if error.is_some() || (self.request.kind.is_pi() && value["success"] != true) {
-            let error = value["error"]["message"]
-                .as_str()
+            let error = error
+                .map(super::acp::error_text)
+                .filter(|_| !self.request.kind.is_pi())
+                .or_else(|| value["error"]["message"].as_str())
                 .or_else(|| value["error"].as_str())
                 .unwrap_or("The provider could not accept this follow-up");
             Some(vec![Event::FollowUpFailed {
@@ -154,7 +176,10 @@ impl Protocol {
         // JSON-RPC steer request deliberately waits without a response timer.
         let timeout = match self.request.kind {
             Kind::Pi | Kind::Omp => Duration::from_secs(15),
-            Kind::Hermes => Duration::from_secs(20),
+            // Hermes has no arm: a steer it could not hand to the running
+            // turn runs as a prompt of its own and is answered when that
+            // ends. Failing it sooner asks the user to send again what
+            // Hermes is about to run.
             Kind::OpenCode => Duration::from_secs(30),
             _ => return Vec::new(),
         };

@@ -79,6 +79,7 @@ impl Kind {
             Self::Hermes => &[
                 ".hermes/hermes-agent/venv/bin",
                 ".hermes/hermes-agent/.venv/bin",
+                ".hermes/hermes-agent/.hermes/bin",
             ],
             _ => &[],
         }

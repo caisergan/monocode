@@ -133,7 +133,13 @@ impl Conversation {
     ) {
         let attachments = std::mem::take(&mut self.attachments);
         let mut message = self.message(prompt, attachments, mode, cx);
-        message.steer = !queued && message.can_steer() && self.steers_follow_up(invert, cx);
+        // Hermes takes a steer as `/steer <text>` only. A message with files
+        // would go as a second prompt, which Hermes queues behind the turn
+        // where Stop cannot reach it: it waits for the turn here instead.
+        let steerable =
+            Kind::from_id(&self.summary.provider) != Kind::Hermes || message.attachments.is_empty();
+        message.steer =
+            !queued && steerable && message.can_steer() && self.steers_follow_up(invert, cx);
         if invert && self.busy && message.steer {
             self.follow_ups.requested = Some(message.id.clone());
         }
