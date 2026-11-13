@@ -1,16 +1,11 @@
-//! SubagentSheet.tsx: one delegated run, opened from its chip: who it is, what
-//! it costs, how full its window is, and either the trail of what it did or the
-//! conversation it is having. It stands on the subagent card, whose chips
-//! switch between runs, so the composer stays where it was and the turn can be
-//! steered meanwhile.
+//! SubagentSheet.tsx: one delegated run, opened from its chip or its row in
+//! the sidebar: who it is, what it costs, how full its window is, and either
+//! the conversation it is having or the trail of what it did. It takes the
+//! chat's place above the composer, which stays where it was: what is written
+//! there while a run is open goes to the main chat with a note to pass it on,
+//! since no provider lets the app address a subagent itself.
 use super::*;
-use crate::{
-    markdown::{self, MarkdownRow, Part, Tone},
-    markdown_model,
-    reveal::Tween,
-    shell::live_agents::live_elapsed,
-    transcript::mascot::subagent_face,
-};
+use crate::{reveal::Tween, shell::live_agents::live_elapsed, transcript::mascot::subagent_face};
 use gpui::{Bounds, Corners, Edges, Pixels, Task, point, size};
 use monocode_core::{
     context::format_tokens,
@@ -20,7 +15,7 @@ use monocode_core::{
     },
     transcript::Row,
 };
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 const OPEN_MS: f32 = 320.;
 const OPEN_EASE: (f32, f32, f32, f32) = (0.22, 1., 0.36, 1.);
@@ -35,26 +30,37 @@ const STOP_RETRY: Duration = Duration::from_millis(8_000);
 /// How often an open running run's own conversation is read again.
 const CONVERSATION_POLL: Duration = Duration::from_millis(1_500);
 const RADIUS: f32 = 10.;
-/// The sheet's `px-3.5` inside the composer's column.
-const SHEET_INSET: f32 = 14.;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum SheetView {
+    /// The run's own conversation: its brief, what it thought, called and said.
     #[default]
+    Chat,
+    /// The trail of its steps, as its row in the transcript unfolds it.
     Activity,
-    Context,
 }
 
 /// The run's conversation, read again while it is still going.
+/// A run's rows in sizes: how many the reader has and their bytes, the
+/// stream's own trail, the messages sent from the sheet, the model's name,
+/// when the run began and whether it still runs.
+type BuiltFrom = (usize, usize, usize, usize, usize, Option<u64>, bool);
+
 struct ContextReader {
     path: String,
     /// False until the first read lands.
     loaded: bool,
     failed: bool,
-    view: Entity<TranscriptView>,
-    /// Rows last shown, to patch from the first that changed.
     rows: Vec<Row>,
     _task: Task<()>,
+}
+
+/// A message the user wrote to a run from its sheet. The main chat is what
+/// received it; here it is shown where it was written, after the rows the run
+/// had by then. It lasts as long as the window: the main chat keeps the record.
+struct Sent {
+    after: usize,
+    row: Row,
 }
 
 struct OpenRun {
@@ -64,9 +70,15 @@ struct OpenRun {
     view: SheetView,
     trail: Entity<TranscriptView>,
     trail_source: String,
+    /// The conversation as drawn: the run's rows with the user's own among them.
+    chat: Entity<TranscriptView>,
+    chat_rows: Vec<Row>,
+    /// What the chat was last built from, in sizes: the same again means the
+    /// same rows, and nothing to copy or compare.
+    built_from: Option<BuiltFrom>,
+    /// How many of the rows drawn are the run's own.
+    own_rows: usize,
     context: Option<ContextReader>,
-    /// The brief as markdown, parsed once for each text.
-    brief: std::cell::RefCell<Option<(String, std::rc::Rc<Vec<MarkdownRow>>)>>,
     shown_at: Instant,
     stopping: Option<Instant>,
     wake: Option<Task<()>>,
@@ -78,6 +90,7 @@ pub(super) struct SubagentSheet {
     open: bool,
     fold: Option<Tween>,
     overlay: AnchorSlot,
+    sent: HashMap<String, Vec<Sent>>,
 }
 
 impl Conversation {
@@ -91,6 +104,38 @@ impl Conversation {
 
     pub(super) fn subagent_sheet_open(&self) -> bool {
         self.subagent_sheet.open && self.subagent_sheet.run.is_some()
+    }
+
+    /// The run a message written now is meant for: its name, and the id its
+    /// provider knows it by.
+    pub(super) fn subagent_relay_target(&self) -> Option<(String, String)> {
+        if !self.subagent_sheet.open {
+            return None;
+        }
+        let run = self.subagent_sheet.run.as_ref()?;
+        let agent = &run.agent.run;
+        Some((
+            agent.display_name(),
+            agent.task_id.clone().unwrap_or_else(|| run.id.clone()),
+        ))
+    }
+
+    /// Show a message written to the open run in its own conversation.
+    pub(super) fn note_sent_to_subagent(&mut self, text: &str, cx: &mut Context<Self>) {
+        let Some(run) = self.subagent_sheet.run.as_ref() else {
+            return;
+        };
+        let sent = self.subagent_sheet.sent.entry(run.id.clone()).or_default();
+        sent.push(Sent {
+            after: run.own_rows,
+            row: Row {
+                role: "user".into(),
+                text: text.trim().to_owned(),
+                first: true,
+                sent_at: Some(monocode_core::time::now_ms()),
+            },
+        });
+        cx.notify();
     }
 
     pub(crate) fn close_subagent_sheet(&mut self, cx: &mut Context<Self>) {
@@ -113,7 +158,12 @@ impl Conversation {
 
     /// Opens a run, as the sidebar's tree does. A run already open stays.
     pub(crate) fn open_subagent_sheet(&mut self, id: &str, cx: &mut Context<Self>) {
-        let Some(agent) = self.subagents(cx).iter().find(|a| a.id == id).cloned() else {
+        let Some(agent) = self
+            .session_subagents(cx)
+            .iter()
+            .find(|a| a.id == id)
+            .cloned()
+        else {
             return;
         };
         self.subagent_sheet.open = true;
@@ -133,14 +183,18 @@ impl Conversation {
                 trail.agent_trail();
                 trail
             });
+            let chat = cx.new(|_| chat_view_entity());
             self.subagent_sheet.run = Some(OpenRun {
                 id: id.to_owned(),
                 agent,
                 view,
                 trail,
                 trail_source: String::new(),
+                chat,
+                chat_rows: Vec::new(),
+                built_from: None,
+                own_rows: 0,
                 context: None,
-                brief: Default::default(),
                 shown_at: Instant::now(),
                 stopping: None,
                 wake: None,
@@ -198,14 +252,28 @@ impl Conversation {
         cx.notify();
     }
 
+    /// Whether the open run can still be running. Only a run of the turn in
+    /// progress can: one from an earlier turn whose row was saved mid-run
+    /// would read as running again each time a new prompt starts.
+    fn sheet_run_live(&self, cx: &gpui::App) -> bool {
+        self.busy
+            && self
+                .subagent_sheet
+                .run
+                .as_ref()
+                .is_some_and(|run| self.subagents(cx).iter().any(|agent| agent.id == run.id))
+    }
+
     /// Follows the open run: its trail, the context reader, and the rise or fold.
     pub(super) fn step_subagent_sheet(&mut self, window: &Window, cx: &mut Context<Self>) {
         let now = Instant::now();
         let reduced = cx.reduce_motion();
-        let live = self.busy;
-        let runs = self.subagents(cx);
-        // A run of an earlier turn is no longer on the card to stand on.
+        let live = self.sheet_run_live(cx);
+        // A run the transcript no longer holds has nothing left to show.
+        // Every turn's runs are gathered only for an open sheet: with none,
+        // each streamed row would copy them all for nothing.
         if self.subagent_sheet.open {
+            let runs = self.session_subagents(cx);
             let found = self
                 .subagent_sheet
                 .run
@@ -242,7 +310,8 @@ impl Conversation {
         }
         let can_read = !self.is_remote();
         let provider = self.summary.provider.clone();
-        let Some(run) = self.subagent_sheet.run.as_mut() else {
+        let sheet = &mut self.subagent_sheet;
+        let Some(run) = sheet.run.as_mut() else {
             return;
         };
         let running = run.agent.state(live) == RunState::Running;
@@ -272,15 +341,75 @@ impl Conversation {
             .run
             .transcript_path
             .clone()
-            .filter(|_| can_read && run.view == SheetView::Context);
+            .filter(|_| can_read && run.view == SheetView::Chat);
         if let Some(path) = path
             && run
                 .context
                 .as_ref()
                 .is_none_or(|context| context.path != path)
         {
-            run.context = Some(start_context_reader(path, run.id.clone(), provider, cx));
+            run.context = Some(start_context_reader(path, run.id.clone(), cx));
         }
+        // This runs on every frame the sheet is open, and the main chat's
+        // stream makes many: a run whose rows are the size they were is not
+        // read, copied and compared again.
+        let read_rows = run
+            .context
+            .as_ref()
+            .filter(|context| context.loaded && !context.failed && !context.rows.is_empty())
+            .map(|context| &context.rows);
+        let built_from = (
+            read_rows.map_or(0, Vec::len),
+            read_rows.map_or(0, |rows| rows.iter().map(|row| row.text.len()).sum()),
+            run.agent.source.len(),
+            sheet.sent.get(&run.id).map_or(0, Vec::len),
+            run.agent.run.model.as_ref().map_or(0, String::len),
+            run.agent.run.started_at,
+            running,
+        );
+        if run.built_from == Some(built_from) {
+            return;
+        }
+        run.built_from = Some(built_from);
+        // What the provider's transcript has, or failing that what the stream
+        // brought of the run, with the user's own messages where they fell.
+        let read = run
+            .context
+            .as_ref()
+            .filter(|context| context.loaded && !context.failed && !context.rows.is_empty())
+            .map(|context| context.rows.clone());
+        let mut rows = read.unwrap_or_else(|| run_rows(&run.agent));
+        // The brief opens the run's one turn, so it carries the run's own
+        // start, not the moment the sheet was opened.
+        let started_at = run.agent.run.started_at;
+        if let Some(brief) = rows.first_mut().filter(|row| row.role == "user") {
+            brief.sent_at = started_at.or(brief.sent_at);
+        }
+        run.own_rows = rows.len();
+        for (earlier, sent) in sheet.sent.get(&run.id).into_iter().flatten().enumerate() {
+            rows.insert((sent.after + earlier).min(rows.len()), sent.row.clone());
+        }
+        let model = run.agent.run.model.clone().unwrap_or_default();
+        let from = rows
+            .iter()
+            .zip(&run.chat_rows)
+            .take_while(|(new, old)| new == old)
+            .count();
+        // A patch never shortens a view: fewer rows than before start it over.
+        let from = if rows.len() < run.chat_rows.len() {
+            run.chat = cx.new(|_| chat_view_entity());
+            0
+        } else {
+            from
+        };
+        let patch = rows[from..].to_vec();
+        run.chat_rows = rows;
+        run.chat.update(cx, |chat, cx| {
+            chat.streaming(running, cx);
+            chat.patch(from, patch, cx);
+            chat.identity(&provider, &model);
+            chat.turn_started_at(started_at);
+        });
     }
 
     pub(super) fn subagent_sheet(
@@ -290,12 +419,11 @@ impl Conversation {
     ) -> Option<AnyElement> {
         self.subagent_sheet.run.as_ref()?;
         let now = Instant::now();
-        let live = self.busy;
+        let live = self.sheet_run_live(cx);
         let progress = self
             .subagent_sheet
             .fold
             .map_or(1., |fold| fold.value(now).clamp(0., 1.));
-        let open = self.subagent_sheet.open;
         let overlay_slot = self.subagent_sheet.overlay.clone();
         let content_root = self.subagent_sheet_content(live, now, window, cx);
         let probe = overlay_slot.layout_probe();
@@ -306,24 +434,6 @@ impl Conversation {
             .map(|(overlay, stand)| sheet_bounds(overlay, stand));
         match (overlay, geometry) {
             (Some(overlay), Some(sheet)) => {
-                // The pane above the composer: pressing it folds the sheet away.
-                let backdrop = sheet.bottom() - overlay.top();
-                root = root.when(open, |d| {
-                    d.child(
-                        div()
-                            .id("subagent-sheet-backdrop")
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .right_0()
-                            .h(backdrop)
-                            .occlude()
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this, _, _, cx| this.close_subagent_sheet(cx)),
-                            ),
-                    )
-                });
                 // Rises out of the card below it and sinks back in: only the
                 // clip's top edge moves, so nothing slides inside the sheet.
                 let height = sheet.size.height * progress;
@@ -408,16 +518,16 @@ impl Conversation {
             .pt(px(10.))
             .pb(px(4.))
             .child(sheet_tab(
+                "subagent-tab-chat",
+                "Chat",
+                view == SheetView::Chat,
+                cx.listener(|this, _, _, cx| this.set_sheet_view(SheetView::Chat, cx)),
+            ))
+            .child(sheet_tab(
                 "subagent-tab-activity",
                 "Activity",
                 view == SheetView::Activity,
                 cx.listener(|this, _, _, cx| this.set_sheet_view(SheetView::Activity, cx)),
-            ))
-            .child(sheet_tab(
-                "subagent-tab-context",
-                "Context",
-                view == SheetView::Context,
-                cx.listener(|this, _, _, cx| this.set_sheet_view(SheetView::Context, cx)),
             ));
         let body_t = ((now.saturating_duration_since(run.shown_at).as_secs_f32() * 1000.
             - BODY_DELAY_MS)
@@ -429,8 +539,8 @@ impl Conversation {
         }
         let eased = crate::reveal::bezier(body_t, 0.22, 1., 0.36, 1.);
         let body = match view {
+            SheetView::Chat => chat_view(run, can_read),
             SheetView::Activity => activity_view(run),
-            SheetView::Context => context_view(run, can_read),
         };
         div()
             .id("subagent-sheet")
@@ -530,6 +640,34 @@ impl Conversation {
             .px(px(16.))
             .pt(px(14.))
             .pb(px(12.))
+            .child(
+                div()
+                    .id("subagent-back-to-parent")
+                    .group("subagent-back-to-parent")
+                    .debug_selector(|| "subagent-back-to-parent".into())
+                    .role(Role::Button)
+                    .aria_label("Back to the main chat")
+                    .tooltip(sheet_tip("Back to the main chat (Esc)"))
+                    .h(px(24.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .gap(px(2.))
+                    .rounded(px(6.))
+                    .pl(px(4.))
+                    .pr(px(8.))
+                    .cursor_pointer()
+                    .text_size(px(12.))
+                    .text_color(content(0.6))
+                    .hover(|s| s.bg(content(0.1)).text_color(content(1.)))
+                    .child(
+                        icon("chevron-left", 14.)
+                            .text_color(content(0.6))
+                            .group_hover("subagent-back-to-parent", |s| s.text_color(content(1.))),
+                    )
+                    .child("Main chat")
+                    .on_click(cx.listener(|this, _, _, cx| this.close_subagent_sheet(cx))),
+            )
             .child(div().mt(px(2.)).child(subagent_face(&name, state, 16.)))
             .child(
                 div()
@@ -620,17 +758,14 @@ impl Conversation {
     }
 }
 
-/// `.subagent-sheet`: `top: clamp(2.5rem, 16%, 11rem)`, standing on the card.
-/// Its `px-3.5` makes it a little narrower than the card's `px-2`.
+/// The whole pane above the composer: an open run takes the chat's place, so
+/// its conversation has the room the chat had.
 fn sheet_bounds(overlay: Bounds<Pixels>, stand: Bounds<Pixels>) -> Bounds<Pixels> {
-    let bottom = stand.top();
-    let height = f32::from(bottom - overlay.top()).max(0.);
-    let top = overlay.top() + px((height * 0.16).clamp(40., 176.));
     Bounds::new(
-        point(stand.left() + px(SHEET_INSET), top),
+        overlay.origin,
         size(
-            stand.size.width - px(2. * SHEET_INSET),
-            (bottom - top).max(px(0.)),
+            overlay.size.width,
+            (stand.top() - overlay.top()).max(px(0.)),
         ),
     )
 }
@@ -828,149 +963,120 @@ fn activity_view(run: &OpenRun) -> AnyElement {
         .into_any_element()
 }
 
-/// Everything in the run's window: the brief its parent wrote, then its own
-/// conversation, read from the provider's transcript. Without a readable
-/// transcript the brief is what there is.
-fn context_view(run: &OpenRun, can_read: bool) -> AnyElement {
-    if let Some(context) = run
-        .context
-        .as_ref()
-        .filter(|context| context.loaded && !context.failed)
-    {
-        return div()
-            .flex_1()
-            .min_h_0()
-            .child(
-                context
-                    .view
-                    .clone()
-                    .cached(gpui::StyleRefinement::default().size_full()),
-            )
-            .into_any_element();
-    }
-    let path = run.agent.run.transcript_path.as_ref();
-    let reading =
-        path.is_some() && can_read && run.context.as_ref().is_none_or(|context| !context.failed);
-    let prompt = run
-        .agent
-        .run
-        .prompt
-        .clone()
-        .filter(|prompt| !prompt.trim().is_empty())
-        .or_else(|| Some(run.agent.run.brief.clone()).filter(|brief| !brief.trim().is_empty()));
-    div()
-        .id("subagent-brief")
-        .flex_1()
-        .min_h_0()
-        .overflow_y_scroll()
-        .px(px(16.))
-        .pt(px(4.))
-        .pb(px(16.))
-        .when_some(prompt, |d, prompt| {
-            d.child(
-                div()
-                    .pb(px(4.))
-                    .text_size(px(11.))
-                    .text_color(content(0.4))
-                    .child("Brief"),
-            )
-            .child(
-                div()
-                    .rounded(px(8.))
-                    .border_1()
-                    .border_color(content(0.08))
-                    .bg(content(0.03))
-                    .px(px(12.))
-                    .py(px(8.))
-                    .child(brief_markdown(run, prompt)),
-            )
-        })
-        .child(div().pt(px(12.)).child(sheet_note(if reading {
-            "Reading the agent's conversation…"
-        } else if path.is_some() && !can_read {
-            "The agent's full conversation stays on the machine it ran on."
-        } else {
-            "This agent's provider doesn't share its full conversation."
-        })))
-        .into_any_element()
+/// A view for a run's conversation: narrow as a side question's, with what the
+/// run thought and called left open rather than folded behind its reply.
+fn chat_view_entity() -> TranscriptView {
+    let mut chat = TranscriptView::new();
+    chat.side_question();
+    chat.unfold_work();
+    chat
 }
 
-/// AgentMarkdown: the brief as the parent wrote it, lists and code included.
-fn brief_markdown(run: &OpenRun, text: String) -> AnyElement {
-    let rows = {
-        let mut brief = run.brief.borrow_mut();
-        match brief.as_ref() {
-            Some((parsed, rows)) if *parsed == text => rows.clone(),
-            _ => {
-                let rows: std::rc::Rc<Vec<MarkdownRow>> = std::rc::Rc::new(
-                    markdown_model::parse_full(&text)
-                        .blocks
-                        .iter()
-                        .flat_map(|block| markdown::rows(&block.block))
-                        .collect(),
-                );
-                *brief = Some((text, rows.clone()));
-                rows
-            }
-        }
+/// The run's conversation when its provider keeps no transcript to read: the
+/// brief, the steps the stream brought, and the report it handed back.
+fn run_rows(agent: &Subagent) -> Vec<Row> {
+    let row = |role: &str, text: &str, sent_at: Option<u64>| Row {
+        role: role.into(),
+        text: text.to_owned(),
+        first: true,
+        sent_at,
     };
-    let now = Instant::now();
+    let run = &agent.run;
+    let mut rows = Vec::new();
+    let brief = run
+        .prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty())
+        .unwrap_or(run.brief.trim());
+    if !brief.is_empty() {
+        rows.push(row("user", brief, run.started_at));
+    }
+    for step in &run.steps {
+        match step.kind.as_str() {
+            "thinking" => {
+                let thought = if step.text.trim().is_empty() {
+                    step.detail.trim()
+                } else {
+                    step.text.trim()
+                };
+                if !thought.is_empty() {
+                    rows.push(row("reasoning", thought, None));
+                }
+            }
+            "tool" => {
+                if let Ok(call) = serde_json::to_string(&step.to_tool_call()) {
+                    rows.push(row("tool", &call, None));
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(report) = run.response.as_deref().map(str::trim)
+        && !report.is_empty()
+    {
+        rows.push(row("assistant", report, run.ended_at));
+    }
+    rows
+}
+
+/// Everything in the run's window: the brief its parent wrote, then its own
+/// conversation, read from the provider's transcript where there is one.
+fn chat_view(run: &OpenRun, can_read: bool) -> AnyElement {
+    let path = run.agent.run.transcript_path.as_ref();
+    let reading = path.is_some()
+        && can_read
+        && run
+            .context
+            .as_ref()
+            .is_none_or(|context| !context.loaded && !context.failed);
+    if run.chat_rows.is_empty() {
+        return div()
+            .px(px(16.))
+            .pt(px(4.))
+            .pb(px(16.))
+            .child(div().py(px(8.)).child(sheet_note(if reading {
+                "Reading the agent's conversation…"
+            } else {
+                "Waiting for the agent's first step…"
+            })))
+            .into_any_element();
+    }
     div()
+        .flex_1()
+        .min_h_0()
         .flex()
         .flex_col()
-        .min_w_0()
-        .children(rows.iter().enumerate().map(|(at, row)| {
-            let id: SharedString = format!("subagent-brief-row-{at}").into();
-            let body = match &row.part {
-                Part::Code { fence, lines } => div()
-                    .id(id.clone())
-                    .overflow_x_scroll()
-                    .rounded_lg()
-                    .border_1()
-                    .border_color(content(0.1))
-                    .bg(content(0.03))
-                    .py_2()
-                    .child(markdown::code_lines(fence, lines.clone(), None, "", false))
-                    .into_any_element(),
-                _ => markdown::body(row, id, Tone::Normal, None, now),
-            };
+        .child(
+            div().flex_1().min_h_0().child(
+                run.chat
+                    .clone()
+                    .cached(gpui::StyleRefinement::default().size_full()),
+            ),
+        )
+        .child(
             div()
-                .pt(px(if at == 0 { 0. } else { row.gap }))
-                .flex()
-                .min_w_0()
-                .gap_2()
-                // The box already insets it, so a top-level list starts there.
-                .pl(px(row.indent.saturating_sub(1) as f32 * 16.))
-                .when(row.quote > 0, |d| {
-                    d.border_l_2().border_color(content(0.15)).pl_3()
-                })
-                .when_some(row.marker.clone(), |d, marker| {
-                    d.child(
-                        div()
-                            .w_4()
-                            .flex_shrink_0()
-                            .text_color(content(0.7))
-                            .text_size(px(14.))
-                            .line_height(px(24.))
-                            .child(marker),
-                    )
-                })
-                .child(div().min_w_0().flex_1().child(body))
-        }))
+                .flex_shrink_0()
+                .border_t_1()
+                .border_color(content(0.08))
+                .px(px(16.))
+                .py(px(8.))
+                .child(sheet_note(if path.is_some() && !can_read {
+                    "The agent's full conversation stays on the machine it ran on. \
+                     What you write below goes to the main chat, which passes it on."
+                } else {
+                    "What you write below goes to the main chat, which passes it on \
+                     to this agent."
+                })),
+        )
         .into_any_element()
 }
 
 fn start_context_reader(
     path: String,
     run_id: String,
-    provider: String,
     cx: &mut Context<Conversation>,
 ) -> ContextReader {
-    let view = cx.new(|_| {
-        let mut view = TranscriptView::new();
-        view.side_question();
-        view
-    });
     let reader_path = path.clone();
     let task = cx.spawn(async move |this, cx| {
         let mut reader = SubagentTranscript::conversation(reader_path);
@@ -988,7 +1094,7 @@ fn start_context_reader(
             let changed = read.unwrap_or(false);
             let keep_going = this
                 .update(cx, |this, cx| {
-                    let live = this.busy;
+                    let live = this.sheet_run_live(cx);
                     let Some(run) = this
                         .subagent_sheet
                         .run
@@ -998,42 +1104,15 @@ fn start_context_reader(
                         return false;
                     };
                     let running = run.agent.state(live) == RunState::Running;
-                    let started_at = run.agent.run.started_at;
-                    let model = run.agent.run.model.clone().unwrap_or_default();
-                    let provider = provider.clone();
                     let Some(context) = run.context.as_mut() else {
                         return false;
                     };
                     if failed && !context.loaded {
                         context.failed = !running;
                     }
+                    // The sheet draws them on its next step.
                     if !failed && (changed || first) {
-                        let mut rows = rows;
-                        // The brief opens the run's one turn, so it carries the
-                        // run's own start, not the moment the sheet was opened.
-                        if let Some(brief) = rows.first_mut().filter(|row| row.role == "user") {
-                            brief.sent_at = started_at.or(brief.sent_at);
-                        }
-                        let from = rows
-                            .iter()
-                            .zip(&context.rows)
-                            .take_while(|(new, old)| new == old)
-                            .count();
                         context.loaded = context.loaded || !rows.is_empty();
-                        if from < rows.len() {
-                            let patch = rows[from..].to_vec();
-                            context.view.update(cx, |view, cx| {
-                                view.streaming(running, cx);
-                                view.patch(from, patch, cx);
-                                view.identity(&provider, &model);
-                                view.turn_started_at(started_at);
-                            });
-                        } else {
-                            context.view.update(cx, |view, cx| {
-                                view.streaming(running, cx);
-                                view.turn_started_at(started_at);
-                            });
-                        }
                         context.rows = rows;
                     }
                     cx.notify();
@@ -1051,10 +1130,21 @@ fn start_context_reader(
         path,
         loaded: false,
         failed: false,
-        view,
         rows: Vec::new(),
         _task: task,
     }
+}
+
+/// What the main chat is sent when the user writes to a run from its sheet.
+/// No provider lets the app address a subagent itself: its parent can, by
+/// resuming or messaging the run it started, so the message goes there with
+/// whose it is.
+pub(super) fn relay(name: &str, id: &str, message: &str) -> String {
+    format!(
+        "[Message for the subagent \"{name}\" ({id}). The user wrote it while reading that \
+         subagent's work: pass it on to that subagent if it can still be reached, and carry it \
+         out yourself in its place if it cannot.]\n\n{message}"
+    )
 }
 
 fn status_phrase(state: RunState, elapsed: Option<u64>) -> String {
@@ -1073,11 +1163,17 @@ mod tests {
     use super::*;
 
     #[gpui::test]
-    fn a_brief_without_a_transcript_reads_as_markdown(cx: &mut gpui::TestAppContext) {
+    fn a_run_opens_on_its_conversation_with_what_was_written_to_it(cx: &mut gpui::TestAppContext) {
         use super::super::subagent_dock::tests::{agent, open, redraw, row};
         use monocode_core::tool::ToolState;
         let window = open(
-            vec![row("user", "Go".into()), agent("a", ToolState::Running)],
+            vec![
+                row("user", "Go".into()),
+                agent("old", ToolState::Completed),
+                row("assistant", "Done.".into()),
+                row("user", "Again".into()),
+                agent("a", ToolState::Running),
+            ],
             true,
             cx,
         );
@@ -1085,33 +1181,112 @@ mod tests {
         redraw(visual);
         window
             .update(visual, |view, _, cx| {
+                // The card above the composer has the turn's runs; a sheet
+                // opens any run the session has had.
+                assert_eq!(view.subagents(cx).len(), 1);
+                assert_eq!(view.session_subagents(cx).len(), 2);
+                view.open_subagent_sheet("old", cx);
+                assert_eq!(view.subagent_sheet_run().as_deref(), Some("old"));
                 view.open_subagent_sheet("a", cx);
-                view.set_sheet_view(SheetView::Context, cx);
-                let run = view.subagent_sheet.run.as_mut().unwrap();
-                run.agent.run.prompt = Some("Then **report**:\n\n- what ran\n- how long".into());
-                let rows = {
-                    let prompt = run.agent.run.prompt.clone().unwrap();
-                    let _ = brief_markdown(run, prompt);
-                    run.brief.borrow().as_ref().unwrap().1.clone()
-                };
-                assert_eq!(rows.len(), 3, "a paragraph and two list items");
-                assert_eq!(rows.iter().filter(|row| row.marker.is_some()).count(), 2);
+            })
+            .unwrap();
+        redraw(visual);
+        window
+            .update(visual, |view, _, cx| {
+                let run = view.subagent_sheet.run.as_ref().unwrap();
+                assert!(run.view == SheetView::Chat);
+                let roles: Vec<_> = run.chat_rows.iter().map(|row| row.role.as_str()).collect();
+                assert_eq!(roles, ["user"], "the brief, until the run does something");
+                let (name, id) = view.subagent_relay_target().unwrap();
+                assert_eq!(id, "task-a", "the id its provider knows it by");
+                view.note_sent_to_subagent("  Skip the tests  ", cx);
+                view.note_sent_to_subagent("And the docs", cx);
+                assert!(relay(&name, &id, "Skip the tests").ends_with("\n\nSkip the tests"));
+            })
+            .unwrap();
+        redraw(visual);
+        window
+            .update(visual, |view, _, cx| {
+                let run = view.subagent_sheet.run.as_ref().unwrap();
+                let texts: Vec<_> = run
+                    .chat_rows
+                    .iter()
+                    .skip(1)
+                    .map(|row| row.text.as_str())
+                    .collect();
+                assert_eq!(texts, ["Skip the tests", "And the docs"]);
+                // Closed, a message is the main chat's own again.
+                view.close_subagent_sheet(cx);
+                assert!(view.subagent_relay_target().is_none());
             })
             .unwrap();
     }
 
     #[test]
-    fn the_sheet_stands_on_the_card_as_tall_as_a_side_question() {
+    fn a_run_without_a_transcript_reads_as_brief_steps_and_report() {
+        use monocode_core::tool::{
+            ToolState,
+            tasks::{AgentRun, AgentStep},
+        };
+        let agent = Subagent {
+            id: "a".into(),
+            run: AgentRun {
+                brief: "Audit".into(),
+                prompt: Some("Audit the **provider**".into()),
+                steps: vec![
+                    AgentStep {
+                        id: "t".into(),
+                        kind: "thinking".into(),
+                        text: "Reading first".into(),
+                        ..AgentStep::default()
+                    },
+                    AgentStep {
+                        id: "c".into(),
+                        kind: "tool".into(),
+                        text: "Read acp.rs".into(),
+                        state: Some(ToolState::Completed),
+                        ..AgentStep::default()
+                    },
+                ],
+                response: Some("All sound.".into()),
+                ..AgentRun::default()
+            },
+            running: false,
+            tool_state: ToolState::Completed,
+            source: String::new(),
+        };
+        let rows = run_rows(&agent);
+        let roles: Vec<_> = rows.iter().map(|row| row.role.as_str()).collect();
+        assert_eq!(roles, ["user", "reasoning", "tool", "assistant"]);
+        assert_eq!(
+            rows[0].text, "Audit the **provider**",
+            "the whole brief, not its label"
+        );
+        assert_eq!(rows[3].text, "All sound.");
+    }
+
+    #[test]
+    fn the_sheet_takes_the_pane_above_the_composer() {
         let overlay = Bounds::new(point(px(0.), px(0.)), size(px(1200.), px(900.)));
         let stand = Bounds::new(point(px(100.), px(700.)), size(px(800.), px(200.)));
         let sheet = sheet_bounds(overlay, stand);
-        assert_eq!(sheet.left(), px(114.));
-        assert_eq!(sheet.size.width, px(772.));
-        assert_eq!(sheet.bottom(), px(700.));
-        assert_eq!(sheet.top(), px(112.), "16% of the pane above the composer");
-        let short = Bounds::new(point(px(0.), px(0.)), size(px(1200.), px(300.)));
-        let stand = Bounds::new(point(px(100.), px(200.)), size(px(800.), px(100.)));
-        assert_eq!(sheet_bounds(short, stand).top(), px(40.), "clamped");
+        assert_eq!((sheet.left(), sheet.top()), (px(0.), px(0.)));
+        assert_eq!(sheet.size.width, px(1200.));
+        assert_eq!(
+            sheet.bottom(),
+            px(700.),
+            "it stops where the composer starts"
+        );
+        let above = Bounds::new(point(px(0.), px(0.)), size(px(1200.), px(100.)));
+        assert_eq!(sheet_bounds(overlay, above).size.height, px(0.));
+    }
+
+    #[test]
+    fn a_message_for_a_run_tells_the_main_chat_whose_it_is() {
+        let sent = relay("Audit the provider", "task-7", "Skip the tests");
+        assert!(sent.contains("\"Audit the provider\""));
+        assert!(sent.contains("task-7"));
+        assert!(sent.ends_with("\n\nSkip the tests"));
     }
 
     #[test]

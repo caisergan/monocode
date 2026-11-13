@@ -4,6 +4,9 @@
 use super::*;
 use std::collections::VecDeque;
 
+mod hermes;
+pub(super) use hermes::steer as hermes_steer;
+
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum Stage {
     #[default]
@@ -23,6 +26,9 @@ struct BackgroundDispatch {
     call_id: String,
     delegation_id: String,
     transcripts: Vec<String>,
+    /// When the dispatch was seen: a batch whose files then stop changing
+    /// for long is one whose runner died.
+    at: Instant,
 }
 #[derive(Default)]
 pub(super) struct State {
@@ -46,6 +52,17 @@ pub(super) struct State {
     notices: Vec<Event>,
     stale_model: Option<String>,
     mode: Option<&'static str>,
+    /// The session being opened is a branch of another, asked of the provider.
+    forking: bool,
+    /// A `session/prompt` is out and unanswered.
+    prompt_open: bool,
+    /// The chat was loaded without the editor's servers after Hermes could
+    /// not take them (its session was busy): tried once.
+    load_plain: bool,
+    /// The prompt Stop cancelled, by its request id, until its answer comes:
+    /// what the session sends before that is the cancelled turn's tail.
+    unsettled: Option<Value>,
+    hermes: hermes::State,
 }
 
 pub(super) fn configure(command: &mut Command, request: &Request) -> Result<(), String> {
@@ -100,6 +117,15 @@ impl Protocol {
     /// The native visual tools, plus a Mono's app tool.
     fn mcp_servers(&self) -> Value {
         let settings = &self.request.settings;
+        // A Hermes whose sessions cannot reach its own servers once they are
+        // given the editor's (0.23) gets none of ours; one that can gets both.
+        if self.request.kind == Kind::Hermes
+            && hermes::default_home().is_some_and(|home| {
+                hermes::has_own_mcp_servers(&home) && !hermes::overlay_reaches_profile(&home)
+            })
+        {
+            return json!([]);
+        }
         let mut servers = crate::visual_bridge::acp_servers(&settings.environment);
         if let (Some(list), Some(app)) = (
             servers.as_array_mut(),
@@ -135,6 +161,16 @@ impl Protocol {
                 },
                 stdin,
             )?;
+        }
+        // Hermes does answer a cancelled prompt, after the turn's last frames.
+        // The child is reused: those frames must not open the next reply.
+        if self.request.kind == Kind::Hermes {
+            if std::mem::take(&mut self.acp.prompt_open) {
+                self.acp.unsettled = Some(self.acp.sequence.into());
+            } else if let Some(wire) = self.acp.hermes.trailing_prompt() {
+                self.acp.unsettled = Some(wire.into());
+            }
+            self.acp.hermes.forget_trailing();
         }
         // Tauri rejects the local prompt promise immediately after notifying;
         // ACP does not promise a response to a cancelled prompt.
@@ -174,7 +210,11 @@ impl Protocol {
             events.append(&mut self.acp.notices);
             return Ok(events);
         }
-        Ok(std::mem::take(&mut self.acp.notices))
+        let mut events = std::mem::take(&mut self.acp.notices);
+        if self.request.kind == Kind::Hermes {
+            events.extend(self.hermes_tick());
+        }
+        Ok(events)
     }
 
     pub(super) fn acp_active_session(&self) -> Option<&str> {
@@ -192,6 +232,7 @@ impl Protocol {
     ) -> Result<(), String> {
         self.acp.sequence += 1;
         self.acp.stage = stage;
+        self.acp.prompt_open = method == "session/prompt";
         self.acp.pending_method = method;
         self.acp.pending_params = params.clone();
         let seconds = if self.probe {
@@ -206,7 +247,10 @@ impl Protocol {
             match (self.request.kind, stage) {
                 (Kind::Cursor, _) => None,
                 (Kind::Grok | Kind::Fx | Kind::Antigravity, Stage::Initialize) => Some(12),
-                (Kind::Hermes | Kind::Devin, Stage::Initialize) => Some(20),
+                // Hermes may sync its environment before it serves ACP, and
+                // every control is several calls to its gateway.
+                (Kind::Hermes, Stage::Initialize | Stage::Configure) => Some(60),
+                (Kind::Devin, Stage::Initialize) => Some(20),
                 (Kind::Grok, Stage::Authenticate) => Some(15),
                 (Kind::Devin, Stage::Authenticate) => {
                     Some(if params["_meta"]["api_key"].is_string() {
@@ -216,9 +260,15 @@ impl Protocol {
                     })
                 }
                 (Kind::Devin, Stage::New) if self.probe => Some(30),
+                // A load replays the whole chat before it answers.
+                (Kind::Hermes, Stage::New | Stage::Load | Stage::Resume) => Some(180),
                 (_, Stage::New | Stage::Load | Stage::Resume) => Some(45),
                 (Kind::Grok | Kind::Fx | Kind::Antigravity, Stage::Configure) => Some(15),
-                (Kind::Hermes | Kind::Devin, Stage::Configure) => Some(20),
+                (Kind::Devin, Stage::Configure) => Some(20),
+                // Hermes's gateway owns the turn and runs it whether this
+                // child lives or not: giving up on a long one would leave it
+                // running unseen, with every later prompt queued behind it.
+                (Kind::Hermes, Stage::Prompt) => None,
                 (_, Stage::Prompt) => Some(30 * 60),
                 (Kind::Devin, Stage::ThoughtProbe) => Some(5),
                 (Kind::Devin, Stage::DeleteProbe) => Some(30),
@@ -230,6 +280,41 @@ impl Protocol {
             stdin,
             json!({"jsonrpc":"2.0","id":self.acp.sequence,"method":method,"params":params}),
         )
+    }
+    /// A frame that arrived while the child sat idle between turns. Its text
+    /// and tools belong to no reply of ours; the session's settings another
+    /// surface changed are what the next turn compares its own with.
+    pub(super) fn acp_idle_frame(&mut self, frame: &Value) {
+        if frame.get("method").is_none() && self.acp.unsettled.as_ref() == Some(&frame["id"]) {
+            self.acp.unsettled = None;
+            return;
+        }
+        if frame["method"] != "session/update"
+            || frame["params"]["sessionId"]
+                .as_str()
+                .is_some_and(|id| id != self.acp.session)
+        {
+            return;
+        }
+        let update = &frame["params"]["update"];
+        match update["sessionUpdate"].as_str() {
+            Some("current_mode_update") => {
+                let mode = update
+                    .get("currentModeId")
+                    .or_else(|| update.get("current_mode_id"));
+                if let Some(mode) = mode.filter(|mode| mode.is_string()) {
+                    if self.acp.setup["modes"].is_object() {
+                        self.acp.setup["modes"]["currentModeId"] = mode.clone();
+                    }
+                }
+            }
+            Some("config_option_update" | "config_options_update")
+                if update["configOptions"].is_array() =>
+            {
+                self.acp.setup["configOptions"] = update["configOptions"].clone();
+            }
+            _ => {}
+        }
     }
     pub(super) fn acp_resume_warm(&mut self, stdin: &mut impl Write) -> Result<(), String> {
         self.acp.message = 0;
@@ -243,6 +328,12 @@ impl Protocol {
     }
     pub(super) fn acp_start(&mut self, stdin: &mut impl Write) -> Result<(), String> {
         let mut params = json!({"protocolVersion":1,"clientInfo":{"name":"monocode","version":env!("CARGO_PKG_VERSION")},"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false,"session":{"configOptions":{"boolean":{}}}}});
+        if self.request.kind == Kind::Hermes {
+            // Hermes sends a `clarify` question as a form to a client that
+            // takes forms. To one that does not it sends a permission card
+            // of the choices, with no room for an answer in the user's words.
+            params["clientCapabilities"]["elicitation"] = json!({"form":{}});
+        }
         if self.request.kind == Kind::Cursor {
             params["clientCapabilities"]["_meta"] = json!({"parameterizedModelPicker":true});
         }
@@ -262,7 +353,30 @@ impl Protocol {
         }
         self.acp_new(stdin)
     }
+    /// The session a chat continued from another branches off, where the
+    /// provider keeps it: Hermes copies the whole history into a new session.
+    fn fork_source(&self) -> Option<&str> {
+        let settings = &self.request.settings;
+        (self.request.kind == Kind::Hermes && settings.fork_fallback_prompt.is_some())
+            .then(|| {
+                settings
+                    .handoff
+                    .as_ref()?
+                    .continued
+                    .as_ref()?
+                    .fork
+                    .as_deref()
+            })
+            .flatten()
+            .filter(|source| !source.is_empty())
+    }
     fn acp_new(&mut self, stdin: &mut impl Write) -> Result<(), String> {
+        if let Some(source) = self.fork_source().map(str::to_owned) {
+            self.acp.forking = true;
+            let params =
+                json!({"sessionId":source,"cwd":self.request.cwd,"mcpServers":self.mcp_servers()});
+            return self.acp_send(Stage::New, "session/fork", params, stdin);
+        }
         let mut params = json!({"cwd":self.request.cwd,"mcpServers":self.mcp_servers()});
         if self.request.kind == Kind::Grok {
             if self.request.settings.access == AccessMode::FullAccess {
@@ -304,6 +418,13 @@ impl Protocol {
             self.acp_settings(&setup);
             self.acp_next(stdin)
         } else if let Some(mode) = self.acp.mode.take() {
+            // Hermes changes a mode only while the session is idle and fails
+            // the request otherwise, which a turn its gateway still runs makes
+            // of every prompt. A session already in this mode has nothing to set.
+            if self.request.kind == Kind::Hermes && self.acp.setup["modes"]["currentModeId"] == mode
+            {
+                return self.acp_next(stdin);
+            }
             self.acp_send(
                 Stage::Configure,
                 "session/set_mode",
@@ -318,6 +439,9 @@ impl Protocol {
                 stdin,
             )
         } else {
+            if self.request.kind == Kind::Hermes {
+                self.hermes_turn_begins();
+            }
             self.acp_send(
                 Stage::Prompt,
                 "session/prompt",
@@ -475,7 +599,12 @@ impl Protocol {
                 .or_insert_with(|| thinking.to_string());
         }
         if kind == Kind::Hermes {
-            selected.retain(|id, _| id == "effort");
+            selected.retain(|id, _| {
+                matches!(
+                    id.as_str(),
+                    "effort" | "reasoning" | "reasoning_effort" | "service_tier"
+                )
+            });
         }
         if kind == Kind::Grok {
             if let Some(effort) = selected
@@ -512,15 +641,34 @@ impl Protocol {
             if matches!(config_id, "provider" | "model" | "mode") || !resolved.insert(config_id) {
                 continue;
             }
-            if kind == Kind::Devin {
+            if matches!(kind, Kind::Devin | Kind::Hermes) {
                 let mut choices = Vec::new();
                 config_choices(&option["options"], &mut choices);
                 if !choices.is_empty() && !choices.contains(&value) {
-                    let Some(nearest) = (if matches!(id.as_str(), "effort" | "reasoning") {
+                    // Hermes lists `default` only while no level is set, and
+                    // takes it at any time: the level its own config names.
+                    let reset = kind == Kind::Hermes
+                        && config_id == "reasoning_effort"
+                        && value.eq_ignore_ascii_case("default");
+                    // A session already at the level its profile names is
+                    // at its default: nothing to reset, turn after turn.
+                    if reset
+                        && option["currentValue"].as_str().is_some_and(|current| {
+                            hermes::default_home()
+                                .and_then(|home| hermes::profile_effort(&home))
+                                .is_some_and(|level| level.eq_ignore_ascii_case(current))
+                        })
+                    {
+                        continue;
+                    }
+                    let nearest = if reset {
+                        Some(value.clone())
+                    } else if matches!(id.as_str(), "effort" | "reasoning" | "reasoning_effort") {
                         nearest_effort(&value, &choices)
                     } else {
                         None
-                    }) else {
+                    };
+                    let Some(nearest) = nearest else {
                         continue;
                     };
                     value = nearest;
@@ -547,7 +695,7 @@ impl Protocol {
         stdin: &mut impl Write,
     ) -> Result<(), String> {
         let kind = self.request.kind;
-        let detail = error["message"].as_str().unwrap_or("RPC request failed");
+        let detail = error_text(error);
         if self.acp.cancelling {
             self.done = true;
             return Ok(());
@@ -564,6 +712,19 @@ impl Protocol {
                 return self.acp_probe_next(stdin);
             }
             Stage::ListModels => return self.acp_session(stdin),
+            Stage::New if self.acp.forking => {
+                // The source is gone, or this Hermes cannot branch: start
+                // fresh, with the recap the fork would have made needless.
+                self.acp.forking = false;
+                if let Some(prompt) = self.request.settings.fork_fallback_prompt.take() {
+                    self.request.prompt = prompt;
+                    self.acp.notices.push(Event::Status(format!(
+                        "{} could not branch the chat; this one starts from a recap of it.",
+                        kind.label()
+                    )));
+                }
+                return self.acp_new(stdin);
+            }
             Stage::Authenticate if matches!(kind, Kind::Cursor | Kind::Grok) => {
                 return self.acp_session(stdin);
             }
@@ -572,11 +733,32 @@ impl Protocol {
             }
             Stage::Load => {
                 let lower = detail.to_lowercase();
+                // Hermes swaps a session's editor servers only while it is
+                // idle, and ours differ at every launch. A chat whose turn is
+                // still running is opened with the servers it has instead of
+                // not at all.
+                if kind == Kind::Hermes
+                    && !timed_out
+                    && lower.contains("session_busy")
+                    && !std::mem::replace(&mut self.acp.load_plain, true)
+                {
+                    return self.acp_send(
+                        Stage::Load,
+                        "session/load",
+                        json!({"sessionId":self.request.provider_id,"cwd":self.request.cwd,"mcpServers":[]}),
+                        stdin,
+                    );
+                }
                 let devin_missing = lower.contains("unknown session")
                     || lower.contains("no such session")
                     || (lower.contains("session") && lower.contains("not found"));
                 let replace = match kind {
-                    Kind::Cursor | Kind::Grok | Kind::Fx | Kind::Hermes => true,
+                    Kind::Cursor | Kind::Grok | Kind::Fx => true,
+                    // Hermes keeps the chat in its gateway: only a session it
+                    // no longer has is replaced. A slow, busy or refused load
+                    // must not swap the chat for an empty one behind the same
+                    // transcript.
+                    Kind::Hermes => !timed_out && (lower.contains("not_found") || devin_missing),
                     Kind::Antigravity => !timed_out,
                     Kind::Devin => !timed_out && devin_missing,
                     _ => false,
@@ -608,6 +790,29 @@ impl Protocol {
                     }
                     return self.acp_next(stdin);
                 }
+                // A turn Hermes lost holds every control until it is
+                // discarded, and `/discard` is a prompt: let the prompt
+                // through, where Hermes says how to recover or takes the
+                // discard. A session that is only busy keeps its refusal, so
+                // a stricter mode is never silently left unset.
+                if kind == Kind::Hermes && detail.contains("wait for the lost turn") {
+                    return self.acp_next(stdin);
+                }
+                // A model Hermes can no longer resolve (retired upstream)
+                // would fail every turn of the chat the same way. The session
+                // keeps the model it has; say so and go on.
+                if kind == Kind::Hermes
+                    && self.acp.pending_params["configId"] == "model"
+                    && detail.contains("model_resolution_failed")
+                {
+                    let model = self.acp.pending_params["value"]
+                        .as_str()
+                        .unwrap_or("this model");
+                    self.acp.notices.push(Event::Status(format!(
+                        "Hermes could not switch to {model}; it keeps the session's model."
+                    )));
+                    return self.acp_next(stdin);
+                }
                 // Grok/fx tolerate unsupported configuration methods; broken
                 // transports and request timeouts still retire the child.
                 if matches!(kind, Kind::Grok | Kind::Fx)
@@ -630,6 +835,16 @@ impl Protocol {
         stdin: &mut impl Write,
     ) -> Result<Vec<Event>, String> {
         let mut events = Vec::new();
+        if let Some(old) = self.acp.unsettled.clone() {
+            if v.get("method").is_none() && v["id"] == old {
+                self.acp.unsettled = None;
+                if !self.acp.cancelling {
+                    return Ok(events);
+                }
+            } else if v["method"] == "session/update" && !self.acp.cancelling {
+                return Ok(events);
+            }
+        }
         if let Some(method) = v["method"].as_str() {
             if v.get("id").is_some() {
                 if method == "cursor/ask_question"
@@ -644,6 +859,14 @@ impl Protocol {
                             "grok"
                         },
                         v["params"].clone(),
+                        &mut events,
+                        stdin,
+                    )?;
+                } else if method == "elicitation/create" && self.request.kind == Kind::Hermes {
+                    self.question(
+                        v["id"].clone(),
+                        "elicitation",
+                        hermes::clarify_question(&v["params"]),
                         &mut events,
                         stdin,
                     )?;
@@ -678,6 +901,11 @@ impl Protocol {
                     };
                     let detail = known
                         .map(|call| format!("{}\n{}\n{}", call.name, call.input, call.output))
+                        .or_else(|| {
+                            (self.request.kind == Kind::Hermes)
+                                .then(|| hermes::approval_detail(tool))
+                                .flatten()
+                        })
                         .unwrap_or_else(|| serde_json::to_string_pretty(tool).unwrap_or_default());
                     let id = v["id"].to_string();
                     let mut permission = request.clone();
@@ -705,7 +933,12 @@ impl Protocol {
                                 self.request.kind != Kind::Devin
                                     && !matches!(kind, Some("execute" | "other" | "fetch"))
                             });
-                    if self.acp.stage != Stage::Prompt || self.acp.cancelling {
+                    // Hermes asks leave outside a prompt of ours too: for a
+                    // turn its gateway was already running when the chat was
+                    // opened, for a detached subagent, to confirm a model.
+                    // Those are the user's to answer, not to refuse unseen.
+                    let anytime = self.request.kind == Kind::Hermes && !self.probe;
+                    if (self.acp.stage != Stage::Prompt && !anytime) || self.acp.cancelling {
                         self.approvals.remove(&id);
                         write_json(
                             stdin,
@@ -728,6 +961,10 @@ impl Protocol {
                             stdin,
                         )?;
                     } else {
+                        if self.acp.stage != Stage::Prompt {
+                            // The request in flight waits on the person now.
+                            self.acp.deadline = None;
+                        }
                         events.push(Event::Approval(Approval {
                             id,
                             title,
@@ -766,6 +1003,9 @@ impl Protocol {
             return Ok(events);
         }
         self.acp.deadline = None;
+        self.acp.prompt_open = false;
+        // The answer to this prompt: whatever was unsettled is behind it.
+        self.acp.unsettled = None;
         if self.acp.cancelling {
             self.done = true;
             return Ok(vec![Event::Done]);
@@ -880,6 +1120,9 @@ impl Protocol {
                     }
                 } else {
                     self.acp.setup = result.clone();
+                    self.acp
+                        .hermes
+                        .opened(self.acp.stage == Stage::New && !self.acp.forking);
                     events.push(Event::SessionId(self.acp.session.clone()));
                     if let Some(model) = result["models"]["currentModelId"].as_str() {
                         events.push(Event::Model(model.into()));
@@ -891,6 +1134,12 @@ impl Protocol {
             Stage::Configure => {
                 if result["configOptions"].is_array() {
                     self.acp.setup["configOptions"] = result["configOptions"].clone();
+                }
+                if self.acp.pending_method == "session/set_mode"
+                    && self.acp.setup["modes"].is_object()
+                {
+                    self.acp.setup["modes"]["currentModeId"] =
+                        self.acp.pending_params["modeId"].clone();
                 }
                 self.acp_next(stdin)?;
             }
@@ -906,15 +1155,15 @@ impl Protocol {
                         result["stopReason"].as_str().unwrap_or("")
                     ));
                 }
-                if self.request.kind == Kind::Hermes
-                    && !self.acp.background.is_empty()
-                    && !self.acp.cancelling
-                {
-                    self.acp.stage = Stage::Background;
-                    self.acp.background_poll = None;
-                } else {
-                    self.done = true;
-                    events.push(Event::Done);
+                if self.request.kind == Kind::Hermes {
+                    if let Some(metrics) = self.hermes_turn_metrics(result) {
+                        events.push(Event::Metrics(metrics));
+                    }
+                }
+                // A message Hermes had not yet taken into the turn runs as a
+                // prompt of its own now: the run stays open for its reply.
+                if !self.hermes_trail_steers(&mut events) {
+                    self.acp_turn_settled(&mut events);
                 }
             }
             Stage::Background => {}
@@ -932,7 +1181,16 @@ impl Protocol {
     }
     fn acp_update(&mut self, update: &Value, events: &mut Vec<Event>) {
         if self.request.kind == Kind::Hermes {
-            if let Some(dispatch) = background_dispatch(update) {
+            // The adapter cuts a long result, and a dispatch with long briefs
+            // is one: its whole text is in Hermes's own record of the call.
+            let dispatch = background_dispatch(update).or_else(|| {
+                let id = update["toolCallId"].as_str()?;
+                let cut = serde_json::to_string(&update["content"])
+                    .is_ok_and(|text| text.contains("chars total, truncated)"));
+                let stored = cut.then(|| self.hermes_stored_result(id)).flatten()?;
+                dispatch_from(id, serde_json::from_str(&stored).ok()?)
+            });
+            if let Some(dispatch) = dispatch {
                 self.acp
                     .background
                     .insert(dispatch.delegation_id.clone(), dispatch);
@@ -944,12 +1202,38 @@ impl Protocol {
             .or_else(|| update["type"].as_str())
             .unwrap_or("");
         match kind {
-            "agent_message_chunk" | "agent_message" => self.text(
-                &format!("acp-{}", self.acp.message),
-                &content_text(&update["content"]),
-                kind == "agent_message",
-                events,
-            ),
+            "agent_message_chunk" | "agent_message" => {
+                let mut key = format!("acp-{}", self.acp.message);
+                let mut text = content_text(&update["content"]);
+                if self.request.kind == Kind::Hermes {
+                    // Hermes gives the chunks of one reply one `messageId` and
+                    // its own notices ("Context compressed.") none. A chunk
+                    // of another message opens its own bubble, so a notice
+                    // does not read as the model's words nor two replies as one.
+                    let id = update
+                        .get("messageId")
+                        .or_else(|| update.get("message_id"))
+                        .and_then(Value::as_str);
+                    let another = self.acp.hermes.another_message(id)
+                        && self
+                            .emitted
+                            .get(&key)
+                            .is_some_and(|shown| !shown.is_empty());
+                    if another {
+                        key = format!("acp-{}", self.acp.message + 1);
+                    }
+                    let shown = self.emitted.get(&key).map_or("", String::as_str);
+                    text = hermes::reply_remainder(shown, &text).to_owned();
+                    // A chunk that shows nothing (a steer's receipt) is no message.
+                    if !text.is_empty() {
+                        self.acp.hermes.message_is(id);
+                        if another {
+                            self.acp.message += 1;
+                        }
+                    }
+                }
+                self.text(&key, &text, kind == "agent_message", events)
+            }
             "agent_thought_chunk" | "agent_thought" => {
                 events.push(Event::Reasoning(content_text(&update["content"])))
             }
@@ -966,6 +1250,9 @@ impl Protocol {
                     return;
                 };
                 let is_new = !self.tools.contains_key(id);
+                if is_new && self.request.kind == Kind::Hermes && hermes::approval_card(id) {
+                    return;
+                }
                 if let Some(kind) = tool["kind"].as_str() {
                     self.acp.tool_kinds.insert(id.into(), kind.into());
                 }
@@ -1025,7 +1312,11 @@ impl Protocol {
                 {
                     call.state = ToolState::Running;
                 }
-                events.push(Event::Tool(call.clone()));
+                if self.request.kind == Kind::Hermes {
+                    self.hermes_tool(id, tool, events);
+                } else {
+                    events.push(Event::Tool(call.clone()));
+                }
                 if is_new {
                     self.acp.message += 1;
                 }
@@ -1063,16 +1354,96 @@ impl Protocol {
                     .collect::<Vec<_>>()
                     .join("\n");
                 events.push(Event::Status(text));
+                if self.request.kind == Kind::Hermes {
+                    self.hermes_plan(&update["entries"], events);
+                }
+            }
+            // The mode another surface gave the session: what the next turn
+            // compares its own with before it skips setting it.
+            "current_mode_update" => {
+                let mode = update
+                    .get("currentModeId")
+                    .or_else(|| update.get("current_mode_id"));
+                if let Some(mode) = mode.filter(|mode| mode.is_string()) {
+                    if self.acp.setup["modes"].is_object() {
+                        self.acp.setup["modes"]["currentModeId"] = mode.clone();
+                    }
+                }
             }
             _ => {}
         }
+    }
+    /// The prompt has its answer: detached work is waited for, or the run ends.
+    pub(super) fn acp_turn_settled(&mut self, events: &mut Vec<Event>) {
+        if self.request.kind == Kind::Hermes
+            && !self.acp.background.is_empty()
+            && !self.acp.cancelling
+        {
+            self.acp.stage = Stage::Background;
+            self.acp.background_poll = None;
+        } else {
+            self.done = true;
+            events.push(Event::Done);
+        }
+    }
+    /// Steers still unanswered when the turn's own prompt is: Hermes could
+    /// not hand them to the turn (it had just ended) and runs each as a
+    /// prompt, answered when that ends. They are delivered, and their replies
+    /// belong to this run. True while any is out.
+    pub(super) fn hermes_trail_steers(&mut self, events: &mut Vec<Event>) -> bool {
+        if self.request.kind != Kind::Hermes || self.acp.cancelling {
+            return false;
+        }
+        for (wire, (message, _)) in self.steering.drain() {
+            self.acp.hermes.trail(wire);
+            self.text_key = None;
+            events.push(Event::FollowUp(message));
+        }
+        self.acp.hermes.trailing_prompt().is_some()
+    }
+    /// The answer to a prompt Hermes ran for a steer that came too late for
+    /// its turn, or to one Stop cancelled. None when it is neither.
+    pub(super) fn hermes_trailed(&mut self, wire: &str, value: &Value) -> Option<Vec<Event>> {
+        if self.request.kind != Kind::Hermes {
+            return None;
+        }
+        if self.acp.unsettled.as_ref() == Some(&value["id"]) {
+            self.acp.unsettled = None;
+            return Some(Vec::new());
+        }
+        let last = self.acp.hermes.trailed(wire)?;
+        let mut events = Vec::new();
+        if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
+            events.push(Event::Status(format!(
+                "{}: {}",
+                self.request.kind.label(),
+                error_text(error)
+            )));
+        }
+        if last && !self.acp.cancelling && !self.hermes_trail_steers(&mut events) {
+            self.acp_turn_settled(&mut events);
+        }
+        Some(events)
+    }
+    /// The turn failed after its prompt went out. Hermes keeps an unanswered
+    /// submit's identity in the child that sent it, for the same prompt sent
+    /// again: on another child the retry would be new work, run twice.
+    pub(super) fn acp_keeps_retry(&self) -> bool {
+        self.request.kind == Kind::Hermes
+            && self.acp.stage == Stage::Prompt
+            && !self.acp.session.is_empty()
+            && !self.acp.cancelling
+    }
+    /// No session was opened on this child yet.
+    pub(super) fn acp_unopened(&self) -> bool {
+        self.acp.session.is_empty()
     }
     fn acp_background(&mut self, stdin: &mut impl Write) -> Result<Vec<Event>, String> {
         let finished: Vec<_> = self
             .acp
             .background
             .iter()
-            .filter(|(_, dispatch)| background_finished(dispatch))
+            .filter(|(_, dispatch)| background_finished(dispatch) || background_stalled(dispatch))
             .map(|(id, _)| id.clone())
             .collect();
         if finished.is_empty() {
@@ -1088,6 +1459,7 @@ impl Protocol {
                 tool.state = ToolState::Completed;
                 events.push(Event::Tool(tool.clone()));
             }
+            self.hermes_background_done(&dispatch.call_id, &mut events);
             for path in dispatch.transcripts {
                 let tail = std::fs::read_to_string(&path).unwrap_or_default();
                 let offset = tail
@@ -1106,6 +1478,7 @@ impl Protocol {
         self.acp.message += 1;
         self.text_key = None;
         events.push(Event::BeginAssistant);
+        self.hermes_turn_begins();
         self.acp_send(
             Stage::Prompt,
             "session/prompt",
@@ -1183,7 +1556,9 @@ fn config_choices(options: &Value, choices: &mut Vec<String>) {
     }
 }
 fn nearest_effort(value: &str, choices: &[String]) -> Option<String> {
-    let order = ["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+    let order = [
+        "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+    ];
     let requested = order.iter().position(|effort| *effort == value)?;
     order
         .iter()
@@ -1221,33 +1596,57 @@ fn background_dispatch(update: &Value) -> Option<BackgroundDispatch> {
         } else {
             candidate
         };
-        if candidate["status"] != "dispatched" || candidate["mode"] != "background" {
-            continue;
+        if let Some(dispatch) = dispatch_from(id, candidate) {
+            return Some(dispatch);
         }
-        let transcripts: Vec<_> = candidate
-            .get("live_transcripts")
-            .or_else(|| candidate.get("liveTranscripts"))
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_str)
-            .filter(|path| !path.trim().is_empty())
-            .map(str::to_owned)
-            .collect();
-        if transcripts.is_empty() {
-            continue;
-        }
-        return Some(BackgroundDispatch {
-            call_id: id.into(),
-            delegation_id: candidate["delegation_id"]
-                .as_str()
-                .or_else(|| candidate["delegationId"].as_str())
-                .unwrap_or(id)
-                .into(),
-            transcripts,
-        });
     }
     None
+}
+/// A detached delegation, from the result `delegate_task` gave for it.
+fn dispatch_from(id: &str, candidate: Value) -> Option<BackgroundDispatch> {
+    if candidate["status"] != "dispatched" || candidate["mode"] != "background" {
+        return None;
+    }
+    let transcripts: Vec<_> = candidate
+        .get("live_transcripts")
+        .or_else(|| candidate.get("liveTranscripts"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .map(str::to_owned)
+        .collect();
+    if transcripts.is_empty() {
+        return None;
+    }
+    Some(BackgroundDispatch {
+        call_id: id.into(),
+        delegation_id: candidate["delegation_id"]
+            .as_str()
+            .or_else(|| candidate["delegationId"].as_str())
+            .unwrap_or(id)
+            .into(),
+        transcripts,
+        at: Instant::now(),
+    })
+}
+/// Why a request failed. A server on the ACP SDK reports its own exceptions as
+/// "Internal error" and puts the reason, which is what a person can act on,
+/// in `data.details`.
+pub(super) fn error_text(error: &Value) -> &str {
+    let message = error["message"]
+        .as_str()
+        .or_else(|| error.as_str())
+        .unwrap_or("RPC request failed");
+    if message != "Internal error" {
+        return message;
+    }
+    error["data"]["details"]
+        .as_str()
+        .map(str::trim)
+        .filter(|details| !details.is_empty())
+        .unwrap_or(message)
 }
 fn collect_background_content(content: &Value, output: &mut Vec<Value>) {
     if content.is_string() {
@@ -1276,7 +1675,11 @@ fn background_finished(dispatch: &BackgroundDispatch) -> bool {
                 .ok()
                 .and_then(|text| serde_json::from_str::<Value>(&text).ok())
                 .is_some_and(|manifest| {
-                    manifest["completed"] == true
+                    // Hermes writes when the batch completed, not `true`.
+                    (manifest["completed"] == true
+                        || manifest["completed"]
+                            .as_str()
+                            .is_some_and(|at| !at.trim().is_empty()))
                         && manifest["tasks"].as_array().is_some_and(|tasks| {
                             !tasks.is_empty()
                                 && tasks.iter().all(|task| {
@@ -1291,6 +1694,37 @@ fn background_finished(dispatch: &BackgroundDispatch) -> bool {
                         })
                 })
         })
+}
+
+/// Long enough that a subagent busy in one slow tool is not taken for dead.
+const BACKGROUND_STALL: Duration = Duration::from_secs(30 * 60);
+
+/// A batch Hermes never marked complete whose logs stopped changing long
+/// ago: its runner died (a crash, a gateway restart) and nothing will write
+/// the end. Waiting on it would hold the turn open for good.
+fn background_stalled(dispatch: &BackgroundDispatch) -> bool {
+    if dispatch.at.elapsed() < BACKGROUND_STALL {
+        return false;
+    }
+    let touched = |path: &str| {
+        std::fs::metadata(path)
+            .and_then(|meta| meta.modified())
+            .ok()
+            .and_then(|at| at.elapsed().ok())
+    };
+    dispatch
+        .transcripts
+        .iter()
+        .flat_map(|log| {
+            let manifest = log
+                .rfind(['/', '\\'])
+                .map(|slash| format!("{}manifest.json", &log[..=slash]));
+            [Some(log.clone()), manifest]
+        })
+        .flatten()
+        .filter_map(|path| touched(&path))
+        .min()
+        .is_none_or(|quiet| quiet >= BACKGROUND_STALL)
 }
 
 fn usage_events(update: &Value, events: &mut Vec<Event>) {
@@ -1334,6 +1768,7 @@ fn usage_events(update: &Value, events: &mut Vec<Event>) {
             cache_hit_percent: ((read.is_some() || write.is_some()) && total > 0)
                 .then(|| read.unwrap_or(0) as f64 / total as f64 * 100.),
             cache_ttl_seconds: None,
+            ..Default::default()
         }));
     }
 }
@@ -1487,6 +1922,385 @@ mod tests {
         p.request.settings.effort = None;
         p.acp_settings(&setup);
         assert!(p.acp.options.is_empty());
+    }
+    #[test]
+    fn a_continued_hermes_chat_branches_the_source_or_falls_back_to_its_recap() {
+        let continued = |p: &mut Protocol| {
+            p.request.prompt = "Now add tests".into();
+            p.request.settings.fork_fallback_prompt = Some("Recap…\nNow add tests".into());
+            p.request.settings.handoff = Some(crate::agent::Handoff {
+                from: "hermes".into(),
+                brief: "Recap…".into(),
+                continued: Some(crate::agent::ContinuedChat {
+                    session: 7,
+                    title: "Source".into(),
+                    fork: Some("source-session".into()),
+                }),
+            });
+        };
+        // The prompt that goes out once the session is open.
+        let prompted = |p: &mut Protocol, out: &mut Vec<u8>| loop {
+            let request = last(out);
+            if request["method"] == "session/prompt" {
+                return request["params"]["prompt"][0]["text"].clone();
+            }
+            p.frame(json!({"id":request["id"],"result":{}}), out)
+                .unwrap();
+        };
+        let mut p = protocol(Kind::Hermes);
+        continued(&mut p);
+        let mut out = Vec::new();
+        p.acp_session(&mut out).unwrap();
+        let fork = last(&mut out);
+        assert_eq!(fork["method"], "session/fork");
+        assert_eq!(fork["params"]["sessionId"], "source-session");
+        let events = p
+            .frame(
+                json!({"id":fork["id"],"result":{"sessionId":"branch"}}),
+                &mut out,
+            )
+            .unwrap();
+        assert!(events.contains(&Event::SessionId("branch".into())));
+        // The branch has the history: the request goes alone.
+        assert_eq!(prompted(&mut p, &mut out), "Now add tests");
+
+        let mut p = protocol(Kind::Hermes);
+        continued(&mut p);
+        p.acp_session(&mut out).unwrap();
+        let fork = last(&mut out);
+        p.frame(
+            json!({"id":fork["id"],"error":{"code":-32603,"message":"unknown session"}}),
+            &mut out,
+        )
+        .unwrap();
+        let new = last(&mut out);
+        assert_eq!(new["method"], "session/new");
+        p.frame(
+            json!({"id":new["id"],"result":{"sessionId":"fresh"}}),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(prompted(&mut p, &mut out), "Recap…\nNow add tests");
+
+        // Another provider, or a chat with no fork to take, opens as before.
+        let mut p = protocol(Kind::Grok);
+        continued(&mut p);
+        p.acp_session(&mut out).unwrap();
+        assert_eq!(last(&mut out)["method"], "session/new");
+    }
+    #[test]
+    fn hermes_sets_a_mode_only_when_the_session_is_in_another() {
+        // Hermes refuses a mode change while a turn runs ("Mode changes apply
+        // when the session is idle"), so a prompt must not ask for the mode
+        // the session already has.
+        let methods = |current: &str| {
+            let mut p = protocol(Kind::Hermes);
+            p.request.provider_id = Some("saved".into());
+            p.request.settings.access = AccessMode::FullAccess;
+            let mut out = Vec::new();
+            p.acp_session(&mut out).unwrap();
+            let request = last(&mut out);
+            p.frame(
+                json!({"id":request["id"],"result":{"modes":{"currentModeId":current,"availableModes":[{"id":"default"},{"id":"accept_edits"},{"id":"dont_ask"}]}}}),
+                &mut out,
+            )
+            .unwrap();
+            let mut sent = Vec::new();
+            loop {
+                let request = last(&mut out);
+                let method = request["method"].as_str().unwrap().to_owned();
+                sent.push(method.clone());
+                if method == "session/prompt" {
+                    break (sent, p);
+                }
+                p.frame(json!({"id":request["id"],"result":{}}), &mut out)
+                    .unwrap();
+            }
+        };
+        // Full access is Hermes's `dont_ask`.
+        let (sent, _) = methods("dont_ask");
+        assert!(
+            !sent.iter().any(|method| method == "session/set_mode"),
+            "{sent:?}"
+        );
+        let (sent, p) = methods("default");
+        assert!(
+            sent.iter().any(|method| method == "session/set_mode"),
+            "{sent:?}"
+        );
+        assert_eq!(p.acp.setup["modes"]["currentModeId"], "dont_ask");
+    }
+    #[test]
+    fn hermes_keeps_a_chat_whose_load_failed_and_says_why() {
+        let load = |details: &str| {
+            let mut p = protocol(Kind::Hermes);
+            p.request.provider_id = Some("saved".into());
+            let mut out = Vec::new();
+            p.acp_session(&mut out).unwrap();
+            let request = last(&mut out);
+            assert_eq!(request["method"], "session/load");
+            // The ACP SDK's wrapping of an exception the server raised.
+            let result = p.frame(
+                json!({"id":request["id"],"error":{"code":-32603,"message":"Internal error","data":{"details":details}}}),
+                &mut out,
+            );
+            (result, out)
+        };
+        // A busy or refused load is not a lost session: the chat is not
+        // swapped for an empty one behind the same transcript.
+        // A busy session is first asked again without the editor's servers
+        // (it changes those only while idle); busy still, the load fails.
+        let (result, mut out) = load("session_busy");
+        assert!(result.is_ok());
+        let again = last(&mut out);
+        assert_eq!(again["method"], "session/load");
+        assert_eq!(again["params"]["mcpServers"], json!([]));
+        let (result, out) = load("acp_mcp_policy_unavailable");
+        assert_eq!(
+            result.unwrap_err(),
+            "Hermes Agent: acp_mcp_policy_unavailable"
+        );
+        assert!(out.is_empty(), "no session/new");
+        // Only a session Hermes no longer has is replaced.
+        let (result, mut out) = load("not_found");
+        assert!(result.is_ok());
+        assert_eq!(last(&mut out)["method"], "session/new");
+        // A reason given as the message is read as it always was.
+        assert_eq!(
+            error_text(&json!({"message":"Mode changes apply"})),
+            "Mode changes apply"
+        );
+        assert_eq!(
+            error_text(&json!({"message":"Internal error"})),
+            "Internal error"
+        );
+    }
+    #[test]
+    fn hermes_owns_its_turn_and_a_lost_one_lets_the_prompt_through() {
+        let run = |refusal: &str| {
+            let mut p = protocol(Kind::Hermes);
+            p.request.provider_id = Some("saved".into());
+            p.request.settings.access = AccessMode::FullAccess;
+            let mut out = Vec::new();
+            p.acp_session(&mut out).unwrap();
+            let request = last(&mut out);
+            p.frame(
+                json!({"id":request["id"],"result":{"modes":{"currentModeId":"default","availableModes":[{"id":"default"},{"id":"dont_ask"}]}}}),
+                &mut out,
+            )
+            .unwrap();
+            let request = last(&mut out);
+            assert_eq!(request["method"], "session/set_mode");
+            let result = p.frame(
+                json!({"id":request["id"],"error":{"code":-32603,"message":refusal}}),
+                &mut out,
+            );
+            (result, out, p)
+        };
+        // A turn Hermes lost holds every control; the prompt still goes, so
+        // Hermes can say how to recover or take `/discard`.
+        let (result, mut out, p) =
+            run("Mode changes wait for the lost turn: do not resend accepted input");
+        assert!(result.is_ok());
+        assert_eq!(last(&mut out)["method"], "session/prompt");
+        // The gateway runs the turn whether this child lives or not: no
+        // deadline of ours gives up on a long one.
+        assert!(p.acp.deadline.is_none());
+        // A session that is only busy keeps its refusal: a stricter mode is
+        // never silently left unset.
+        let (result, out, _) =
+            run("Mode changes apply when the session is idle; try again after this turn.");
+        assert!(result
+            .unwrap_err()
+            .contains("apply when the session is idle"));
+        assert!(out.is_empty());
+    }
+    /// A saved Hermes chat, opened and with its prompt out.
+    fn hermes_prompting() -> (Protocol, Vec<u8>, Value) {
+        let mut p = protocol(Kind::Hermes);
+        p.request.provider_id = Some("saved".into());
+        p.request.settings.access = AccessMode::FullAccess;
+        let mut out = Vec::new();
+        p.acp_session(&mut out).unwrap();
+        let request = last(&mut out);
+        p.frame(
+            json!({"id":request["id"],"result":{"modes":{"currentModeId":"dont_ask","availableModes":[{"id":"dont_ask"}]}}}),
+            &mut out,
+        )
+        .unwrap();
+        loop {
+            let request = last(&mut out);
+            if request["method"] == "session/prompt" {
+                return (p, out, request);
+            }
+            p.frame(json!({"id":request["id"],"result":{}}), &mut out)
+                .unwrap();
+        }
+    }
+    fn said(text: &str) -> Value {
+        json!({"method":"session/update","params":{"sessionId":"saved","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":text}}}})
+    }
+    #[test]
+    fn a_stopped_hermes_turns_last_words_do_not_open_the_next_reply() {
+        let (mut p, mut out, prompt) = hermes_prompting();
+        assert!(p
+            .frame(said("one"), &mut out)
+            .unwrap()
+            .contains(&Event::Text("one".into())));
+        // Stop: the child is kept for the next prompt.
+        p.acp_cancel(&mut out).unwrap();
+        p.done = false;
+        p.emitted.clear();
+        p.acp_resume_warm(&mut out).unwrap();
+        assert_eq!(last(&mut out)["method"], "session/prompt");
+        // Hermes ends the cancelled turn first: its tail, then its answer.
+        assert!(p.frame(said("tail"), &mut out).unwrap().is_empty());
+        assert!(p
+            .frame(
+                json!({"id":prompt["id"],"result":{"stopReason":"cancelled"}}),
+                &mut out
+            )
+            .unwrap()
+            .is_empty());
+        assert!(!p.done);
+        // Only then the new turn speaks.
+        assert!(p
+            .frame(said("new"), &mut out)
+            .unwrap()
+            .contains(&Event::Text("new".into())));
+    }
+    #[test]
+    fn a_steer_too_late_for_its_turn_keeps_the_run_open_for_its_reply() {
+        let (mut p, mut out, prompt) = hermes_prompting();
+        let message = crate::follow_up::Message {
+            id: "m1".into(),
+            text: "also check the tests".into(),
+            ..Default::default()
+        };
+        assert!(p.steer(message, &mut out).unwrap().is_empty());
+        let steer = last(&mut out);
+        assert_eq!(
+            steer["params"]["prompt"][0]["text"],
+            "/steer also check the tests"
+        );
+        // The turn ended before Hermes took the steer: it runs it as a
+        // prompt of its own. The message is delivered, the run goes on.
+        let events = p
+            .frame(
+                json!({"id":prompt["id"],"result":{"stopReason":"end_turn"}}),
+                &mut out,
+            )
+            .unwrap();
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, Event::FollowUp(message) if message.id == "m1")));
+        assert!(!events.contains(&Event::Done) && !p.done);
+        assert!(p
+            .frame(said("on it"), &mut out)
+            .unwrap()
+            .contains(&Event::Text("on it".into())));
+        // Its answer ends the run.
+        let events = p
+            .frame(
+                json!({"id":steer["id"],"result":{"stopReason":"end_turn"}}),
+                &mut out,
+            )
+            .unwrap();
+        assert_eq!(events, vec![Event::Done]);
+        assert!(p.done);
+    }
+    #[test]
+    fn hermes_notices_and_replies_each_get_their_own_bubble() {
+        let (mut p, mut out, _) = hermes_prompting();
+        let chunk = |text: &str, id: Option<&str>| {
+            let mut update = json!({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":text}});
+            if let Some(id) = id {
+                update["messageId"] = id.into();
+            }
+            json!({"method":"session/update","params":{"sessionId":"saved","update":update}})
+        };
+        let begun = |events: &[Event]| events.contains(&Event::BeginAssistant);
+        // One reply's chunks share its id and its bubble.
+        assert!(begun(&p.frame(chunk("Hel", Some("a")), &mut out).unwrap()));
+        assert!(!begun(&p.frame(chunk("lo", Some("a")), &mut out).unwrap()));
+        // Hermes's own notice carries no id: it is not the model's words.
+        let events = p
+            .frame(chunk("Context compressed.\n", None), &mut out)
+            .unwrap();
+        assert!(begun(&events) && events.contains(&Event::Text("Context compressed.\n".into())));
+        // The next reply is another message again.
+        let events = p.frame(chunk("Done", Some("b")), &mut out).unwrap();
+        assert!(begun(&events) && events.contains(&Event::Text("Done".into())));
+        // A steer's receipt shows nothing and splits nothing.
+        let receipt = "⏩ Steer queued for the active turn: go on\n";
+        assert!(p.frame(chunk(receipt, None), &mut out).unwrap().is_empty());
+        assert!(!begun(
+            &p.frame(chunk(" and dusted", Some("b")), &mut out).unwrap()
+        ));
+    }
+    #[test]
+    fn hermes_approvals_outside_a_prompt_reach_the_user() {
+        let ask = |kind: Kind| {
+            let mut p = protocol(kind);
+            p.request.provider_id = Some("saved".into());
+            let mut out = Vec::new();
+            p.acp_session(&mut out).unwrap();
+            let _ = last(&mut out);
+            // The chat is still loading: a turn the gateway was already
+            // running waits for leave to edit.
+            let events = p.frame(json!({"id":"perm-1","method":"session/request_permission","params":{"sessionId":"saved","toolCall":{"toolCallId":"edit-approval-1","kind":"edit","title":"patch"},"options":[{"kind":"allow_once","optionId":"yes"},{"kind":"reject_once","optionId":"no"}]}}), &mut out).unwrap();
+            (events, out)
+        };
+        let (events, out) = ask(Kind::Hermes);
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, Event::Approval(_))));
+        assert!(out.is_empty(), "not refused unseen");
+        // Another provider's stray request is still turned away.
+        let (events, mut out) = ask(Kind::Grok);
+        assert!(events.is_empty());
+        assert_eq!(last(&mut out)["result"]["outcome"]["outcome"], "cancelled");
+    }
+    #[test]
+    fn a_background_batch_whose_runner_died_does_not_hold_the_turn_for_good() {
+        let dispatch = |at: Instant| BackgroundDispatch {
+            call_id: "c".into(),
+            delegation_id: "deleg_gone".into(),
+            transcripts: vec!["/nonexistent/monocode-stall/task-0.log".into()],
+            at,
+        };
+        assert!(!background_stalled(&dispatch(Instant::now())));
+        if let Some(long_ago) =
+            Instant::now().checked_sub(BACKGROUND_STALL + Duration::from_secs(1))
+        {
+            assert!(background_stalled(&dispatch(long_ago)));
+        }
+    }
+    #[test]
+    fn a_background_batch_ends_when_hermes_stamps_its_manifest() {
+        let dir = std::env::temp_dir().join(format!(
+            "monocode-acp-manifest-{}-{}",
+            std::process::id(),
+            crate::time::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dispatch = BackgroundDispatch {
+            call_id: "c".into(),
+            delegation_id: "deleg_1".into(),
+            transcripts: vec![dir.join("task-1.log").to_string_lossy().into_owned()],
+            at: Instant::now(),
+        };
+        let write = |manifest: Value| {
+            std::fs::write(dir.join("manifest.json"), manifest.to_string()).unwrap()
+        };
+        write(json!({"tasks":[{"status":"running"}]}));
+        assert!(!background_finished(&dispatch));
+        // hermes-agent 0.23 writes the time the batch completed, not `true`.
+        write(json!({"completed":"2026-11-10 02:48:30","tasks":[{"status":"completed"}]}));
+        assert!(background_finished(&dispatch));
+        write(json!({"completed":true,"tasks":[{"status":"failed"}]}));
+        assert!(background_finished(&dispatch));
+        std::fs::remove_dir_all(dir).unwrap();
     }
     #[test]
     fn resuming_mutes_replay_and_replaces_missing_sessions_like_the_desktop() {

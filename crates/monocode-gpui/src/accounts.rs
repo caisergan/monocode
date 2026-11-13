@@ -68,6 +68,16 @@ impl Key {
                 .next()
                 .unwrap_or("")
                 .into()
+        } else if kind == Kind::Hermes {
+            // `<provider>:<model>`: Hermes bills through the provider, so a
+            // change of provider is a different usage to show.
+            let model = model.unwrap_or("");
+            model
+                .strip_prefix("hermes:")
+                .unwrap_or(model)
+                .split_once(':')
+                .map_or("", |(provider, _)| provider)
+                .into()
         } else {
             String::new()
         };

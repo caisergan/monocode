@@ -139,6 +139,10 @@ pub struct Settings {
     pub worktree_cwd: Option<String>,
     pub worktree_removed: bool,
     pub handoff: Option<Handoff>,
+    /// The first prompt with the recap of the chat it continues, for a
+    /// provider that could not branch that chat after all. Never saved.
+    #[serde(skip)]
+    pub fork_fallback_prompt: Option<String>,
     pub pending_provider_switch: Option<ProviderSwitch>,
     pub turns: std::collections::HashMap<usize, TurnInfo>,
 }
@@ -181,6 +185,10 @@ pub struct TurnInfo {
     pub started_at: Option<u64>,
     pub completed_at: Option<u64>,
     pub metrics: Option<TurnMetrics>,
+    /// Tokens a second while the reply was writing, measured from the stream:
+    /// tool calls and waits are left out, unlike output over `duration_ms`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_rate: Option<f64>,
 }
 impl TurnInfo {
     pub fn has_duration(&self) -> bool {
@@ -201,6 +209,11 @@ pub struct Handoff {
 pub struct ContinuedChat {
     pub session: i64,
     pub title: String,
+    /// The source's own session with its provider, where the provider can
+    /// branch it (Hermes's `session/fork`): the new chat then starts with the
+    /// whole history, not a recap of it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fork: Option<String>,
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -218,6 +231,15 @@ pub struct TurnMetrics {
     /// How long the provider keeps the prompt cache this turn wrote, in seconds.
     #[serde(alias = "cacheTtlSeconds", skip_serializing_if = "Option::is_none")]
     pub cache_ttl_seconds: Option<u64>,
+    /// The part of the output the model spent thinking, where the provider counts it.
+    #[serde(alias = "reasoningTokens", skip_serializing_if = "is_zero")]
+    pub reasoning_tokens: u64,
+    /// What the turn's tokens cost at the provider's list price, in dollars.
+    #[serde(alias = "costUsd", skip_serializing_if = "Option::is_none")]
+    pub cost_usd: Option<f64>,
+}
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 impl TurnMetrics {
     pub fn reported(self) -> bool {

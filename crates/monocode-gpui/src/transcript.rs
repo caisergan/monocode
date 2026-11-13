@@ -554,6 +554,107 @@ pub(crate) fn mono_work_label(source: &[Row], group: usize) -> String {
     }
     tool_status(&tool)
 }
+impl TranscriptView {
+    /// What a turn's recorded edits changed, on its footer: the files, each
+    /// opening where it is, and the lines that went in and out.
+    fn turn_changes_strip(
+        &self,
+        turn: usize,
+        changes: &[monocode_core::tool::changes::FileChange],
+    ) -> gpui::AnyElement {
+        use crate::right_panel::{DIFF_ADD, DIFF_DEL, format_integer, tabular};
+        /// The footer is one line: this many names, then a count of the rest.
+        const NAMED: usize = 2;
+        let (added, removed) = changes.iter().fold((0, 0), |(added, removed), file| {
+            (added + file.additions, removed + file.deletions)
+        });
+        let base = self.file_link_base.clone().unwrap_or_default();
+        let hidden = changes.len().saturating_sub(NAMED);
+        div()
+            .id(gpui::SharedString::from(format!("turn-changes:{turn}")))
+            .debug_selector(move || format!("turn-changes-{turn}"))
+            .role(Role::Group)
+            .aria_label(format!(
+                "{} file{} changed, {added} added, {removed} removed",
+                changes.len(),
+                if changes.len() == 1 { "" } else { "s" }
+            ))
+            .min_w_0()
+            .flex()
+            .items_center()
+            .gap(px(6.))
+            .child(icon("file-diff", 12.).text_color(content(0.35)))
+            .children(changes.iter().take(NAMED).enumerate().map(|(index, file)| {
+                let (path, _) = crate::file_editor::file_location(&file.path, &base);
+                let name = file
+                    .path
+                    .rsplit(['/', '\\'])
+                    .find(|part| !part.is_empty())
+                    .unwrap_or(&file.path)
+                    .to_owned();
+                div()
+                    .id(gpui::SharedString::from(format!(
+                        "turn-change:{turn}:{index}"
+                    )))
+                    .role(Role::Link)
+                    .aria_label(format!("Open {}", file.path))
+                    .min_w_0()
+                    .truncate()
+                    .cursor_pointer()
+                    .text_color(content(0.55))
+                    .hover(|style| style.text_color(content(1.)).underline())
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        window.dispatch_action(
+                            Box::new(crate::file_editor::OpenPath(path.clone())),
+                            cx,
+                        );
+                    })
+                    .child(name)
+            }))
+            .when(hidden > 0, |d| {
+                d.child(
+                    div()
+                        .flex_shrink_0()
+                        .text_color(content(0.35))
+                        .child(format!("+{hidden} more")),
+                )
+            })
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .gap(px(4.))
+                    .font_features(tabular())
+                    .child(
+                        div()
+                            .text_color(rgb(DIFF_ADD))
+                            .child(format!("+{}", format_integer(added as i64))),
+                    )
+                    .child(
+                        div()
+                            .text_color(rgb(DIFF_DEL))
+                            .child(format!("−{}", format_integer(removed as i64))),
+                    ),
+            )
+            .into_any_element()
+    }
+}
+
+/// A turn's list price for the token tooltip: `≈ $0.0047 list`. Small turns
+/// keep the digits that tell them apart; a subscription pays it from its windows.
+fn turn_cost(dollars: f64) -> String {
+    if dollars >= 0.995 {
+        format!("≈ ${dollars:.2} list")
+    } else if dollars >= 0.01 {
+        format!("≈ ${dollars:.3} list")
+    } else if dollars > 0. {
+        format!("≈ ${dollars:.4} list")
+    } else {
+        "free".into()
+    }
+}
+
 /// A reasoning summary's heading, as Codex writes them (`**Finding the repo**`),
 /// when it is short enough for a status line.
 fn reasoning_heading(text: &str) -> Option<String> {
@@ -750,6 +851,17 @@ pub(crate) struct TranscriptView {
     highlight_bytes: usize,
     copied: Option<u64>,
     copied_response: Option<(usize, Instant)>,
+    /// Edits a person asked to take back, by tool call id.
+    edit_undo: HashMap<String, tools::EditUndo>,
+    /// What each settled turn's recorded edits changed, by turn and the
+    /// number of rows it had when read.
+    turn_changes: HashMap<
+        usize,
+        (
+            usize,
+            std::rc::Rc<[monocode_core::tool::changes::FileChange]>,
+        ),
+    >,
     note_pending: HashSet<usize>,
     note_feedback: HashMap<usize, Result<(), String>>,
     action_anchors: HashMap<(usize, &'static str), AnchorSlot>,
@@ -762,6 +874,20 @@ pub(crate) struct TranscriptView {
     /// The latest turn's runs, kept until the rows change: reading them means
     /// parsing every tool call of the turn, and the sidebar asks on each frame.
     turn_subagents: std::cell::RefCell<
+        Option<(
+            usize,
+            std::rc::Rc<Vec<monocode_core::tool::tasks::Subagent>>,
+        )>,
+    >,
+    /// The runs of the turns before the latest, by where the latest begins.
+    earlier_subagents: std::cell::RefCell<
+        Option<(
+            usize,
+            std::rc::Rc<Vec<monocode_core::tool::tasks::Subagent>>,
+        )>,
+    >,
+    /// Every turn's runs together, kept as `turn_subagents` is.
+    session_subagents: std::cell::RefCell<
         Option<(
             usize,
             std::rc::Rc<Vec<monocode_core::tool::tasks::Subagent>>,
@@ -836,30 +962,69 @@ impl TranscriptView {
         self.document = true;
         self.agent_trail_only = true;
     }
-    /// The latest turn's subagents. A message steered into the running turn
-    /// belongs to that turn, so it is walked past.
+    /// Where the latest turn's rows begin. A message steered into the running
+    /// turn belongs to that turn, so it is walked past.
+    fn latest_turn_start(&self) -> usize {
+        let prompt = self
+            .source
+            .iter()
+            .rposition(|row| row.is_prompt() && row.first)
+            .map_or(0, |at| at + 1);
+        if self.streaming || self.live_start > 0 {
+            prompt.min(self.live_start)
+        } else {
+            prompt
+        }
+    }
+    /// The latest turn's subagents.
     pub(crate) fn subagents(&self) -> std::rc::Rc<Vec<monocode_core::tool::tasks::Subagent>> {
         if let Some((len, runs)) = self.turn_subagents.borrow().as_ref()
             && *len == self.source.len()
         {
             return runs.clone();
         }
-        let prompt = self
-            .source
-            .iter()
-            .rposition(|row| row.is_prompt() && row.first)
-            .map_or(0, |at| at + 1);
-        let start = if self.streaming || self.live_start > 0 {
-            prompt.min(self.live_start)
-        } else {
-            prompt
-        };
         let runs = std::rc::Rc::new(monocode_core::tool::tasks::subagents_from(
             &self.source,
-            start,
+            self.latest_turn_start(),
         ));
         *self.turn_subagents.borrow_mut() = Some((self.source.len(), runs.clone()));
         runs
+    }
+    /// Every turn's subagents, oldest first: where an open sheet finds its run
+    /// once a later turn has begun. Earlier turns are parsed once and kept
+    /// until a patch reaches back into them.
+    pub(crate) fn session_subagents(
+        &self,
+    ) -> std::rc::Rc<Vec<monocode_core::tool::tasks::Subagent>> {
+        if let Some((len, runs)) = self.session_subagents.borrow().as_ref()
+            && *len == self.source.len()
+        {
+            return runs.clone();
+        }
+        let latest = self.subagents();
+        let start = self.latest_turn_start().min(self.source.len());
+        let earlier = match self.earlier_subagents.borrow().as_ref() {
+            Some((until, runs)) if *until == start => Some(runs.clone()),
+            _ => None,
+        };
+        let earlier = earlier.unwrap_or_else(|| {
+            let runs = std::rc::Rc::new(monocode_core::tool::tasks::subagents_from(
+                &self.source[..start],
+                0,
+            ));
+            *self.earlier_subagents.borrow_mut() = Some((start, runs.clone()));
+            runs
+        });
+        let runs = if earlier.is_empty() {
+            latest
+        } else {
+            std::rc::Rc::new(earlier.iter().chain(latest.iter()).cloned().collect())
+        };
+        *self.session_subagents.borrow_mut() = Some((self.source.len(), runs.clone()));
+        runs
+    }
+    pub(crate) fn unfold_work(&mut self) {
+        self.fold_work = false;
     }
     /// A view of a run that began before the view did: its clock runs from then.
     pub(crate) fn turn_started_at(&mut self, started_at: Option<u64>) {
@@ -2245,6 +2410,17 @@ impl TranscriptView {
         if self.mono {
             return self.mono_actions(turn, output, before_user, cx);
         }
+        // A settled turn's rows no longer change: read its edits once.
+        let changes = match self.turn_changes.get(&turn) {
+            Some((count, changes)) if *count == rows.len() => changes.clone(),
+            _ => {
+                let changes: std::rc::Rc<[_]> =
+                    monocode_core::tool::changes::turn_changes(&rows).into();
+                self.turn_changes
+                    .insert(turn, (rows.len(), changes.clone()));
+                changes
+            }
+        };
         let copied = self.copied_response.is_some_and(|(id, _)| id == turn);
         let saved = self.note_feedback.get(&turn).is_some_and(|r| r.is_ok());
         let pending = self.note_pending.contains(&turn);
@@ -2428,6 +2604,10 @@ impl TranscriptView {
                         .text_color(content(0.35))
                         .child(monocode_core::response::local_clock(time)),
                 )
+            })
+            .when(!changes.is_empty(), |d| {
+                d.child(dot())
+                    .child(self.turn_changes_strip(turn, &changes))
             });
         if let Some(Err(error)) = self.note_feedback.get(&turn) {
             row = row.child(
@@ -2460,7 +2640,11 @@ impl TranscriptView {
                     if let Some(hit) = metrics.cache_hit_percent {
                         summary.push(format!("Cache hit {hit:.0}%"));
                     }
-                    if info.duration_ms > 0 && metrics.output_tokens > 0 {
+                    // The speed measured as the reply streamed, where there
+                    // is one: the footer reads the same figure.
+                    if let Some(rate) = info.output_rate {
+                        summary.push(format!("Output {rate:.0} tok/s"));
+                    } else if info.duration_ms > 0 && metrics.output_tokens > 0 {
                         summary.push(format!(
                             "Output {:.0} tok/s",
                             metrics.output_tokens as f64 / (info.duration_ms as f64 / 1000.)
@@ -2474,6 +2658,7 @@ impl TranscriptView {
                     let detail = [
                         (metrics.input_tokens, "input"),
                         (metrics.output_tokens, "output"),
+                        (metrics.reasoning_tokens, "reasoning"),
                         (metrics.cache_read_tokens, "cached"),
                     ]
                     .into_iter()
@@ -2481,6 +2666,7 @@ impl TranscriptView {
                     .map(|(n, label)| {
                         format!("{} {label}", monocode_core::context::format_tokens(n))
                     })
+                    .chain(metrics.cost_usd.map(turn_cost))
                     .collect::<Vec<_>>()
                     .join(" · ");
                     (headline, Some(detail))
@@ -2576,6 +2762,8 @@ impl TranscriptView {
             highlight_bytes: 0,
             copied: None,
             copied_response: None,
+            edit_undo: HashMap::new(),
+            turn_changes: HashMap::new(),
             note_pending: HashSet::new(),
             note_feedback: HashMap::new(),
             action_anchors: HashMap::new(),
@@ -2585,6 +2773,8 @@ impl TranscriptView {
             side_question: false,
             agent_trail_only: false,
             turn_subagents: Default::default(),
+            earlier_subagents: Default::default(),
+            session_subagents: Default::default(),
             file_link_base: None,
             expanded: HashSet::new(),
             agent_panels: Default::default(),
@@ -2671,6 +2861,29 @@ impl TranscriptView {
         self.rebuild(0, cx);
         cx.notify();
     }
+    /// The bytes a streaming reply has written so far: its own prose and
+    /// thinking, the prompts and tool calls aside. The live speed reads it
+    /// without counting tokens the provider has not reported yet.
+    pub(crate) fn live_output_bytes(&self) -> usize {
+        if !self.streaming {
+            return 0;
+        }
+        self.source[self.live_start.min(self.source.len())..]
+            .iter()
+            .filter(|row| matches!(row.role.as_str(), "assistant" | "reasoning"))
+            .map(|row| row.text.len())
+            .sum()
+    }
+    /// What the turn whose rows begin at `turn` wrote, in bytes: its assistant
+    /// and reasoning rows, to the end. A turn the provider did not account
+    /// for still has its text to count.
+    pub(crate) fn turn_output_bytes(&self, turn: usize) -> usize {
+        self.source[turn.min(self.source.len())..]
+            .iter()
+            .filter(|row| matches!(row.role.as_str(), "assistant" | "reasoning"))
+            .map(|row| row.text.len())
+            .sum()
+    }
     /// Stop visible work immediately, while the provider drains and saves.
     pub(crate) fn stop_streaming(&mut self, cx: &mut Context<Self>) {
         let start = self
@@ -2731,6 +2944,7 @@ impl TranscriptView {
             self.active_provider_turn_id = None;
             self.live_start = self.source.len();
             *self.turn_subagents.borrow_mut() = None;
+            *self.session_subagents.borrow_mut() = None;
             // The provider starts before its prompt arrives. Keep an ordinary
             // chat's existing spacer and scroll position until patch accepts
             // that prompt, just as React pins on lastUserId rather than busy.
@@ -2963,6 +3177,11 @@ impl TranscriptView {
                 .any(runs_of)
         {
             *self.turn_subagents.borrow_mut() = None;
+            *self.session_subagents.borrow_mut() = None;
+            // A run of an earlier turn can still be working in the background.
+            self.earlier_subagents
+                .borrow_mut()
+                .take_if(|(until, _)| start < *until);
         }
         assert!(
             start <= self.source.len(),
@@ -3191,7 +3410,7 @@ impl TranscriptView {
         let target = candidate.filter(|&answer| {
             self.source[current_turn..answer]
                 .iter()
-                .any(|r| r.role == "tool")
+                .any(|r| r.role == "tool" || (r.role == "reasoning" && !r.text.trim().is_empty()))
         });
         let layout_changed = self.fold_targets.get(&current_turn).copied().flatten() != target;
         let known_message = self.messages.iter().any(|m| {
@@ -3381,7 +3600,9 @@ impl TranscriptView {
                 // A Mono's work stays in its activity panel, never folded inline.
                 has_work = !self.mono
                     && final_answer.is_some_and(|answer| {
-                        self.source[turn..answer].iter().any(|r| r.role == "tool")
+                        self.source[turn..answer].iter().any(|r| {
+                            r.role == "tool" || (r.role == "reasoning" && !r.text.trim().is_empty())
+                        })
                     });
                 ready = final_answer.is_some_and(|answer| self.answer_visible(answer));
                 self.fold_targets
@@ -3640,7 +3861,13 @@ impl TranscriptView {
                 if role == "tool" {
                     self.seen_steps.insert(at);
                 }
-            } else if folded || activity.hidden.contains(&at) || !phase_open {
+            } else if folded
+                || (activity.hidden.contains(&at)
+                    && !(role == "reasoning"
+                        && !text.trim().is_empty()
+                        && (!self.fold_work || self.work_folds.get(&turn) == Some(&true))))
+                || !phase_open
+            {
                 if role == "tool" {
                     self.seen_steps.insert(at);
                 }

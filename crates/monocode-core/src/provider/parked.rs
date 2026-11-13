@@ -336,14 +336,38 @@ pub(super) fn take(key: &str) -> Option<Parked> {
         return None;
     }
     process::mark_idle(parked.wire.child.id(), false);
+    if parked.protocol.request.kind == Kind::Hermes {
+        // Hermes sends every event of the session to an attached child: the
+        // tail of a turn Stop cancelled, a turn another surface ran. What
+        // piled up while this one sat idle is not the next reply; only the
+        // settings it changed are kept.
+        loop {
+            match parked.wire.rx.try_recv() {
+                Ok(Ok(bytes)) => {
+                    if let Ok(frame) = serde_json::from_slice::<Value>(&bytes) {
+                        parked.protocol.acp_idle_frame(&frame);
+                    }
+                }
+                // Its pipe closed while it waited: start another.
+                Ok(Err(_)) => return None,
+                Err(_) => break,
+            }
+        }
+    }
     Some(parked)
 }
 pub(super) fn put(wire: Wire, mut protocol: Protocol) {
     if LIMIT.load(Ordering::Relaxed) == 0 || protocol.request.provider_id.is_none() {
         return;
     }
+    // Stopped while its session was still opening: it has none to prompt.
+    if protocol.request.kind.is_acp() && protocol.acp_unopened() {
+        return;
+    }
     let key = key(&protocol.request);
     protocol.emitted.clear();
+    // A steer the ended turn never answered failed with it.
+    protocol.steering.clear();
     protocol.tools.clear();
     protocol.active_compaction = None;
     protocol.claude_tools.clear();

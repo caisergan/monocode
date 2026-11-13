@@ -13,6 +13,7 @@ mod edit_last_turn;
 mod follow_up;
 pub(crate) mod git_actions;
 mod history;
+mod live_speed;
 mod mobile;
 mod mono;
 mod notifications;
@@ -48,6 +49,7 @@ use gpui::{
     AnyElement, Context, CursorStyle, Entity, EventEmitter, Focusable, MouseButton, Role,
     SharedString, StyleRefinement, Subscription, Window, canvas, div, prelude::*, px,
 };
+use live_speed::LiveSpeed;
 pub(crate) use mobile::{
     Waiting as MobileWaiting, mobile_access_modes, usage_state as mobile_usage_state,
 };
@@ -222,6 +224,8 @@ pub(crate) struct Conversation {
     subagent_dock: subagent_dock::Dock,
     subagent_sheet: subagent_sheet::SubagentSheet,
     prompt_cache: PromptCacheWarning,
+    /// The running reply's speed, until the turn's measured average takes over.
+    live_speed: LiveSpeed,
     /// ⌘ (Ctrl elsewhere) as last seen, which flips Queue and Steer.
     send_alternate: bool,
     menu: Option<OpenMenu>,
@@ -684,6 +688,7 @@ impl Conversation {
             subagent_dock: Default::default(),
             subagent_sheet: Default::default(),
             prompt_cache: PromptCacheWarning::default(),
+            live_speed: LiveSpeed::default(),
             send_alternate: false,
             menu: None,
             add_anchor: AnchorSlot::default(),
@@ -995,6 +1000,21 @@ impl Conversation {
         if prompt.trim().is_empty() && self.attachments.is_empty() {
             return;
         }
+        // Written while a run's sheet is open, a message is meant for that run.
+        // A provider command stays the provider's own.
+        let prompt = match self.subagent_relay_target() {
+            Some((name, id))
+                if (!prompt.trim().is_empty() || !self.attachments.is_empty())
+                    && !prompt.trim_start().starts_with('/') =>
+            {
+                // An account switch drops the send below: say nothing went.
+                if !self.account_switching {
+                    self.note_sent_to_subagent(&prompt, cx);
+                }
+                subagent_sheet::relay(&name, &id, prompt.trim())
+            }
+            _ => prompt,
+        };
         self.completion
             .update(cx, |completion, cx| completion.dismiss(cx));
         let mode = if self.settings.orchestrator {
@@ -1511,6 +1531,7 @@ impl Conversation {
                             this.questions.clear();
                             this.controls = None;
                             this.transcript.update(cx, |v, cx| v.streaming(false, cx));
+                            this.record_live_speed(cx);
                             let model_id = turn_model_id.clone();
                             this.transcript.update(cx, |view, _| {
                                 if let Some(turn) = view.active_turn()
@@ -1563,6 +1584,7 @@ impl Conversation {
             .max(monocode_core::time::now_ms() & 0xffff_ffff);
         self.summary.updated_at = monocode_core::time::now_ms();
         self.transcript.update(cx, |v, cx| v.streaming(true, cx));
+        self.begin_live_speed(cx);
         self.summary.has_messages = true;
     }
 }
@@ -2149,7 +2171,10 @@ impl Conversation {
         effort_name(self.selected_effort().unwrap_or("default")).into()
     }
     fn effort_setting_label(&self) -> &'static str {
-        if Kind::from_id(&self.summary.provider) == Kind::Codex {
+        if matches!(
+            Kind::from_id(&self.summary.provider),
+            Kind::Codex | Kind::Hermes
+        ) {
             "Reasoning"
         } else {
             "Effort"
@@ -2354,6 +2379,17 @@ impl Conversation {
             .detach();
         self.resolved_model = None;
         self.settings.effort = preferred_effort(&self.summary.provider, cx);
+        // The saved level is the provider's, not the model's: one this
+        // Hermes model does not have would show on the pill and be sent,
+        // while Hermes ran another.
+        if Kind::from_id(&self.summary.provider) == Kind::Hermes
+            && let Some(effort) = self.settings.effort.as_deref()
+            && self.model_info().is_some_and(|model| {
+                !model.efforts.is_empty() && !model.efforts.iter().any(|e| e == effort)
+            })
+        {
+            self.settings.effort = None;
+        }
         self.settings.fast = false;
         self.settings.thinking = None;
         self.settings.service_tier = None;
@@ -2778,6 +2814,7 @@ impl Conversation {
         self.status = "Ready".into();
         self.transcript
             .update(cx, |view, cx| view.stop_streaming(cx));
+        self.record_live_speed(cx);
         self.note_subagents_changed(cx);
         self.review
             .update(cx, |review, cx| review.set_busy(false, cx));
@@ -3214,6 +3251,9 @@ impl Conversation {
                 )
             })
             .flatten();
+        // The running reply's speed while a prompt is answered, that prompt's
+        // average once it is, which its own tooltip counts the same way.
+        let speed = self.speed_read_out(cx);
         let detail = self.context.map(|usage| {
             format!(
                 "{} / {} tokens",
@@ -3323,6 +3363,25 @@ impl Conversation {
                             )
                         },
                     )
+                    .when_some(speed, |d, (rate, live)| {
+                        let shown = live_speed::speed_label(rate);
+                        d.child(
+                            div()
+                                .id("turn-speed")
+                                .debug_selector(|| "turn-speed".into())
+                                .role(Role::Status)
+                                .aria_label(if live {
+                                    format!("Writing {shown}")
+                                } else {
+                                    format!("Last prompt averaged {shown}")
+                                })
+                                .flex_shrink_0()
+                                .text_size(px(11.))
+                                .line_height(px(16.))
+                                .text_color(content(0.45))
+                                .child(shown),
+                        )
+                    })
                     .when_some(tokens, |d, tokens| {
                         let format = monocode_core::context::format_tokens;
                         d.child(

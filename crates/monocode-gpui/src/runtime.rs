@@ -442,7 +442,7 @@ fn run_turn_using(
         // These providers parse slash arguments themselves. App context before
         // the command would turn it into an ordinary message instead.
         let prompt = settings.prepared_prompt.take().unwrap_or(prompt);
-        let raw_native_command = matches!(kind, Kind::Omp | Kind::Devin)
+        let raw_native_command = matches!(kind, Kind::Omp | Kind::Devin | Kind::Hermes)
             && provider::native_prompt(kind, &prompt)
                 .trim_start()
                 .starts_with('/');
@@ -498,7 +498,21 @@ fn run_turn_using(
             let now = chrono::Local::now().format("%A %-d %B %Y, %H:%M");
             format!("{intro}\n\n{brief}\n\n<local_time>{now}</local_time>\n{prompt}")
         } else if let Some(handoff) = &settings.handoff {
-            monocode_core::response::wrap_any_handoff(handoff, &prompt)
+            let wrapped = monocode_core::response::wrap_any_handoff(handoff, &prompt);
+            let branches = kind == Kind::Hermes
+                && provider_id.is_none()
+                && handoff
+                    .continued
+                    .as_ref()
+                    .is_some_and(|source| source.fork.is_some());
+            if branches {
+                // Hermes copies the source's history into the new session, so
+                // the request goes alone; the recap waits in case it cannot.
+                settings.fork_fallback_prompt = Some(wrapped);
+                prompt
+            } else {
+                wrapped
+            }
         } else if provider_id.is_none() && turn_start > 0 {
             let mut history = String::new();
             for row in transcript.rows[..turn_start]

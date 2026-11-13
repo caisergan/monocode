@@ -730,10 +730,16 @@ impl Protocol {
     }
 
     /// Start reading a run's transcript; the tick keeps up with it after that.
-    fn watch_transcript(&mut self, call: &str, path: &str) {
+    pub(super) fn watch_transcript(&mut self, call: &str, path: &str) {
         let tally = self.activities.tallies.entry(call.into()).or_default();
         if tally.transcript.is_none() {
-            tally.transcript = Some(SubagentTranscript::usage_only(path));
+            // Claude's file is read for its token counts. A Hermes live log has
+            // none: it is where the run's own steps and reply are read from.
+            tally.transcript = Some(if path.ends_with(".log") {
+                SubagentTranscript::conversation(path)
+            } else {
+                SubagentTranscript::usage_only(path)
+            });
             tally.read = false;
             tally.misses = 0;
         }
@@ -780,9 +786,35 @@ impl Protocol {
                     tally.model = Some(model.into());
                 }
                 let path = transcript.path().to_string_lossy().into_owned();
-                if first {
-                    if let Some(run) = self.tools.get_mut(call).and_then(ToolCall::agent_mut) {
-                        run.transcript_path = Some(path);
+                let counted = transcript.usage().is_some();
+                // Only a live log keeps the conversation, and it is the one
+                // place a Hermes run's own steps and reply are to be had.
+                let (steps, said) = if changed {
+                    (transcript.steps(), transcript.reply().map(str::to_owned))
+                } else {
+                    (Vec::new(), None)
+                };
+                let mirrored = !steps.is_empty() || said.is_some();
+                if let Some(tool) = self.tools.get_mut(call).filter(|_| first || mirrored) {
+                    let running = tool.state == ToolState::Running;
+                    if let Some(run) = tool.agent_mut() {
+                        if first {
+                            run.transcript_path = Some(path);
+                        }
+                        if mirrored {
+                            for step in steps {
+                                run.upsert(step);
+                            }
+                            // The report a finished run handed back says more
+                            // than the last thing its log caught it saying.
+                            if said.is_some() && (running || run.response.is_none()) {
+                                run.response = said;
+                            }
+                        }
+                    }
+                    // Counted runs are sent on with their usage, just below.
+                    if !counted {
+                        events.push(Event::Tool(tool.clone()));
                     }
                 }
                 if changed || first {

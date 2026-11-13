@@ -7,6 +7,7 @@ mod general;
 mod inbox;
 mod keybindings;
 mod mcp;
+mod memory;
 mod mobile;
 mod monos;
 mod providers;
@@ -17,6 +18,7 @@ pub(super) use appearance::parse_hex;
 pub(crate) use appearance::{ACCENTS, swatch};
 pub(super) use connections::ConnectionsState;
 pub(crate) use keybindings::command_shortcut;
+pub(super) use memory::MemoryState;
 pub(super) use mobile::MobileState;
 
 use super::{Section, SettingsView};
@@ -39,6 +41,7 @@ impl SettingsView {
             Section::Providers => self.providers_page(cx),
             Section::Mcp => self.mcp_page(cx),
             Section::Skills => self.skills_page(cx),
+            Section::Memory => self.memory_page(cx),
             Section::Monos => self.monos_page(cx),
             Section::Inbox => self.inbox_page(cx),
             Section::Archive => self.archive_page(cx),

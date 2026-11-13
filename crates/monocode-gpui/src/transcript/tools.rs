@@ -137,7 +137,18 @@ impl TranscriptView {
         let is_search =
             matches!(shown.action.as_str(), "Find" | "Search") && !shown.target.is_empty();
         let action = if is_search { "Search" } else { &shown.action };
-        let is_file = matches!(shown.action.as_str(), "Read" | "Edit" | "Write" | "List");
+        let is_file = matches!(shown.action.as_str(), "Read" | "Edit" | "Write" | "List")
+            || (tool.name == "HermesSkill" && shown.file_path.is_some());
+        let is_hermes_card = matches!(
+            tool.name.as_str(),
+            "HermesMemory" | "HermesSkill" | "HermesSessionSearch"
+        );
+        let hermes_badge = match tool.name.as_str() {
+            "HermesMemory" => Some(("Memory", rgb(0xc084fc))),
+            "HermesSkill" => Some(("Skill", rgb(0x38bdf8))),
+            "HermesSessionSearch" => Some(("History", rgb(0xfbbf24))),
+            _ => None,
+        };
         let target_path = if is_file {
             shown.file_path.as_deref().map(|path| {
                 let (path, location) = crate::file_editor::file_location(
@@ -176,11 +187,23 @@ impl TranscriptView {
             ToolState::Failed => "Failed",
             ToolState::Cancelled => "Cancelled",
         };
-        // Chained commands and failures share one disclosure: steps, then error.
+        // Chained commands, Hermes special cards, and failures share one disclosure.
         let error_key = format!("tool-detail:{start}:{}", tool.id);
         let error_open = self.agent_panels.part_open(&error_key, false);
         let has_error = failed && !tool.output.trim().is_empty();
-        let has_detail = has_error || chain;
+        // What a provider marked as worth opening: Hermes's calls, whose full
+        // output and edits are read back from its own records.
+        let detail_kind = tool
+            .display
+            .as_ref()
+            .and_then(|display| display["detail"].as_str())
+            .map(str::to_owned);
+        let has_card_detail =
+            !failed && (is_hermes_card || detail_kind.is_some()) && !tool.output.trim().is_empty();
+        // One recorded replacement can be put back as it was.
+        let undo = (has_card_detail && monocode_core::tool::changes::revertible(&tool))
+            .then(|| (tool.clone(), self.edit_undo.get(&tool.id).cloned()));
+        let has_detail = has_error || chain || has_card_detail;
         let chips = if chain {
             let mut seen = std::collections::HashSet::new();
             let chips: Vec<_> = shown
@@ -251,6 +274,24 @@ impl TranscriptView {
                             content(0.5)
                         })
                         .child(action.to_owned()),
+                )
+            })
+            .when_some(hermes_badge, |d, (badge_label, badge_color)| {
+                d.child(
+                    div()
+                        .flex_shrink_0()
+                        .h(px(18.))
+                        .px_1p5()
+                        .rounded(px(4.))
+                        .bg(content(0.06))
+                        .border_1()
+                        .border_color(content(0.1))
+                        .flex()
+                        .items_center()
+                        .text_size(px(10.5))
+                        .font_family(crate::fonts::mono())
+                        .text_color(badge_color)
+                        .child(badge_label),
                 )
             })
             .child(
@@ -441,7 +482,13 @@ impl TranscriptView {
                             .aria_label(format!(
                                 "{} {} for {caption}",
                                 if error_open { "Hide" } else { "Show" },
-                                if has_error { "error details" } else { "steps" }
+                                if has_error {
+                                    "error details"
+                                } else if chain {
+                                    "steps"
+                                } else {
+                                    "details"
+                                }
                             ))
                             .p_1()
                             .child(
@@ -534,11 +581,187 @@ impl TranscriptView {
                         .text_size(px(12.))
                         .line_height(px(20.))
                         .text_color(rgb(0xf87171))
-                        .child(error_detail),
+                        .child(error_detail.clone()),
+                )
+            })
+            .when(has_card_detail && error_open, |d| {
+                d.child(
+                    div()
+                        .min_w_0()
+                        .mt_1()
+                        .mb_2()
+                        .px_2p5()
+                        .py_2()
+                        .rounded(px(6.))
+                        .bg(content(0.04))
+                        .border_1()
+                        .border_color(content(0.08))
+                        .font_family(crate::fonts::mono())
+                        .text_size(px(11.5))
+                        .line_height(px(18.))
+                        .text_color(content(0.68))
+                        .debug_selector(move || format!("tool-detail-{start}"))
+                        .when_some(undo, |d, (call, state)| {
+                            let (label, settled) = match &state {
+                                None | Some(EditUndo::Failed(_)) => ("Undo this edit", false),
+                                Some(EditUndo::Running) => ("Undoing…", true),
+                                Some(EditUndo::Done) => ("Undone", true),
+                            };
+                            let note = match &state {
+                                Some(EditUndo::Failed(error)) => error.clone(),
+                                Some(EditUndo::Done) => "The file has its old text back.".into(),
+                                _ => String::new(),
+                            };
+                            let failed = matches!(state, Some(EditUndo::Failed(_)));
+                            d.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_2()
+                                    .pb_1p5()
+                                    .font_family(crate::fonts::UI)
+                                    .text_size(px(11.))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .text_color(if failed {
+                                                rgb(0xf87171).into()
+                                            } else {
+                                                content(0.45)
+                                            })
+                                            .child(note),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(gpui::SharedString::from(format!(
+                                                "edit-undo:{identity}"
+                                            )))
+                                            .debug_selector(move || format!("edit-undo-{start}"))
+                                            .role(Role::Button)
+                                            .aria_label(label)
+                                            .flex_shrink_0()
+                                            .h(px(20.))
+                                            .px_2()
+                                            .rounded(px(4.))
+                                            .border_1()
+                                            .border_color(content(0.12))
+                                            .flex()
+                                            .items_center()
+                                            .text_color(content(if settled { 0.4 } else { 0.75 }))
+                                            .when(!settled, |d| {
+                                                d.cursor_pointer()
+                                                    .hover(|style| {
+                                                        style
+                                                            .bg(content(0.08))
+                                                            .text_color(content(1.))
+                                                    })
+                                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                                        cx.stop_propagation();
+                                                        this.undo_edit(call.clone(), start, cx);
+                                                    }))
+                                            })
+                                            .child(label),
+                                    ),
+                            )
+                        })
+                        .map(|d| {
+                            if detail_kind.as_deref() == Some("diff") {
+                                d.flex()
+                                    .flex_col()
+                                    .children(detail_lines(&error_detail).map(|line| {
+                                        let color = match line.chars().next() {
+                                            Some('+') if !line.starts_with("+++") => {
+                                                Some(crate::theme::diff_foreground(true))
+                                            }
+                                            Some('-') if !line.starts_with("---") => {
+                                                Some(crate::theme::diff_foreground(false))
+                                            }
+                                            Some(' ') => None,
+                                            _ => Some(content(0.4)),
+                                        };
+                                        div()
+                                            .min_w_0()
+                                            .when_some(color, |d, color| d.text_color(color))
+                                            // An empty line still takes its row.
+                                            .child(if line.is_empty() {
+                                                " ".to_owned()
+                                            } else {
+                                                line
+                                            })
+                                    }))
+                            } else {
+                                d.child(detail_lines(&error_detail).collect::<Vec<_>>().join("\n"))
+                            }
+                        }),
                 )
             })
             .into_any_element()
     }
+}
+
+/// Where taking one edit back stands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) enum EditUndo {
+    Running,
+    Done,
+    Failed(String),
+}
+
+impl TranscriptView {
+    /// Put the old text of one recorded edit back, off the UI thread. The
+    /// file is checked first: an edit written over since is left alone.
+    fn undo_edit(&mut self, call: ToolCall, start: usize, cx: &mut Context<Self>) {
+        if matches!(
+            self.edit_undo.get(&call.id),
+            Some(EditUndo::Running | EditUndo::Done)
+        ) {
+            return;
+        }
+        let id = call.id.clone();
+        let cwd = std::path::PathBuf::from(self.file_link_base.clone().unwrap_or_default());
+        self.edit_undo.insert(id.clone(), EditUndo::Running);
+        let work = cx
+            .background_executor()
+            .spawn(async move { monocode_core::tool::changes::revert(&call, &cwd) });
+        cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let _ = this.update(cx, |this, cx| {
+                this.edit_undo.insert(
+                    id,
+                    match result {
+                        Ok(_) => EditUndo::Done,
+                        Err(error) => EditUndo::Failed(error),
+                    },
+                );
+                this.remeasure_source(start);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+    /// A row's own height changed without its content changing.
+    fn remeasure_source(&mut self, start: usize) {
+        for (ix, row) in self.rows.iter().enumerate() {
+            if row.key.0 == start {
+                self.list.remeasure_items(ix..ix + 1);
+            }
+        }
+    }
+}
+
+/// The lines of a call's output an opened row draws: the first few hundred,
+/// then how many it left out. A long log is for the file, not the transcript.
+fn detail_lines(output: &str) -> impl Iterator<Item = String> + '_ {
+    const SHOWN: usize = 300;
+    let output = output.trim_end();
+    let hidden = output.lines().count().saturating_sub(SHOWN);
+    output
+        .lines()
+        .take(SHOWN)
+        .map(str::to_owned)
+        .chain((hidden > 0).then(|| format!("… {hidden} more lines")))
 }
 
 #[cfg(test)]
@@ -720,6 +943,107 @@ mod tests {
             .unwrap();
         assert!(visual.debug_bounds("tool-target-1").is_some());
         assert!(visual.debug_bounds("tool-input-toggle-1").is_none());
+    }
+
+    #[gpui::test]
+    fn a_call_marked_with_detail_opens_to_what_it_changed(cx: &mut TestAppContext) {
+        cx.executor().allow_parking();
+        cx.update(|cx| cx.set_reduce_motion(true));
+        let dir = std::env::temp_dir().join(format!(
+            "monocode-edit-undo-{}-{}",
+            std::process::id(),
+            monocode_core::time::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("a.txt");
+        std::fs::write(&file, "alpha\nBETA\ngamma\n").unwrap();
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |_, cx| {
+                cx.new(|_| TranscriptView::new())
+            })
+            .unwrap()
+        });
+        window
+            .update(cx, |view, _, cx| {
+                let row = |role: &str, text: String| Row {
+                    role: role.into(),
+                    text,
+                    first: true,
+                    sent_at: None,
+                };
+                // As Hermes's edits arrive: the diff its own record kept.
+                let mut edit = ToolCall::new("patch", "Edit");
+                edit.input = serde_json::json!({
+                    "file_path": file, "old_string": "beta", "new_string": "BETA"
+                })
+                .to_string();
+                edit.output = "@@ -1,3 +1,3 @@\n alpha\n-beta\n+BETA\n gamma".into();
+                edit.state = ToolState::Completed;
+                edit.display = Some(serde_json::json!({"detail":"diff"}));
+                view.patch(
+                    0,
+                    vec![
+                        row("user", "Edit".into()),
+                        row("tool", serde_json::to_string(&edit).unwrap()),
+                        row("assistant", "Done".into()),
+                    ],
+                    cx,
+                );
+                view.work_folds.insert(1, true);
+                view.phases.insert(1, true);
+                view.rebuild(0, cx);
+            })
+            .unwrap();
+        let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        let row = visual.debug_bounds("tool-1").expect("the edit's row");
+        assert!(visual.debug_bounds("tool-detail-1").is_none());
+        visual.simulate_click(
+            point(row.right() - px(8.), row.center().y),
+            Default::default(),
+        );
+        visual.run_until_parked();
+        let detail = visual.debug_bounds("tool-detail-1").expect("the diff");
+        // Five lines of the diff, each on its own row.
+        assert!(detail.size.height >= px(90.));
+        // The turn's footer says what it changed.
+        assert!(
+            [
+                "turn-changes-0",
+                "turn-changes-1",
+                "turn-changes-2",
+                "turn-changes-3"
+            ]
+            .into_iter()
+            .any(|strip| visual.debug_bounds(strip).is_some()),
+            "the files changed, under the reply"
+        );
+        // One replacement goes back as it was, and only once.
+        let undo = visual
+            .debug_bounds("edit-undo-1")
+            .expect("undo for the edit");
+        visual.simulate_click(undo.center(), Default::default());
+        for _ in 0..200 {
+            visual.run_until_parked();
+            if std::fs::read_to_string(&file).unwrap() == "alpha\nbeta\ngamma\n" {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "alpha\nbeta\ngamma\n"
+        );
+        visual.run_until_parked();
+        window
+            .update(visual, |view, _, _| {
+                assert_eq!(view.edit_undo.get("patch"), Some(&EditUndo::Done));
+            })
+            .unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(detail_lines("a\nb\n").count(), 2);
+        let long = "x\n".repeat(305);
+        assert_eq!(detail_lines(&long).last().unwrap(), "… 5 more lines");
     }
 
     #[gpui::test]
