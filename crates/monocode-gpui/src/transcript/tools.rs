@@ -201,7 +201,12 @@ impl TranscriptView {
         let has_card_detail =
             !failed && (is_hermes_card || detail_kind.is_some()) && !tool.output.trim().is_empty();
         // One recorded replacement can be put back as it was.
-        let undo = (has_card_detail && monocode_core::tool::changes::revertible(&tool))
+        // Not in a remote project: its files are not on this disk.
+        let local = !self
+            .file_link_base
+            .as_deref()
+            .is_some_and(|base| base.contains("://"));
+        let undo = (local && has_card_detail && monocode_core::tool::changes::revertible(&tool))
             .then(|| (tool.clone(), self.edit_undo.get(&tool.id).cloned()));
         let has_detail = has_error || chain || has_card_detail;
         let chips = if chain {

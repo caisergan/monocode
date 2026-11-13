@@ -56,6 +56,9 @@ pub(super) struct State {
     forking: bool,
     /// A `session/prompt` is out and unanswered.
     prompt_open: bool,
+    /// A control Hermes refused because a turn is running, to ask again:
+    /// when, and the request.
+    busy_retry: Option<(Instant, &'static str, Value)>,
     /// The chat was loaded without the editor's servers after Hermes could
     /// not take them (its session was busy): tried once.
     load_plain: bool,
@@ -138,6 +141,7 @@ impl Protocol {
     pub(super) fn acp_cancel(&mut self, stdin: &mut impl Write) -> Result<(), String> {
         self.acp.cancelling = true;
         self.acp.deadline = None;
+        self.acp.busy_retry = None;
         self.acp.background.clear();
         if matches!(self.request.kind, Kind::Antigravity | Kind::Devin) {
             for (_, (wire, _, _)) in self.approvals.drain() {
@@ -198,6 +202,16 @@ impl Protocol {
                 true,
                 stdin,
             )?;
+        }
+        if self
+            .acp
+            .busy_retry
+            .as_ref()
+            .is_some_and(|(at, _, _)| Instant::now() >= *at)
+        {
+            if let Some((_, method, params)) = self.acp.busy_retry.take() {
+                self.acp_send(Stage::Configure, method, params, stdin)?;
+            }
         }
         if self.acp.stage == Stage::Background
             && self
@@ -718,10 +732,15 @@ impl Protocol {
                 self.acp.forking = false;
                 if let Some(prompt) = self.request.settings.fork_fallback_prompt.take() {
                     self.request.prompt = prompt;
-                    self.acp.notices.push(Event::Status(format!(
-                        "{} could not branch the chat; this one starts from a recap of it.",
-                        kind.label()
-                    )));
+                    // The card promised the full history: say it is a recap.
+                    self.acp.notices.push(Event::Interjection {
+                        text: format!(
+                            "{} could not branch the chat. This one starts from a recap of it.",
+                            kind.label()
+                        ),
+                        custom_type: "custom".into(),
+                        severity: None,
+                    });
                 }
                 return self.acp_new(stdin);
             }
@@ -793,10 +812,28 @@ impl Protocol {
                 // A turn Hermes lost holds every control until it is
                 // discarded, and `/discard` is a prompt: let the prompt
                 // through, where Hermes says how to recover or takes the
-                // discard. A session that is only busy keeps its refusal, so
-                // a stricter mode is never silently left unset.
+                // discard.
                 if kind == Kind::Hermes && detail.contains("wait for the lost turn") {
                     return self.acp_next(stdin);
+                }
+                // Hermes changes a mode or level only between turns, and one
+                // is running (in its gateway, whoever started it). The prompt
+                // would wait behind that turn anyway: so does the change,
+                // asked again until the session is idle. Going on without it
+                // could run the prompt in a laxer mode than was asked for.
+                if kind == Kind::Hermes
+                    && !timed_out
+                    && detail.contains("changes apply when the session is idle")
+                {
+                    self.acp.busy_retry = Some((
+                        Instant::now() + BUSY_RETRY,
+                        self.acp.pending_method,
+                        self.acp.pending_params.clone(),
+                    ));
+                    self.acp.notices.push(Event::Status(
+                        "Waiting for Hermes to finish the turn it is running…".into(),
+                    ));
+                    return Ok(());
                 }
                 // A model Hermes can no longer resolve (retired upstream)
                 // would fail every turn of the chat the same way. The session
@@ -1696,6 +1733,9 @@ fn background_finished(dispatch: &BackgroundDispatch) -> bool {
         })
 }
 
+/// How long to leave a busy Hermes session before asking it again.
+const BUSY_RETRY: Duration = Duration::from_secs(3);
+
 /// Long enough that a subagent busy in one slow tool is not taken for dead.
 const BACKGROUND_STALL: Duration = Duration::from_secs(30 * 60);
 
@@ -2106,14 +2146,24 @@ mod tests {
         // The gateway runs the turn whether this child lives or not: no
         // deadline of ours gives up on a long one.
         assert!(p.acp.deadline.is_none());
-        // A session that is only busy keeps its refusal: a stricter mode is
-        // never silently left unset.
-        let (result, out, _) =
+        // A session that is only busy is asked again once it may be idle:
+        // the prompt is never sent in a laxer mode than was asked for.
+        let (result, mut out, mut p) =
             run("Mode changes apply when the session is idle; try again after this turn.");
-        assert!(result
-            .unwrap_err()
-            .contains("apply when the session is idle"));
+        assert!(result.is_ok());
+        assert!(out.is_empty(), "nothing sent yet, the prompt least of all");
+        assert!(p.acp_tick(&mut out).unwrap().iter().any(
+            |event| matches!(event, Event::Status(text) if text.starts_with("Waiting for Hermes"))
+        ));
         assert!(out.is_empty());
+        p.acp.busy_retry.as_mut().unwrap().0 = Instant::now();
+        p.acp_tick(&mut out).unwrap();
+        let again = last(&mut out);
+        assert_eq!(again["method"], "session/set_mode");
+        // Idle now: the mode is set and the prompt follows.
+        p.frame(json!({"id":again["id"],"result":{}}), &mut out)
+            .unwrap();
+        assert_eq!(last(&mut out)["method"], "session/prompt");
     }
     /// A saved Hermes chat, opened and with its prompt out.
     fn hermes_prompting() -> (Protocol, Vec<u8>, Value) {

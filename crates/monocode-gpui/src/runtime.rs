@@ -442,6 +442,7 @@ fn run_turn_using(
         // These providers parse slash arguments themselves. App context before
         // the command would turn it into an ordinary message instead.
         let prompt = settings.prepared_prompt.take().unwrap_or(prompt);
+        let asked = prompt.clone();
         let raw_native_command = matches!(kind, Kind::Omp | Kind::Devin | Kind::Hermes)
             && provider::native_prompt(kind, &prompt)
                 .trim_start()
@@ -496,7 +497,12 @@ fn run_turn_using(
             };
             // Outside the hashed context, so the clock never resends it.
             let now = chrono::Local::now().format("%A %-d %B %Y, %H:%M");
-            format!("{intro}\n\n{brief}\n\n<local_time>{now}</local_time>\n{prompt}")
+            let wrapped = format!("{intro}\n\n{brief}\n\n<local_time>{now}</local_time>\n{prompt}");
+            if kind == Kind::Hermes {
+                same_prompt_again(summary.id, &asked, wrapped)
+            } else {
+                wrapped
+            }
         } else if let Some(handoff) = &settings.handoff {
             let wrapped = monocode_core::response::wrap_any_handoff(handoff, &prompt);
             let branches = kind == Kind::Hermes
@@ -1137,6 +1143,33 @@ fn run_turn_using(
 }
 
 /// checkpointEdits.ts's sessionEditPaths: files named by successful edit tools.
+/// The prompt a Mono chat's message was sent as, kept for as long as Hermes
+/// keeps the child that sent it: the same message sent again after a failed
+/// turn goes as the very same text. Hermes tells a retry of a prompt it may
+/// already hold by its content, and the context and clock wrapped around
+/// the message would make every resend new work, run a second time.
+fn same_prompt_again(session: i64, asked: &str, wrapped: String) -> String {
+    use std::sync::{Mutex, OnceLock};
+    type Sent = std::collections::HashMap<i64, (std::time::Instant, String, String)>;
+    static SENT: OnceLock<Mutex<Sent>> = OnceLock::new();
+    const HELD: Duration = Duration::from_secs(180);
+    let mut sent = SENT
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    sent.retain(|_, (at, _, _)| at.elapsed() < HELD);
+    if let Some((_, before, prompt)) = sent.get(&session)
+        && before == asked
+    {
+        return prompt.clone();
+    }
+    sent.insert(
+        session,
+        (std::time::Instant::now(), asked.to_owned(), wrapped.clone()),
+    );
+    wrapped
+}
+
 pub(crate) fn edited_paths(rows: &[Row]) -> Vec<String> {
     let mut paths = Vec::new();
     for row in rows.iter().filter(|r| r.role == "tool") {
