@@ -1360,7 +1360,7 @@ mod tests {
     fn continued_links_survive_restart_and_delete() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("s.sqlite3");
-        let mut store = Store::open(&path).unwrap();
+        let store = Store::open(&path).unwrap();
         let source = store.create("claude", "/p").unwrap().id;
         let child = store.create("claude", "/p").unwrap().id;
         let from = crate::agent::ContinuedFrom {
