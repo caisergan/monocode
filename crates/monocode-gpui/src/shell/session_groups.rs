@@ -420,9 +420,6 @@ impl Shell {
             self.selected_sessions.clear();
             self.selection_anchor = Some(id);
             self.open(id, window, cx);
-            if let Some(view) = self.sessions.get(&id) {
-                view.update(cx, |view, cx| view.close_subagent_sheet(cx));
-            }
         }
         if modifiers.shift || additive {
             window.focus(&self.sidebar_focus, cx);
