@@ -1,5 +1,6 @@
 //! Provider-neutral tool presentation, persisted as a native `tool` row.
 use serde::{Deserialize, Serialize};
+pub mod changes;
 mod presentation;
 pub mod subagent_transcript;
 pub mod tasks;

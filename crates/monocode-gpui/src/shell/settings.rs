@@ -721,6 +721,7 @@ mod tests {
             "settings-nav-providers",
             "settings-nav-mcp",
             "settings-nav-skills",
+            "settings-nav-memory",
             "settings-nav-monos",
             "settings-nav-inbox",
             "settings-nav-archive",

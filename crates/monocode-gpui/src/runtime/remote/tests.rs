@@ -822,6 +822,7 @@ fn a_continued_chat_refuses_to_drop_its_recap_on_an_older_host() {
             continued: Some(monocode_core::agent::ContinuedChat {
                 session: 7,
                 title: "Crash fix".into(),
+                fork: None,
             }),
         }),
         ..Default::default()

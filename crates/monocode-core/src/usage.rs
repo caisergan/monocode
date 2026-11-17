@@ -2,6 +2,7 @@
 //! Blocking probes belong on a worker. Credentials are read only, never rotated.
 pub(crate) mod claude;
 mod devin;
+pub(crate) mod hermes;
 mod opencode;
 mod pi;
 
@@ -142,6 +143,9 @@ pub fn fetch_for(
     if kind == Kind::Pi {
         return fetch_pi(model);
     }
+    if kind == Kind::Hermes {
+        return fetch_hermes(model);
+    }
     if !kind.subscription_usage() {
         return Err(FetchError::unavailable(format!(
             "No subscription usage is available for {}.",
@@ -231,7 +235,29 @@ fn fetch_devin() -> Result<Snapshot, FetchError> {
     })
 }
 fn fetch_opencode() -> Result<Snapshot, FetchError> {
-    let result = opencode::fetch().map_err(FetchError::failed)?;
+    opencode_snapshot(opencode::fetch().map_err(FetchError::failed)?)
+}
+/// Hermes has no subscription of its own: it bills through the provider its
+/// model names. OpenCode Go is the one of those with windows to show.
+fn fetch_hermes(model: Option<&str>) -> Result<Snapshot, FetchError> {
+    let home = hermes::home();
+    let provider = hermes::provider(model, home.as_deref()).unwrap_or_default();
+    if !hermes::is_opencode_go(&provider) {
+        return Err(FetchError::unavailable(if provider.is_empty() {
+            "Hermes has no provider configured.".to_owned()
+        } else {
+            format!("No subscription usage is available for Hermes on {provider}.")
+        }));
+    }
+    let key = home.as_deref().and_then(hermes::opencode_go_key);
+    if key.is_none() {
+        return Err(FetchError::unavailable(
+            "Hermes has no OPENCODE_GO_API_KEY in its .env.",
+        ));
+    }
+    opencode_snapshot(opencode::fetch_with(key).map_err(FetchError::failed)?)
+}
+fn opencode_snapshot(result: opencode::OpencodeGoUsageFetch) -> Result<Snapshot, FetchError> {
     if result.status != "ok" {
         let message = result
             .error

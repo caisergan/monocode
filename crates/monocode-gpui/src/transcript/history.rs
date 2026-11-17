@@ -255,6 +255,7 @@ impl TranscriptView {
             }
         };
         map(&mut self.visuals, f);
+        map(&mut self.turn_changes, f);
         map(&mut self.prepared_parsers, f);
         map(&mut self.entrances, f);
         map(&mut self.reactions, f);
@@ -340,6 +341,8 @@ impl TranscriptView {
         self.prompt_rise_pending = false;
         self.introduced_prompt = None;
         self.turns.retain(|&start, _| start < len);
+        // The rows a turn's edits were read from are replaced: read again.
+        self.turn_changes.clear();
         self.elapsed.retain(|&start, _| start < len);
         self.expanded.retain(|&start| start < len);
         self.phases.retain(|&start, _| start < len);

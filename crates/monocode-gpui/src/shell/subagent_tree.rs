@@ -1,8 +1,8 @@
 //! SubagentTree.tsx: a session's delegated runs, hanging off its card in the
 //! sidebar the way files hang off a folder. Only the session in front unfolds
-//! it: it shows while the session works and a moment after, as the dock does,
-//! and stays while one of its runs is open or the user opened it from the
-//! card's count. A row opens that run's sheet.
+//! it. It lists the latest turn's runs, and keeps them once the turn is over
+//! so they can be looked at: the next prompt starts a turn with none, and the
+//! card's count folds it sooner. A row opens that run's sheet.
 use super::*;
 use crate::{
     conversation::subagent_dock::{failed_color, run_mark},
@@ -69,15 +69,13 @@ impl Shell {
     }
 
     /// Only the session in front lists its runs; the rest keep their count.
-    fn subagents_shown(&self, id: i64, busy: bool) -> bool {
+    fn subagents_shown(&self, id: i64) -> bool {
         let choice = self
             .subagent_trees
             .trees
             .get(&id)
             .and_then(|tree| tree.choice);
-        self.workspace.active == Some(id)
-            && choice != Some(Choice::Folded)
-            && (choice == Some(Choice::Open) || busy)
+        self.workspace.active == Some(id) && choice != Some(Choice::Folded)
     }
 
     /// Moves each session's tree toward where its turn stands.
@@ -106,7 +104,7 @@ impl Shell {
             let pinned = tree.choice == Some(Choice::Open);
             let selected = active && open_run.is_some();
             let mut target = false;
-            if !runs.is_empty() && (live || pinned || selected) {
+            if !runs.is_empty() && (active || live || pinned || selected) {
                 tree.ended_at = None;
                 tree.held = runs;
                 target = true;
@@ -391,7 +389,7 @@ impl Shell {
             .iter()
             .find(|run| run.state(live) == RunState::Running)
             .unwrap_or(&runs[0]);
-        let expanded = self.subagents_shown(id, live);
+        let expanded = self.subagents_shown(id);
         let group = SharedString::from(format!("subagent-count-{id}"));
         let slot = self
             .subagent_trees
@@ -488,8 +486,7 @@ impl Shell {
     }
 
     fn toggle_subagent_tree(&mut self, id: i64, window: &mut Window, cx: &mut Context<Self>) {
-        let live = self.subagents_of(id, cx).is_some_and(|(_, live, _)| live);
-        let shown = self.subagents_shown(id, live);
+        let shown = self.subagents_shown(id);
         if let Some(tree) = self.subagent_trees.trees.get_mut(&id) {
             tree.choice = Some(if shown { Choice::Folded } else { Choice::Open });
         }

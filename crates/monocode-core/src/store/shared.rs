@@ -196,6 +196,8 @@ pub(super) fn project_turns(
                         completed_at: started_at
                             .and_then(|at| at.checked_add(duration.unwrap_or(0))),
                         metrics,
+                        // The shared store has no stream to measure.
+                        output_rate: None,
                     },
                 );
             }
