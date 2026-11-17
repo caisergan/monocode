@@ -476,6 +476,37 @@ impl Store {
     pub fn save_started_link(&self, child: i64, caller: i64) -> Result<(), String> {
         self.save_setting(&format!("started-by:{child}"), &caller.to_string())
     }
+    /// A continued chat's source and the recap its first message carried.
+    pub fn save_continued_from(
+        &self,
+        child: i64,
+        source: &crate::agent::ContinuedFrom,
+    ) -> Result<(), String> {
+        self.save_setting(
+            &format!("continued-from:{child}"),
+            &serde_json::to_string(source).map_err(|e| e.to_string())?,
+        )?;
+        self.save_setting(
+            &format!("continued-link:{child}"),
+            &source.session.to_string(),
+        )
+    }
+    pub fn continued_from(
+        &self,
+        child: i64,
+    ) -> Result<Option<crate::agent::ContinuedFrom>, String> {
+        Ok(self
+            .setting(&format!("continued-from:{child}"))?
+            .and_then(|raw| serde_json::from_str(&raw).ok()))
+    }
+    /// Each continued chat's source, by the continued chat.
+    pub fn continued_links(&self) -> Result<std::collections::HashMap<i64, i64>, String> {
+        Ok(self
+            .settings_with_prefix("continued-link:")?
+            .into_iter()
+            .filter_map(|(child, value)| Some((child, value.trim().parse().ok()?)))
+            .collect())
+    }
     /// Every lead's last orchestration summary.
     pub fn orchestration_summaries(
         &self,
@@ -1055,7 +1086,7 @@ impl Store {
         tx.execute("DELETE FROM native_reminders WHERE session_id=?1", [id])
             .map_err(|e| e.to_string())?;
         tx.execute(
-            "DELETE FROM native_settings WHERE key IN (?1,?2,?3,?5,?6,?7,?8) OR key LIKE ?4",
+            "DELETE FROM native_settings WHERE key IN (?1,?2,?3,?5,?6,?7,?8,?9,?10) OR key LIKE ?4",
             params![
                 format!("agent:{id}"),
                 format!("context:{id}"),
@@ -1064,7 +1095,9 @@ impl Store {
                 format!("started-by:{id}"),
                 format!("orchestration:{id}"),
                 format!("inbox-ask:{id}"),
-                format!("automation:{id}")
+                format!("automation:{id}"),
+                format!("continued-from:{id}"),
+                format!("continued-link:{id}")
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -1322,6 +1355,33 @@ mod tests {
         store.delete(lead).unwrap();
         assert!(store.started_links().unwrap().is_empty());
         assert!(store.orchestration_summaries().unwrap().is_empty());
+    }
+    #[test]
+    fn continued_links_survive_restart_and_delete() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("s.sqlite3");
+        let store = Store::open(&path).unwrap();
+        let source = store.create("claude", "/p").unwrap().id;
+        let child = store.create("claude", "/p").unwrap().id;
+        let from = crate::agent::ContinuedFrom {
+            session: source,
+            title: "Fix the crash".into(),
+            provider: "claude".into(),
+            brief: "## First request\nFix it".into(),
+            earlier: None,
+        };
+        store.save_continued_from(child, &from).unwrap();
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        assert_eq!(store.continued_from(child).unwrap(), Some(from));
+        assert_eq!(store.continued_links().unwrap()[&child], source);
+        assert_eq!(
+            store.session_sidebar_metadata(&[]).continued_from[&child],
+            source
+        );
+        store.delete(child).unwrap();
+        assert!(store.continued_links().unwrap().is_empty());
+        assert_eq!(store.continued_from(child).unwrap(), None);
     }
     #[test]
     fn pins_links_groups_and_reminders_survive_restart_and_delete_clears_them() {

@@ -444,6 +444,7 @@ impl Shell {
                 | Row::ClassicGroupMember { id, .. },
             ) = self.sidebar_list.rows.get(ix)
                 && (self.rails.started.contains_key(id)
+                    || self.rails.continued.contains_key(id)
                     || self.orchestration_summaries.contains_key(id))
             {
                 self.sidebar_list.state.remeasure_items(ix..ix + 1);

@@ -45,6 +45,7 @@ use crate::{
     transcript::TranscriptView,
 };
 pub(crate) use accounts::UsageResumed;
+pub(crate) use continued_chat::continued_color;
 use gpui::{
     AnyElement, Context, CursorStyle, Entity, EventEmitter, Focusable, MouseButton, Role,
     SharedString, StyleRefinement, Subscription, Window, canvas, div, prelude::*, px,
@@ -141,6 +142,8 @@ pub(crate) struct ChooseFolder(pub(crate) AnchorSlot);
 pub(crate) struct OpenSessionChanges(pub(crate) crate::review::ReviewTab);
 /// Open another session, as a continued chat's card opens its source.
 pub(crate) struct OpenSession(pub(crate) i64);
+/// A continued chat sent its first message: its source is now linked.
+pub(crate) struct ContinuedLinked(pub(crate) i64);
 pub(crate) struct Conversation {
     editing_last_turn: edit_last_turn::State,
     btw: Option<Entity<btw::Btw>>,
@@ -221,6 +224,8 @@ pub(crate) struct Conversation {
     tokens_hovered: bool,
     /// A continued chat's card shows the recap that goes out with its first message.
     handoff_context_open: bool,
+    /// The newer chat this one continues in, for the banner above the composer.
+    pub(crate) continued_in: Option<monocode_core::agent::ContinuedChat>,
     subagent_dock: subagent_dock::Dock,
     subagent_sheet: subagent_sheet::SubagentSheet,
     prompt_cache: PromptCacheWarning,
@@ -685,6 +690,7 @@ impl Conversation {
             context_hovered: false,
             tokens_hovered: false,
             handoff_context_open: false,
+            continued_in: None,
             subagent_dock: Default::default(),
             subagent_sheet: Default::default(),
             prompt_cache: PromptCacheWarning::default(),
@@ -779,12 +785,19 @@ impl Conversation {
                 locked(&store).and_then(|s| s.context_usage(id)),
                 locked(&store).and_then(|s| s.follow_ups(id)),
                 locked(&store).and_then(|s| s.history_before(id)),
+                locked(&store).and_then(|s| s.continued_from(id)),
             )
         });
         cx.spawn(async move |this, cx| {
-            let (result, settings, context, follow_ups, before) = work.await;
+            let (result, settings, context, follow_ups, before, continued) = work.await;
             let _ = this.update(cx, |this, cx| {
                 this.loading = false;
+                if let Ok(Some(continued)) = continued {
+                    let roots = this.continued_roots();
+                    this.transcript.update(cx, |view, cx| {
+                        view.set_continued(Some(continued), roots, cx)
+                    });
+                }
                 this.context = context.ok().flatten();
                 match follow_ups {
                     Ok(state) => {
@@ -1242,7 +1255,8 @@ impl Conversation {
         if settings.orchestrator {
             self.settings.orchestrator = false;
         }
-        if self.settings.handoff.take().is_some() {
+        if let Some(handoff) = self.settings.handoff.take() {
+            self.link_continued(handoff, cx);
             self.save_settings(cx);
         }
         let (controls, control_rx) = std::sync::mpsc::channel();
@@ -1594,6 +1608,7 @@ impl EventEmitter<SubagentsChanged> for Conversation {}
 impl EventEmitter<ChooseFolder> for Conversation {}
 impl EventEmitter<OpenSessionChanges> for Conversation {}
 impl EventEmitter<OpenSession> for Conversation {}
+impl EventEmitter<ContinuedLinked> for Conversation {}
 impl EventEmitter<Transfer> for Conversation {}
 
 impl Conversation {
@@ -1665,6 +1680,7 @@ impl Conversation {
                 self.remote_plan_request(id, text, *build, cx)
             }
             ResponseRequest::QuoteSelection { text } => self.mono_quote(text, window, cx),
+            ResponseRequest::OpenSession { id } => cx.emit(OpenSession(*id)),
             ResponseRequest::EditLastTurn { turn } => self.begin_edit_last_turn(*turn, window, cx),
             ResponseRequest::Draft { send } => self.draft_action(*send, cx),
             ResponseRequest::SaveNote {
@@ -2912,6 +2928,7 @@ impl Conversation {
             .child(self.message_queue(window, cx))
             .children(if self.is_remote() { None } else { self.auth_notice(cx) })
             .when(self.settings.worktree_removed,|d|d.child(div().mb_2().p_3().rounded_lg().border_1().border_color(content(0.1)).flex().items_center().gap_3().text_size(px(12.)).child(div().flex_1().child("Worktree deleted. Select a branch or worktree to continue this conversation.")).child(tool_pill("reattach-worktree","Select worktree").child("Select worktree").on_click(cx.listener(|this,_,window,cx|this.open_git(GitMode::Worktree,window,cx))))))
+            .children(self.continued_in_banner(cx))
             .when_some(
                 self.settings
                     .handoff

@@ -31,6 +31,10 @@ pub(crate) enum Request {
         kind: TransferKind,
         anchor: AnchorSlot,
     },
+    /// Open another session, as a continued chat's header opens its source.
+    OpenSession {
+        id: i64,
+    },
 }
 #[derive(Clone)]
 pub(crate) struct Transfer {

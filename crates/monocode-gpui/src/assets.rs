@@ -53,6 +53,7 @@ impl AssetSource for Assets {
    "response-note"=>include_bytes!("../assets/hugeicons/response-note.svg"),
    "response-activity"=>include_bytes!("../assets/hugeicons/response-activity.svg"),
    "response-handoff"=>include_bytes!("../assets/hugeicons/response-handoff.svg"),
+   "continued"=>include_bytes!("../assets/hugeicons/continued.svg"),
    "response-opinion"=>include_bytes!("../assets/hugeicons/response-opinion.svg"),
    "response-metrics"=>include_bytes!("../assets/hugeicons/response-metrics.svg"),
    "close"=>include_bytes!("../assets/close.svg"),

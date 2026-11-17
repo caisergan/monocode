@@ -1,5 +1,6 @@
 pub(crate) mod attachments;
 pub(crate) mod burst;
+mod continued;
 pub(crate) mod dates;
 mod drafts;
 #[cfg(test)]
@@ -898,6 +899,8 @@ pub(crate) struct TranscriptView {
     agent_panels: tasks::AgentPanels,
     /// User messages opened past their four-line clamp, by start.
     expanded_prompts: HashSet<usize>,
+    /// The chat this one continues, shown on its first prompt.
+    continued: continued::State,
     /// Collapsed user messages whose later chunks are hidden, by start.
     clamped_prompts: HashSet<usize>,
     phases: HashMap<usize, bool>,
@@ -2779,6 +2782,7 @@ impl TranscriptView {
             expanded: HashSet::new(),
             agent_panels: Default::default(),
             expanded_prompts: HashSet::new(),
+            continued: Default::default(),
             clamped_prompts: HashSet::new(),
             phases: HashMap::new(),
             phase_toggle: None,
@@ -5076,6 +5080,14 @@ impl TranscriptView {
         let message_start = message.start;
         let first = row.first;
         let last = row.last;
+        // A continued chat's first prompt carries its source and recap, at
+        // the bubble's full width so its chunks and recap line up.
+        let continued_prompt = user && self.continued_start() == Some(message_start);
+        let prompt_width = if continued_prompt && self.chat_layout {
+            Some(PROMPT_BUBBLE_MAX)
+        } else {
+            prompt_width
+        };
         // The final answer is under the receipt even while its expanded work
         // is leaving. Its padding must not change when those rows are removed.
         let after_receipt = message.under_line
@@ -5670,6 +5682,16 @@ impl TranscriptView {
                     && (!first
                         || self.clamped_prompts.contains(&message_start)
                         || self.prompt_lines(&text, window) > 4);
+                let continued_header = if continued_prompt && first {
+                    self.continued_header(cx)
+                } else {
+                    None
+                };
+                let continued_recap = if continued_prompt && last {
+                    self.continued_recap(cx)
+                } else {
+                    None
+                };
                 let bubble = div()
                     .when(photo_body.is_none(), |d| d.w_full())
                     .relative()
@@ -5723,6 +5745,7 @@ impl TranscriptView {
                                 .size_full(),
                             )
                     })
+                    .children(continued_header)
                     .children(
                         attachment_body
                             .map(|body| div().when(!text.is_empty(), |d| d.mb_2()).child(body)),
@@ -5823,6 +5846,7 @@ impl TranscriptView {
                             ),
                         )
                     })
+                    .children(continued_recap)
                     .when(user && self.mono && first, |d| {
                         d.children(self.reaction_badge(message_start))
                     })
@@ -6142,12 +6166,16 @@ impl TranscriptView {
                 remaining -= f32::from(self.measure_row_height(ix, window, cx));
             }
         }
-        px(BOTTOM_INSET + remaining.max(0.))
+        let mark = self.continued_in_height();
+        px(BOTTOM_INSET + mark + (remaining - mark).max(0.))
     }
     fn footer(&mut self, window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
         div()
             .h(self.footer_height(window, cx))
             .w_full()
+            .flex()
+            .flex_col()
+            .children(self.continued_in_mark(cx))
             .into_any_element()
     }
     fn update_jump(&mut self, cx: &mut Context<Self>) {
