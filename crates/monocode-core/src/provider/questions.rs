@@ -309,6 +309,19 @@ pub(super) fn respond(
                 json!({"outcome":"accepted","answers":pairs.map(|(q,a)|(q.prompt.clone(),if q.multiple {json!(a)} else {json!(a.first().cloned().unwrap_or_default())})).collect::<serde_json::Map<_,_>>()})
             }
         }
+        // ACP form elicitation, as Hermes asks its `clarify` questions: one
+        // `answer`, a string or the list a multi-select takes.
+        "elicitation" => match pairs.into_iter().next() {
+            Some((q, answer)) if answered && answer.iter().any(|a| !a.trim().is_empty()) => {
+                let answer = if q.multiple {
+                    json!(answer)
+                } else {
+                    json!(answer.join(", "))
+                };
+                json!({"action":"accept","content":{"answer":answer}})
+            }
+            _ => json!({"action":"decline"}),
+        },
         "pi" => {
             return write_json(
                 stdin,

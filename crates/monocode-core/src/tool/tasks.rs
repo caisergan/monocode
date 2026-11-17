@@ -131,6 +131,9 @@ pub struct AgentRun {
     pub stopped: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<AgentUsage>,
+    /// What the run handed back, or the latest thing it has said so far.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<String>,
 }
 /// Tokens one delegated run spent in its own context window. `uncached` counts
 /// every prompt token not read from the cache, cache writes included.
@@ -983,9 +986,13 @@ pub fn subagents_from(rows: &[crate::transcript::Row], start: usize) -> Vec<Suba
                 .take_while(|(ix, row)| *ix == 0 || !row.first);
             let text: String = chunks.map(|(_, row)| row.text.as_str()).collect();
             let call: super::ToolCall = serde_json::from_str(&text).ok()?;
-            let Some(Panel::Agent(run)) = call.panel() else {
+            let Some(Panel::Agent(mut run)) = call.panel() else {
                 return None;
             };
+            // Most providers hand a run's report back as the call's own output.
+            if run.response.is_none() {
+                run.response = call.agent_report().map(str::to_owned);
+            }
             Some(Subagent {
                 running: call.state == ToolState::Running,
                 id: call.id,

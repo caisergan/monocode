@@ -1,5 +1,6 @@
 //! The same live model catalogs the React model picker queries. No inference.
 mod claude;
+pub(crate) mod hermes;
 use crate::{
     process,
     provider::{self, Kind},
@@ -334,7 +335,11 @@ pub fn models_for(kind: Kind, account: &crate::accounts::Profile) -> Result<Vec<
     } else if kind == Kind::Devin {
         provider::devin::catalog_models(&value)
     } else if kind.is_acp() {
-        acp_models(&value)
+        let mut models = acp_models(&value);
+        if kind == Kind::Hermes {
+            hermes::narrow(&mut models);
+        }
+        models
     } else if kind.is_pi() {
         pi_models(kind, &value)
     } else if kind == Kind::Claude {
@@ -502,11 +507,17 @@ fn acp_models(value: &Value) -> Vec<Model> {
     if let Some(effort) = effort {
         leaves(&effort["options"], &mut choices);
     }
-    let efforts: Vec<String> = choices
+    let mut efforts: Vec<String> = choices
         .iter()
         .filter_map(|o| o.as_str().or_else(|| o["value"].as_str()))
         .map(str::to_owned)
         .collect();
+    if effort.is_some_and(|o| o["id"] == "reasoning_effort")
+        && !efforts.is_empty()
+        && !efforts.iter().any(|e| e == "default")
+    {
+        efforts.insert(0, "default".into());
+    }
     let current = option
         .and_then(|o| o["currentValue"].as_str())
         .or_else(|| value["models"]["currentModelId"].as_str());

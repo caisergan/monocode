@@ -19,6 +19,7 @@ impl Shell {
             .map(|child| ContinuedChat {
                 session: child,
                 title: self.session_metadata(child, cx).display_title(),
+                fork: None,
             });
         view.update(cx, |view, cx| view.set_continued_in(next, cx));
     }

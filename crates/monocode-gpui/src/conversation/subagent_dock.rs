@@ -111,9 +111,16 @@ pub(crate) fn run_mark(agent: &Subagent, live: bool, opacity: f32) -> Option<Any
 }
 
 impl Conversation {
-    /// The latest turn's subagents.
+    /// The latest turn's subagents: the ones the card above the composer and
+    /// the sidebar's tree show, so the next prompt clears both.
     pub(crate) fn subagents(&self, cx: &gpui::App) -> Rc<Vec<Subagent>> {
         self.transcript.read(cx).subagents()
+    }
+
+    /// Every turn's subagents. An open sheet finds its run among these, so it
+    /// stays open when a message written from it starts the next turn.
+    pub(crate) fn session_subagents(&self, cx: &gpui::App) -> Rc<Vec<Subagent>> {
+        self.transcript.read(cx).session_subagents()
     }
 
     /// Moves the card toward where the turn stands. Returns whether it draws.

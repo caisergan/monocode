@@ -29,7 +29,13 @@ fn opencode_go_result(
 }
 
 pub(super) fn fetch() -> Result<OpencodeGoUsageFetch, String> {
-    let Some(api_key) = read_opencode_go_api_key() else {
+    fetch_with(read_opencode_go_api_key())
+}
+
+/// The Go windows for a key from anywhere: OpenCode's own, or the one
+/// another harness (Hermes) keeps for its `opencode-go` provider.
+pub(super) fn fetch_with(api_key: Option<String>) -> Result<OpencodeGoUsageFetch, String> {
+    let Some(api_key) = api_key else {
         return Ok(opencode_go_result(
             "unavailable",
             None,

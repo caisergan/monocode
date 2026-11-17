@@ -259,6 +259,7 @@ pub(crate) struct SettingsView {
     accent_custom_open: bool,
     accent_anchor: AnchorSlot,
     mobile: pages::MobileState,
+    memory: pages::MemoryState,
     _subscriptions: Vec<Subscription>,
 }
 impl EventEmitter<SettingsEvent> for SettingsView {}
@@ -409,6 +410,7 @@ impl SettingsView {
             accent_custom_open: false,
             accent_anchor: AnchorSlot::default(),
             mobile: pages::MobileState::default(),
+            memory: pages::MemoryState::default(),
             _subscriptions: subscriptions,
         };
         this.watch_mobile(cx);
@@ -486,6 +488,10 @@ impl SettingsView {
             self.watch_connections(cx);
             if section == Section::Mcp {
                 self.refresh_mcp_health(cx);
+            }
+            if section == Section::Memory {
+                // Hermes may have written since the page was last open.
+                self.load_memory();
             }
             self.select_open = None;
             self.recording = None;

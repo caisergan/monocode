@@ -279,6 +279,61 @@ mod tests {
     use monocode_core::agent::{TurnInfo, TurnMetrics};
 
     #[gpui::test]
+    fn the_footer_says_how_fast_the_latest_measured_turn_wrote(cx: &mut gpui::TestAppContext) {
+        let store = Arc::new(std::sync::Mutex::new(
+            monocode_core::store::Store::open(Path::new(":memory:")).unwrap(),
+        ));
+        let summary = locked(&store).unwrap().create("hermes", "/tmp").unwrap();
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |_, cx| {
+                cx.new(|cx| Conversation::new(summary, store.clone(), cx))
+            })
+            .unwrap()
+        });
+        let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.run_until_parked();
+        assert!(
+            visual.debug_bounds("turn-speed").is_none(),
+            "nothing measured yet"
+        );
+        let turn = |output_tokens, duration_ms| TurnInfo {
+            duration_ms,
+            metrics: Some(TurnMetrics {
+                output_tokens,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        window
+            .update(visual, |v, _, cx| {
+                v.loaded = true;
+                v.transcript.update(cx, |t, _| {
+                    t.turns.insert(1, turn(9_000, 10_000));
+                    t.turns.insert(5, turn(600, 20_000));
+                });
+                // The latest prompt's own figure: 600 tokens in 20 s.
+                assert_eq!(v.speed_read_out(cx), Some((30., false)));
+                cx.notify();
+            })
+            .unwrap();
+        visual.run_until_parked();
+        assert!(visual.debug_bounds("turn-speed").is_some());
+        // A later prompt with no clock has no figure, and an older prompt's
+        // is not shown in its place.
+        window
+            .update(visual, |v, _, cx| {
+                v.transcript.update(cx, |t, _| {
+                    t.turns.insert(12, turn(50, 0));
+                });
+                assert_eq!(v.speed_read_out(cx), None);
+                cx.notify();
+            })
+            .unwrap();
+        visual.run_until_parked();
+        assert!(visual.debug_bounds("turn-speed").is_none());
+    }
+
+    #[gpui::test]
     fn an_expired_claude_cache_asks_before_sending_and_can_be_skipped(
         cx: &mut gpui::TestAppContext,
     ) {

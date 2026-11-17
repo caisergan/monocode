@@ -67,7 +67,11 @@ impl Conversation {
                                     .flex_1()
                                     .text_size(px(11.))
                                     .text_color(content(0.5))
-                                    .child("Continued chat"),
+                                    .child(if source.fork.is_some() {
+                                        "Branched chat · starts with the full history"
+                                    } else {
+                                        "Continued chat"
+                                    }),
                             )
                             .child(dismiss),
                     )
@@ -203,6 +207,7 @@ impl Conversation {
                         monocode_core::agent::ContinuedChat {
                             session: earlier.session,
                             title: earlier.title,
+                            fork: None,
                         }
                     });
                     store.save_continued_from(id, &continued)?;

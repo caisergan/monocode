@@ -145,6 +145,113 @@ pub(super) fn present(call: &ToolCall, fallback_cwd: Option<&str>) -> ToolPresen
             steps: Vec::new(),
         };
     }
+    if matches!(
+        call.name.as_str(),
+        "HermesMemory" | "HermesSkill" | "HermesSessionSearch"
+    ) {
+        let input = serde_json::from_str::<Value>(&call.input).unwrap_or(Value::Null);
+        let running = call.state == ToolState::Running;
+        match call.name.as_str() {
+            "HermesMemory" => {
+                let action_str = input["action"].as_str().unwrap_or("update");
+                let target_scope = input["target"].as_str().unwrap_or("memory");
+                let preview = input["preview"]
+                    .as_str()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(|s| format!("{target_scope}: {}", s.trim()))
+                    .unwrap_or_else(|| target_scope.to_owned());
+                let action = if running {
+                    "Remembering"
+                } else if action_str == "read" {
+                    "Checked memory"
+                } else if action_str == "remove" || action_str == "delete" {
+                    "Forgot memory"
+                } else {
+                    "Memory updated"
+                };
+                return ToolPresentation {
+                    action: action.into(),
+                    target: preview,
+                    file_path: None,
+                    start_line: None,
+                    command: None,
+                    description: None,
+                    steps: Vec::new(),
+                };
+            }
+            "HermesSkill" => {
+                let action_str = input["action"].as_str().unwrap_or("view");
+                let skill_name = input["name"]
+                    .as_str()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or("skills");
+                let file_path = input["file_path"]
+                    .as_str()
+                    .filter(|s| !s.trim().is_empty())
+                    .map(str::to_owned);
+                let action = match action_str {
+                    "create" => {
+                        if running {
+                            "Creating skill"
+                        } else {
+                            "Skill created"
+                        }
+                    }
+                    "delete" | "remove_file" => {
+                        if running {
+                            "Removing skill"
+                        } else {
+                            "Skill removed"
+                        }
+                    }
+                    "view" | "list" => {
+                        if running {
+                            "Loading skill"
+                        } else {
+                            "Skill loaded"
+                        }
+                    }
+                    _ => {
+                        if running {
+                            "Updating skill"
+                        } else {
+                            "Skill updated"
+                        }
+                    }
+                };
+                return ToolPresentation {
+                    action: action.into(),
+                    target: skill_name.into(),
+                    file_path,
+                    start_line: None,
+                    command: None,
+                    description: None,
+                    steps: Vec::new(),
+                };
+            }
+            "HermesSessionSearch" => {
+                let query = input["query"]
+                    .as_str()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or("recent sessions");
+                let action = if running {
+                    "Searching sessions"
+                } else {
+                    "Searched sessions"
+                };
+                return ToolPresentation {
+                    action: action.into(),
+                    target: query.into(),
+                    file_path: None,
+                    start_line: None,
+                    command: None,
+                    description: None,
+                    steps: Vec::new(),
+                };
+            }
+            _ => {}
+        }
+    }
     let mut input = serde_json::from_str::<Value>(&call.input).unwrap_or(Value::Null);
     normalize_inputs(&mut input, 0);
     let desktop = call.display.as_ref().unwrap_or(&input["__desktop"]);
