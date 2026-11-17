@@ -1013,21 +1013,6 @@ impl Conversation {
         if prompt.trim().is_empty() && self.attachments.is_empty() {
             return;
         }
-        // Written while a run's sheet is open, a message is meant for that run.
-        // A provider command stays the provider's own.
-        let prompt = match self.subagent_relay_target() {
-            Some((name, id))
-                if (!prompt.trim().is_empty() || !self.attachments.is_empty())
-                    && !prompt.trim_start().starts_with('/') =>
-            {
-                // An account switch drops the send below: say nothing went.
-                if !self.account_switching {
-                    self.note_sent_to_subagent(&prompt, cx);
-                }
-                subagent_sheet::relay(&name, &id, prompt.trim())
-            }
-            _ => prompt,
-        };
         self.completion
             .update(cx, |completion, cx| completion.dismiss(cx));
         let mode = if self.settings.orchestrator {

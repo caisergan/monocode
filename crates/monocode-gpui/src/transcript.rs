@@ -880,20 +880,6 @@ pub(crate) struct TranscriptView {
             std::rc::Rc<Vec<monocode_core::tool::tasks::Subagent>>,
         )>,
     >,
-    /// The runs of the turns before the latest, by where the latest begins.
-    earlier_subagents: std::cell::RefCell<
-        Option<(
-            usize,
-            std::rc::Rc<Vec<monocode_core::tool::tasks::Subagent>>,
-        )>,
-    >,
-    /// Every turn's runs together, kept as `turn_subagents` is.
-    session_subagents: std::cell::RefCell<
-        Option<(
-            usize,
-            std::rc::Rc<Vec<monocode_core::tool::tasks::Subagent>>,
-        )>,
-    >,
     pub(crate) file_link_base: Option<String>,
     expanded: HashSet<usize>,
     agent_panels: tasks::AgentPanels,
@@ -992,42 +978,6 @@ impl TranscriptView {
         ));
         *self.turn_subagents.borrow_mut() = Some((self.source.len(), runs.clone()));
         runs
-    }
-    /// Every turn's subagents, oldest first: where an open sheet finds its run
-    /// once a later turn has begun. Earlier turns are parsed once and kept
-    /// until a patch reaches back into them.
-    pub(crate) fn session_subagents(
-        &self,
-    ) -> std::rc::Rc<Vec<monocode_core::tool::tasks::Subagent>> {
-        if let Some((len, runs)) = self.session_subagents.borrow().as_ref()
-            && *len == self.source.len()
-        {
-            return runs.clone();
-        }
-        let latest = self.subagents();
-        let start = self.latest_turn_start().min(self.source.len());
-        let earlier = match self.earlier_subagents.borrow().as_ref() {
-            Some((until, runs)) if *until == start => Some(runs.clone()),
-            _ => None,
-        };
-        let earlier = earlier.unwrap_or_else(|| {
-            let runs = std::rc::Rc::new(monocode_core::tool::tasks::subagents_from(
-                &self.source[..start],
-                0,
-            ));
-            *self.earlier_subagents.borrow_mut() = Some((start, runs.clone()));
-            runs
-        });
-        let runs = if earlier.is_empty() {
-            latest
-        } else {
-            std::rc::Rc::new(earlier.iter().chain(latest.iter()).cloned().collect())
-        };
-        *self.session_subagents.borrow_mut() = Some((self.source.len(), runs.clone()));
-        runs
-    }
-    pub(crate) fn unfold_work(&mut self) {
-        self.fold_work = false;
     }
     /// A view of a run that began before the view did: its clock runs from then.
     pub(crate) fn turn_started_at(&mut self, started_at: Option<u64>) {
@@ -2776,8 +2726,6 @@ impl TranscriptView {
             side_question: false,
             agent_trail_only: false,
             turn_subagents: Default::default(),
-            earlier_subagents: Default::default(),
-            session_subagents: Default::default(),
             file_link_base: None,
             expanded: HashSet::new(),
             agent_panels: Default::default(),
@@ -2948,7 +2896,6 @@ impl TranscriptView {
             self.active_provider_turn_id = None;
             self.live_start = self.source.len();
             *self.turn_subagents.borrow_mut() = None;
-            *self.session_subagents.borrow_mut() = None;
             // The provider starts before its prompt arrives. Keep an ordinary
             // chat's existing spacer and scroll position until patch accepts
             // that prompt, just as React pins on lastUserId rather than busy.
@@ -3181,11 +3128,6 @@ impl TranscriptView {
                 .any(runs_of)
         {
             *self.turn_subagents.borrow_mut() = None;
-            *self.session_subagents.borrow_mut() = None;
-            // A run of an earlier turn can still be working in the background.
-            self.earlier_subagents
-                .borrow_mut()
-                .take_if(|(until, _)| start < *until);
         }
         assert!(
             start <= self.source.len(),
