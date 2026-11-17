@@ -239,9 +239,20 @@ pub fn continuation(rows: &[Row], earlier: Option<&str>) -> String {
     };
     let mut sections = Vec::new();
     if let Some(earlier) = earlier.map(str::trim).filter(|e| !e.is_empty()) {
+        // One level down, so its sections stay inside this one.
+        let earlier = limit(earlier, 4_000)
+            .lines()
+            .map(|line| {
+                if line.starts_with("## ") {
+                    format!("#{line}")
+                } else {
+                    line.to_owned()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         sections.push(format!(
-            "## Earlier context\nThis chat already continued an earlier one. Its recap:\n\n{}",
-            limit(earlier, 4_000)
+            "## Earlier context\nThis chat already continued an earlier one. Its recap:\n\n{earlier}"
         ));
     }
     let texts: Vec<_> = users.iter().map(|text| text.trim()).collect();
@@ -409,8 +420,9 @@ mod tests {
             tool("Read", serde_json::json!({"file_path":"src/b.rs"})),
             row("assistant", "Done: added the test."),
         ];
-        let brief = continuation(&rows, Some("Older recap"));
+        let brief = continuation(&rows, Some("## First request\nOlder recap"));
         assert!(brief.starts_with("## Earlier context"));
+        assert!(brief.contains("### First request\nOlder recap"));
         assert!(brief.contains("## First request\nFix the crash on launch"));
         assert!(brief.contains("- Also add a test\n- And update the changelog"));
         assert!(brief.contains("## Latest response\nDone: added the test."));

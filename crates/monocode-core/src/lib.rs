@@ -24,6 +24,7 @@ pub mod process;
 pub mod project_appearance;
 pub mod prompt_cache;
 pub mod provider;
+pub mod recap;
 pub mod remote;
 pub mod resources;
 pub mod response;

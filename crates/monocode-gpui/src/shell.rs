@@ -9,6 +9,7 @@ mod classic_sidebar;
 mod classic_surface_tests;
 mod classic_surfaces;
 mod close_confirm;
+mod continued_chats;
 mod file_panes;
 mod github_star;
 mod idle_agents;
@@ -630,6 +631,8 @@ pub(crate) struct Shell {
     orchestration_summaries: HashMap<i64, monocode_core::orchestration::Summary>,
     /// Sessions an /operator thread started, by the session that started them.
     started_by: HashMap<i64, i64>,
+    /// Chats started with "Continue in new session", by the chat each continues.
+    continued_from: HashMap<i64, i64>,
     /// The sidebar rails under orchestrators and /operator threads.
     rails: rails::Rails,
     usage_footer: Entity<UsageFooter>,
@@ -1047,6 +1050,7 @@ impl Shell {
                 .map(|(lead, summary)| (lead, summary.after_restart()))
                 .collect(),
             started_by: sidebar_metadata.started_by,
+            continued_from: sidebar_metadata.continued_from,
             rails: Default::default(),
             usage_footer: cx.new(|cx| UsageFooter::new(active_kind, cx)),
             resources,
@@ -1464,6 +1468,15 @@ impl Shell {
             .push(cx.subscribe(&view, |this, _, _: &SubagentsChanged, cx| {
                 this.notify_sidebar(cx);
             }));
+        self.observations.push(cx.subscribe(
+            &view,
+            move |this, _, event: &crate::conversation::ContinuedLinked, cx| {
+                this.continued_from.insert(id, event.0);
+                this.sync_continued_in(event.0, cx);
+                this.sidebar_list.invalidate_structure();
+                this.notify_sidebar(cx);
+            },
+        ));
         self.observations
             .push(cx.subscribe(&view, move |this, _, _: &SessionChanged, cx| {
                 let Some(view) = this.sessions.get(&id) else {
@@ -1481,6 +1494,10 @@ impl Shell {
                 this.automation_session_changed(id, cx);
                 this.sync_review_locks(cx);
                 this.refresh_session_mark(id, cx);
+                if let Some(&source) = this.continued_from.get(&id) {
+                    // A renamed continuation renames the banner in its source.
+                    this.sync_continued_in(source, cx);
+                }
                 this.notification_session_changed(id, cx);
                 this.update_usage_provider(cx);
                 this.update_chat_visibility(cx);
@@ -1529,6 +1546,7 @@ impl Shell {
         if !self.order.contains(&id) {
             self.order.push(id);
         }
+        self.sync_continued_in(id, cx);
     }
     /// SessionPane's reviewUndoLocked: another running session shares the checkout.
     fn sync_review_locks(&mut self, cx: &mut Context<Self>) {
@@ -6188,14 +6206,14 @@ impl Shell {
         // A collapsed thread shows a chevron in its mark's place on hover:
         // selecting it opens the rail below.
         let expandable = rail.is_some_and(|(_, open)| !open);
-        let mode = rail.map(|(rail, _)| match rail {
-            rails::Rail::Agents(summary) => (
+        let mode = rail.and_then(|(rail, _)| match rail {
+            rails::Rail::Agents(summary) => Some((
                 "share",
                 // fuchsia-200/90
                 gpui::Hsla::from(rgb(0xf5d0fe)).opacity(0.9),
                 format!("Orchestrator, {}", summary.describe()),
-            ),
-            rails::Rail::Started(children) => (
+            )),
+            rails::Rail::Started(children) => Some((
                 "cursor-magic",
                 // sky-200/90
                 gpui::Hsla::from(rgb(0xbae6fd)).opacity(0.9),
@@ -6208,17 +6226,33 @@ impl Shell {
                         "sessions"
                     }
                 ),
-            ),
+            )),
+            rails::Rail::Continued(_) => None,
+        });
+        // A continued chat is marked whether or not its sources hang under it;
+        // the rail beneath already says so for the chats on it.
+        let mode = mode.or_else(|| {
+            if nested {
+                return None;
+            }
+            let chain = match rail {
+                Some((rails::Rail::Continued(chain), _)) => Some(chain.as_slice()),
+                _ => None,
+            };
+            self.continued_label(id, chain, cx)
+                .map(|label| ("continued", crate::conversation::continued_color(), label))
         });
         // startedInView: one of its sessions is the one in view or chosen,
         // so the thread keeps its hover fill as the group's head.
         let started_in_view = match rail {
-            Some((rails::Rail::Started(children), _)) => children.iter().any(|c| {
-                self.selected_sessions.contains(c)
-                    || (self.workspace.active == Some(*c)
-                        && !self.mono_active(cx)
-                        && !self.app_view_open())
-            }),
+            Some((rails::Rail::Started(children) | rails::Rail::Continued(children), _)) => {
+                children.iter().any(|c| {
+                    self.selected_sessions.contains(c)
+                        || (self.workspace.active == Some(*c)
+                            && !self.mono_active(cx)
+                            && !self.app_view_open())
+                })
+            }
             _ => false,
         };
         let compact = nested || self.workspace.compact_session_cards;

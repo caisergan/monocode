@@ -202,6 +202,21 @@ pub struct ContinuedChat {
     pub session: i64,
     pub title: String,
 }
+/// What a continued chat keeps once its first message has gone out: the
+/// chat it continues and the recap that went with that message.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContinuedFrom {
+    pub session: i64,
+    pub title: String,
+    /// The source chat's provider, for its mark.
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub brief: String,
+    /// The chat the source itself continued, whose recap this one carries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub earlier: Option<ContinuedChat>,
+}
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TurnMetrics {

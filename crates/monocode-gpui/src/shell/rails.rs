@@ -19,6 +19,8 @@ pub(crate) struct Rails {
     open_past: HashSet<i64>,
     /// This frame's /operator groups, and the sessions they took from the list.
     pub(super) started: HashMap<i64, Vec<i64>>,
+    /// This frame's continued-chat chains, by their newest chat.
+    pub(super) continued: HashMap<i64, Vec<i64>>,
     pub(super) children: HashSet<i64>,
     frames: Option<gpui::Task<()>>,
 }
@@ -52,6 +54,8 @@ pub(crate) enum Rail {
     Started(Vec<i64>),
     /// This orchestrator's agents.
     Agents(monocode_core::orchestration::Summary),
+    /// The chats this one continues, newest first.
+    Continued(Vec<i64>),
 }
 
 /// `.zen-phase-step.orchestration-tree-step`: a step branching off the
@@ -109,7 +113,12 @@ impl Shell {
             .values()
             .any(|s| s.tasks.iter().any(|t| t.session == Some(id)))
     }
-    fn rail(&self, id: i64, started: &HashMap<i64, Vec<i64>>) -> Option<Rail> {
+    fn rail(
+        &self,
+        id: i64,
+        started: &HashMap<i64, Vec<i64>>,
+        continued: &HashMap<i64, Vec<i64>>,
+    ) -> Option<Rail> {
         // A lead keeps its rail, and so its mark, after its run: closed agents
         // (their sessions archived) fold under past agents.
         if let Some(summary) = self
@@ -123,12 +132,18 @@ impl Shell {
             .get(&id)
             .filter(|c| !c.is_empty())
             .map(|c| Rail::Started(c.clone()))
+            .or_else(|| {
+                continued
+                    .get(&id)
+                    .filter(|c| !c.is_empty())
+                    .map(|c| Rail::Continued(c.clone()))
+            })
     }
     fn rail_open(&self, id: i64, rail: &Rail, cx: &App) -> bool {
         match rail {
             // orchestrationExpanded: the lead in view, chosen or working.
             Rail::Agents(_) => self.in_play(id, cx),
-            Rail::Started(children) => {
+            Rail::Started(children) | Rail::Continued(children) => {
                 self.in_play(id, cx) || children.iter().any(|c| self.in_play(*c, cx))
             }
         }
@@ -136,17 +151,23 @@ impl Shell {
     /// Moves each rail toward its open state. A rail the sidebar first shows
     /// is simply there; later changes grow and fold.
     pub(super) fn sync_rails(&mut self, ids: &[i64], cx: &mut Context<Self>) {
-        let (started, children) = if self.workspace.classic_layout {
+        let (started, mut children) = if self.workspace.classic_layout {
             // Original Sidebar.tsx leaves /operator launches in the list.
             (HashMap::new(), HashSet::new())
         } else {
             self.started_groups(ids)
         };
+        let continued = if self.workspace.classic_layout {
+            HashMap::new()
+        } else {
+            self.continued_groups(ids, &started, &children, cx)
+        };
+        children.extend(continued.values().flatten().copied());
         let now = Instant::now();
         let mut animating = false;
         let mut seen = HashSet::new();
         for &id in ids {
-            let Some(rail) = self.rail(id, &started) else {
+            let Some(rail) = self.rail(id, &started, &continued) else {
                 continue;
             };
             seen.insert(id);
@@ -185,6 +206,7 @@ impl Shell {
         }
         self.rails.motions.retain(|id, _| seen.contains(id));
         self.rails.started = started;
+        self.rails.continued = continued;
         self.rails.children = children;
         if animating && self.rails.frames.is_none() {
             self.rails.frames = Some(cx.spawn(async move |this, cx| {
@@ -213,7 +235,7 @@ impl Shell {
         if self.workspace.classic_layout {
             return self.classic_session_card_at_depth(id, nested, false, cx);
         }
-        let Some(rail) = self.rail(id, &self.rails.started) else {
+        let Some(rail) = self.rail(id, &self.rails.started, &self.rails.continued) else {
             let row = if nested {
                 self.session_row_with(id, true, None, cx)
             } else {
@@ -231,7 +253,7 @@ impl Shell {
             return row;
         }
         let body = match &rail {
-            Rail::Started(children) => div()
+            Rail::Started(children) | Rail::Continued(children) => div()
                 .pt_1()
                 .flex()
                 .flex_col()
@@ -276,7 +298,7 @@ impl Shell {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let rail = self
-            .rail(id, &self.rails.started)
+            .rail(id, &self.rails.started, &self.rails.continued)
             .filter(|rail| matches!(rail, Rail::Agents(_)));
         let open = self
             .rails
@@ -501,6 +523,11 @@ impl Shell {
                                                 "sessions"
                                             }
                                         ),
+                                    ),
+                                    // The classic list keeps continued chats in place.
+                                    Rail::Continued(chain) => (
+                                        "continued",
+                                        format!("Continues {} earlier chats", chain.len()),
                                     ),
                                 };
                                 let tip = label.clone();

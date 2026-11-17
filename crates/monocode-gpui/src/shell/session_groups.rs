@@ -544,6 +544,12 @@ impl Shell {
                     store.agent_settings(id)?.unwrap_or_default(),
                 ),
             };
+            // A chain carries its earlier recap forward.
+            let earlier = store
+                .continued_from(id)
+                .ok()
+                .flatten()
+                .map(|earlier| earlier.brief);
             let settings = monocode_core::agent::Settings {
                 account: source_settings.account.clone(),
                 revision: monocode_core::time::now_ms() * 1_000_000,
@@ -557,7 +563,7 @@ impl Shell {
                 worktree_cwd: source_settings.worktree_cwd.clone(),
                 handoff: Some(monocode_core::agent::Handoff {
                     from: source.provider.clone(),
-                    brief: monocode_core::response::continuation(&rows, None),
+                    brief: monocode_core::response::continuation(&rows, earlier.as_deref()),
                     continued: Some(monocode_core::agent::ContinuedChat { session: id, title }),
                 }),
                 ..Default::default()
@@ -2517,6 +2523,82 @@ mod tests {
         assert!(
             save.right() <= dialog.right() - px(16.),
             "Update link at {save:?} overflows the dialog at {dialog:?}"
+        );
+    }
+
+    #[gpui::test]
+    fn a_continued_chat_links_its_source_once_its_first_message_goes_out(cx: &mut TestAppContext) {
+        let (window, a, _) = setup(cx);
+        let user = |text: &str| monocode_core::transcript::Row {
+            role: "user".into(),
+            text: text.into(),
+            first: true,
+            sent_at: None,
+        };
+        window
+            .update(cx, |shell, w, cx| {
+                shell.sessions[&a].update(cx, |view, cx| {
+                    view.transcript.update(cx, |t, cx| {
+                        t.patch(0, vec![user("Fix the crash on launch")], cx)
+                    });
+                });
+                shell.run_menu(MenuTarget::Session(a), "continue-in-new", None, w, cx);
+            })
+            .unwrap();
+        // The new chat loads its (empty) history once it is drawn.
+        cx.run_until_parked();
+        cx.refresh().unwrap();
+        cx.run_until_parked();
+        let child = window
+            .update(cx, |shell, _, cx| {
+                let child = shell.workspace.active.unwrap();
+                shell.sessions[&child].update(cx, |view, cx| {
+                    let handoff = view.settings.handoff.take().unwrap();
+                    view.summary.has_messages = true;
+                    view.transcript
+                        .update(cx, |t, cx| t.patch(0, vec![user("Ship it")], cx));
+                    view.link_continued(handoff, cx);
+                });
+                child
+            })
+            .unwrap();
+        cx.run_until_parked();
+        window
+            .update(cx, |shell, _, cx| {
+                assert_eq!(shell.continued_from[&child], a);
+                let saved = locked(&shell.store)
+                    .unwrap()
+                    .continued_from(child)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(saved.session, a);
+                assert!(saved.brief.contains("Fix the crash on launch"));
+                let banner = shell.sessions[&a].read(cx).continued_in.clone().unwrap();
+                assert_eq!(banner.session, child);
+                // Once the new chat lists, the chat it continues hangs under it.
+                let groups = shell.continued_groups(
+                    &[child, a],
+                    &Default::default(),
+                    &Default::default(),
+                    cx,
+                );
+                assert_eq!(groups[&child], vec![a]);
+            })
+            .unwrap();
+        let visual = &mut VisualTestContext::from_window(window.into(), cx);
+        visual.refresh().unwrap();
+        visual.run_until_parked();
+        visual.refresh().unwrap();
+        assert!(visual.debug_bounds("continued-from").is_some());
+        let folded = visual.debug_bounds("continued-recap").unwrap();
+        let toggle = visual.debug_bounds("continued-recap-toggle").unwrap();
+        visual.simulate_click(toggle.center(), gpui::Modifiers::default());
+        visual.run_until_parked();
+        visual.refresh().unwrap();
+        let open = visual.debug_bounds("continued-recap").unwrap();
+        assert!(
+            open.size.height > folded.size.height + px(40.),
+            "the recap opens: {folded:?} -> {open:?}"
         );
     }
 

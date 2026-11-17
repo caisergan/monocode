@@ -61,7 +61,7 @@ impl Conversation {
                             .flex()
                             .items_center()
                             .gap(px(6.))
-                            .child(icon("response-handoff", 14.).text_color(content(0.45)))
+                            .child(icon("continued", 14.).text_color(continued_color()))
                             .child(
                                 div()
                                     .flex_1()
@@ -168,4 +168,150 @@ impl Conversation {
             )
             .into_any_element()
     }
+}
+
+impl Conversation {
+    /// The first message of a chat started with "Continue in new session"
+    /// went out: keep its source and recap for the transcript and sidebar.
+    pub(crate) fn link_continued(
+        &mut self,
+        handoff: monocode_core::agent::Handoff,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(source) = handoff.continued else {
+            return;
+        };
+        let mut continued = monocode_core::agent::ContinuedFrom {
+            session: source.session,
+            title: source.title,
+            provider: handoff.from,
+            brief: handoff.brief,
+            earlier: None,
+        };
+        let roots = self.continued_roots();
+        self.transcript.update(cx, |view, cx| {
+            view.set_continued(Some(continued.clone()), roots.clone(), cx)
+        });
+        let store = self.store.clone();
+        let id = self.summary.id;
+        cx.spawn(async move |this, cx| {
+            let saved = cx
+                .background_executor()
+                .spawn(async move {
+                    let store = locked(&store)?;
+                    continued.earlier = store.continued_from(continued.session)?.map(|earlier| {
+                        monocode_core::agent::ContinuedChat {
+                            session: earlier.session,
+                            title: earlier.title,
+                        }
+                    });
+                    store.save_continued_from(id, &continued)?;
+                    Ok::<_, String>(continued)
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| match saved {
+                Ok(continued) => {
+                    let source = continued.session;
+                    this.transcript.update(cx, |view, cx| {
+                        view.set_continued(Some(continued), roots, cx)
+                    });
+                    cx.emit(ContinuedLinked(source));
+                }
+                Err(error) => {
+                    this.status = error;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The folders a recap's file paths are shown inside: the chat's
+    /// worktree, then its project.
+    pub(super) fn continued_roots(&self) -> Vec<String> {
+        self.settings
+            .worktree_cwd
+            .iter()
+            .cloned()
+            .chain(std::iter::once(self.summary.cwd.clone()))
+            .collect()
+    }
+
+    pub(crate) fn set_continued_in(
+        &mut self,
+        next: Option<monocode_core::agent::ContinuedChat>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.continued_in != next {
+            self.continued_in = next.clone();
+            self.transcript
+                .update(cx, |view, cx| view.set_continued_in(next, cx));
+            cx.notify();
+        }
+    }
+
+    /// Above the composer of a chat that continues in a newer one.
+    pub(super) fn continued_in_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let next = self.continued_in.clone()?;
+        let session = next.session;
+        Some(
+            div()
+                .id("continued-in-banner")
+                .debug_selector(|| "continued-in-banner".into())
+                .mb(px(6.))
+                .px(px(12.))
+                .py(px(7.))
+                .rounded(px(10.))
+                .border_1()
+                .border_color(content(0.08))
+                .bg(content(0.04))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .text_size(px(12.))
+                .text_color(content(0.6))
+                .child(icon("continued", 14.).text_color(continued_color()))
+                .child(
+                    div()
+                        .min_w_0()
+                        .flex_1()
+                        .flex()
+                        .items_center()
+                        .gap(px(4.))
+                        .child(div().flex_shrink_0().child("This chat continues in"))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(content(1.))
+                                .child(next.title.clone()),
+                        ),
+                )
+                .child(
+                    div()
+                        .id("open-continued-in")
+                        .role(Role::Button)
+                        .aria_label(format!("Open {}", next.title))
+                        .flex_shrink_0()
+                        .cursor_pointer()
+                        .px(px(8.))
+                        .py(px(2.))
+                        .rounded(px(6.))
+                        .bg(content(0.07))
+                        .text_color(content(1.))
+                        .hover(|s| s.bg(content(0.12)))
+                        .child("Open")
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(move |_, _, _, cx| cx.emit(OpenSession(session)))),
+                )
+                .into_any_element(),
+        )
+    }
+}
+
+/// The continued-chat mark's amber, apart from the Orchestrator's fuchsia and
+/// the Operator's sky (amber-200/90).
+pub(crate) fn continued_color() -> gpui::Hsla {
+    gpui::Hsla::from(gpui::rgb(0xfde68a)).opacity(0.9)
 }
