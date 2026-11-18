@@ -15,6 +15,45 @@ pub fn missed(send_at: u64, now: u64) -> bool {
     now > send_at.saturating_add(MISSED_AFTER_MS)
 }
 
+/// A usage window's next reset, and the row that offers it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Reset {
+    pub at: u64,
+    pub label: String,
+}
+impl Reset {
+    /// The chat has hit its limit: the reset it waits for.
+    pub fn limit(at: u64) -> Self {
+        Self {
+            at,
+            label: "After the usage limit resets".into(),
+        }
+    }
+    /// Before any limit: an exhausted window's reset, or else the shortest
+    /// window's, so a message can go out as soon as fresh usage arrives.
+    pub fn from_usage(snapshot: &crate::usage::Snapshot, now: u64) -> Option<Self> {
+        if let Some(at) = snapshot.exhausted_reset().filter(|at| *at > now as i64) {
+            return Some(Self::limit(at as u64));
+        }
+        let window = snapshot
+            .windows
+            .iter()
+            .filter(|w| w.resets_at.is_some_and(|at| at > now as i64))
+            .min_by_key(|w| w.minutes)?;
+        let name = match window.minutes {
+            300 => "5-hour".to_owned(),
+            1_440 => "daily".into(),
+            10_080 => "weekly".into(),
+            43_200 => "monthly".into(),
+            _ => window.label(),
+        };
+        Some(Self {
+            at: window.resets_at? as u64,
+            label: format!("When the {name} limit resets"),
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Choice {
     pub id: String,
@@ -49,8 +88,8 @@ fn from_ms<Tz: TimeZone>(tz: &Tz, at: u64) -> DateTime<Tz> {
         .unwrap_or_else(|| tz.timestamp_millis_opt(0).unwrap())
 }
 
-/// The menu's quick picks. The usage-limit row appears only with a known reset.
-pub fn presets<Tz: TimeZone>(now: &DateTime<Tz>, limit_reset: Option<u64>) -> Vec<Choice> {
+/// The menu's quick picks. The usage row appears only with a known reset.
+pub fn presets<Tz: TimeZone>(now: &DateTime<Tz>, reset: Option<Reset>) -> Vec<Choice> {
     let tz = now.timezone();
     let today = now.date_naive();
     let mut out = vec![
@@ -108,11 +147,11 @@ pub fn presets<Tz: TimeZone>(now: &DateTime<Tz>, limit_reset: Option<u64>) -> Ve
             });
         }
     }
-    if let Some(reset) = limit_reset.filter(|reset| *reset > ms(now)) {
+    if let Some(reset) = reset.filter(|reset| reset.at > ms(now)) {
         out.push(Choice {
             id: "limit-reset".into(),
-            label: "After the usage limit resets".into(),
-            at: reset + AFTER_RESET_MS,
+            label: reset.label,
+            at: reset.at + AFTER_RESET_MS,
         });
     }
     out
@@ -510,8 +549,8 @@ pub fn countdown(at: u64, now: u64) -> String {
     }
 }
 
-pub fn presets_now(limit_reset: Option<u64>) -> Vec<Choice> {
-    presets(&Local::now(), limit_reset)
+pub fn presets_now(reset: Option<Reset>) -> Vec<Choice> {
+    presets(&Local::now(), reset)
 }
 pub fn parse_now(text: &str) -> Vec<Choice> {
     parse(text, &Local::now())
@@ -570,7 +609,7 @@ mod tests {
     #[test]
     fn presets_round_up_and_offer_the_limit_reset_a_minute_late() {
         let reset = ms(&now()) + 3 * 3_600_000;
-        let presets = presets(&now(), Some(reset));
+        let presets = presets(&now(), Some(Reset::limit(reset)));
         let labels: Vec<_> = presets
             .iter()
             .map(|c| (c.label.as_str(), when(c)))
@@ -587,9 +626,38 @@ mod tests {
             ]
         );
         assert_eq!(presets.last().unwrap().at, reset + 60_000);
-        assert!(super::presets(&now(), Some(ms(&now()) - 1))
+        assert!(super::presets(&now(), Some(Reset::limit(ms(&now()) - 1)))
             .iter()
             .all(|c| c.id != "limit-reset"));
+    }
+
+    #[test]
+    fn usage_offers_an_exhausted_window_first_then_the_shortest_one() {
+        use crate::usage::{Snapshot, Window};
+        let base = ms(&now());
+        let window = |minutes, used_percent, after: u64| Window {
+            used_percent,
+            minutes,
+            resets_at: Some((base + after) as i64),
+        };
+        let mut snapshot = Snapshot {
+            windows: vec![
+                window(10_080, 40., 4 * 86_400_000),
+                window(300, 62., 2 * 3_600_000),
+            ],
+            ..Default::default()
+        };
+        let reset = Reset::from_usage(&snapshot, base).unwrap();
+        assert_eq!(reset.label, "When the 5-hour limit resets");
+        assert_eq!(reset.at, base + 2 * 3_600_000);
+        let row = super::presets(&now(), Some(reset)).pop().unwrap();
+        assert_eq!(row.at, base + 2 * 3_600_000 + AFTER_RESET_MS);
+        snapshot.windows[0].used_percent = 100.;
+        let reset = Reset::from_usage(&snapshot, base).unwrap();
+        assert_eq!(reset.label, "After the usage limit resets");
+        assert_eq!(reset.at, base + 4 * 86_400_000);
+        // A snapshot whose resets have all passed offers nothing.
+        assert!(Reset::from_usage(&snapshot, base + 5 * 86_400_000).is_none());
     }
 
     #[test]
