@@ -25,6 +25,25 @@ impl Metadata<'_> {
 }
 
 impl Shell {
+    /// Send later reaches chats that are not open: a due one is loaded in the
+    /// background, the way automations reuse a session, and sends from there.
+    pub(super) fn poll_scheduled_sends(&mut self, cx: &mut Context<Self>) {
+        let Ok(index) = locked(&self.store).and_then(|store| store.scheduled_sends()) else {
+            return;
+        };
+        let now = monocode_core::time::now_ms();
+        for (id, at) in index {
+            if at > now
+                || monocode_core::schedule::missed(at, now)
+                || self.session_summaries.get(&id).is_none_or(|s| s.archived)
+            {
+                continue;
+            }
+            if let Some(view) = self.ensure_session(id, cx) {
+                view.update(cx, |view, cx| view.tick_schedule(cx));
+            }
+        }
+    }
     pub(super) fn session_metadata<'a>(&'a self, id: i64, cx: &'a App) -> Metadata<'a> {
         let live = self.sessions.get(&id).map(|view| view.read(cx));
         Metadata {

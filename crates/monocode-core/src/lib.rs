@@ -29,6 +29,7 @@ pub mod recap;
 pub mod remote;
 pub mod resources;
 pub mod response;
+pub mod schedule;
 pub mod scm;
 pub mod session_filters;
 pub mod session_groups;

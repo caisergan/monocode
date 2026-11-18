@@ -21,6 +21,7 @@ mod prompt_cache;
 mod remote;
 pub(crate) mod remote_plans;
 mod response_menu;
+pub(crate) mod schedule;
 pub(crate) mod subagent_dock;
 mod subagent_sheet;
 #[cfg(test)]
@@ -235,6 +236,7 @@ pub(crate) struct Conversation {
     send_alternate: bool,
     menu: Option<OpenMenu>,
     add_anchor: AnchorSlot,
+    schedule_anchor: AnchorSlot,
     model_anchor: AnchorSlot,
     access_anchor: AnchorSlot,
     account_anchor: AnchorSlot,
@@ -602,7 +604,13 @@ impl Conversation {
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(30))
                     .await;
-                if this.update(cx, |this, cx| this.tick_usage(cx)).is_err() {
+                if this
+                    .update(cx, |this, cx| {
+                        this.tick_usage(cx);
+                        this.tick_schedule(cx);
+                    })
+                    .is_err()
+                {
                     break;
                 }
             }
@@ -698,6 +706,7 @@ impl Conversation {
             send_alternate: false,
             menu: None,
             add_anchor: AnchorSlot::default(),
+            schedule_anchor: AnchorSlot::default(),
             model_anchor: AnchorSlot::default(),
             access_anchor: AnchorSlot::default(),
             account_anchor: AnchorSlot::default(),
@@ -868,6 +877,7 @@ impl Conversation {
                         this.sync_review(cx);
                         this.run_history_actions(cx);
                         this.pump_follow_ups(cx);
+                        this.tick_schedule(cx);
                     }
                     Err(e) => this.status = e,
                 }
@@ -1024,6 +1034,14 @@ impl Conversation {
         } else {
             None
         };
+        if let Some(at) = self.follow_ups.armed.take().filter(|_| self.can_schedule()) {
+            self.schedule_message(prompt, mode.map(str::to_owned), at, cx);
+            if mode.is_some() {
+                self.clear_submitted_mode(cx);
+            }
+            cx.notify();
+            return;
+        }
         if self.settings.pending_provider_switch.is_some() && self.busy {
             // Picking a provider only arms the change. Sending is what stops
             // the outgoing provider and commits the handoff.
@@ -1062,7 +1080,7 @@ impl Conversation {
         self.stopping
             || self.busy
             || self.settings.pending_provider_switch.is_some()
-            || (!self.follow_ups.state.messages.is_empty() && !self.follow_ups.state.paused)
+            || (self.unscheduled_follow_ups() && !self.follow_ups.state.paused)
     }
     /// The submit icon for a message that will steer or queue, if it will.
     fn follow_up_action(
@@ -1521,8 +1539,7 @@ impl Conversation {
                                     cx,
                                 );
                             }
-                            if this.status != "Ready" && !this.follow_ups.state.messages.is_empty()
-                            {
+                            if this.status != "Ready" && this.unscheduled_follow_ups() {
                                 this.follow_ups.state.paused = true;
                                 this.save_follow_ups(cx);
                             }
@@ -1856,7 +1873,7 @@ impl Conversation {
                         this.settings.new_worktree = false;
                         this.save_settings(cx);
                         this.refresh_git(cx);
-                        if this.follow_ups.state.messages.is_empty() {
+                        if !this.unscheduled_follow_ups() {
                             this.send(cx);
                         } else {
                             this.pump_follow_ups(cx);
@@ -1864,7 +1881,13 @@ impl Conversation {
                     }
                     Err(error) => {
                         this.status = error.clone();
-                        if let Some(message) = this.follow_ups.state.messages.first() {
+                        if let Some(message) = this
+                            .follow_ups
+                            .state
+                            .messages
+                            .iter()
+                            .find(|m| !m.scheduled())
+                        {
                             let id = message.id.clone();
                             this.fail_follow_up(&id, error, cx);
                         }
@@ -2466,9 +2489,18 @@ impl Conversation {
                 None => menu,
             }
         });
-        events.push(
-            cx.subscribe_in(&menu, window, |this, menu, event: &MenuEvent, _, cx| {
+        events.push(cx.subscribe_in(
+            &menu,
+            window,
+            |this, menu, event: &MenuEvent, window, cx| {
                 if let MenuEvent::Picked(id, _) = event {
+                    if id.as_ref() == "later" {
+                        // The plus menu gives way to the time menu at its spot.
+                        this.menu = None;
+                        let anchor = Anchor::Slot(this.add_anchor.clone());
+                        this.open_schedule(schedule::Target::Composer, anchor, window, cx);
+                        return;
+                    }
                     let toggle = menu.read(cx).toggle_state(id);
                     if id.as_ref() == "upload" {
                         this.choose_attachments(cx);
@@ -2483,8 +2515,8 @@ impl Conversation {
                 }
                 this.menu = None;
                 cx.notify();
-            }),
-        );
+            },
+        ));
         self.menu = Some(OpenMenu {
             kind,
             menu,
@@ -2604,6 +2636,10 @@ impl Conversation {
                             .icon("circle-dashed-hi")
                             .description("Save this message without starting the agent")
                             .disabled(self.busy || self.follow_ups.state.draft.is_some()),
+                        MenuAction::new("later", "Send later")
+                            .icon("clock")
+                            .description("Pick when this message goes out")
+                            .disabled(!self.can_schedule() || self.draft_active(cx)),
                     ]
                     .into_iter()
                     .map(|action| {
@@ -2612,6 +2648,7 @@ impl Conversation {
                             "draft" => self.draft_active(cx),
                             "operator" => self.settings.operator,
                             "orchestrator" => self.settings.orchestrator,
+                            "later" => self.follow_ups.armed.is_some(),
                             _ => false,
                         };
                         action.checked(checked).into()
@@ -2802,7 +2839,7 @@ impl Conversation {
         self.follow_ups.continuations.clear();
         self.notification_cancelled = true;
         self.cancel.store(true, Ordering::Relaxed);
-        if !self.follow_ups.state.messages.is_empty() {
+        if self.unscheduled_follow_ups() {
             self.follow_ups.state.paused = true;
             self.follow_ups.requested = None;
             self.save_follow_ups(cx);
@@ -2905,6 +2942,7 @@ impl Conversation {
             .flex_col()
             .child(self.composer_anchor.probe())
             .children(menu)
+            .children(self.schedule_popover(cx))
             .children(self.model_list_popover(cx))
             .children(self.subagent_dock(window, cx))
             .children(if self.is_remote() { None } else { self.usage_notice(false, cx) })
@@ -3140,6 +3178,7 @@ impl Conversation {
                                     .gap_1()
                                     .child(self.prompt_cache.send_area.probe())
                                     .children(self.prompt_cache_mark(cx))
+                                    .children(self.schedule_pill(cx))
                                     .child(self.action(has_value, window, cx))
                                     .children(self.prompt_cache_confirm(cx)),
                             ),
@@ -3497,9 +3536,16 @@ impl Conversation {
         } else {
             modifiers.control
         };
-        let follow_up = (has_value && !draft)
-            .then(|| self.follow_up_action(alternate, cx))
+        let later = (has_value && !draft && self.can_schedule())
+            .then_some(self.follow_ups.armed)
             .flatten();
+        let follow_up = if later.is_some() {
+            Some(("Schedule", "clock"))
+        } else {
+            (has_value && !draft)
+                .then(|| self.follow_up_action(alternate, cx))
+                .flatten()
+        };
         let enabled = !self.attaching
             && (!self.preparing_worktree || self.busy || self.stopping)
             && (busy || (has_value && self.loaded))
@@ -3531,6 +3577,17 @@ impl Conversation {
                     && this.follow_up_action(alternate, cx).is_some()
                 {
                     cx.notify();
+                }
+            }),
+        )
+        // Right-click: Send later, as the model pill's right-click opens recents.
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener(|this, _, window, cx| {
+                cx.stop_propagation();
+                if this.follow_ups.state.draft.is_none() && !this.draft_active(cx) {
+                    let anchor = Anchor::Slot(this.prompt_cache.send_area.clone());
+                    this.open_schedule(schedule::Target::Composer, anchor, window, cx);
                 }
             }),
         )

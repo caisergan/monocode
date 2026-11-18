@@ -245,7 +245,7 @@ impl Conversation {
             && !self.busy
             && !self.stopping
             && !self.preparing_worktree
-            && self.follow_ups.state.messages.is_empty()
+            && !self.unscheduled_follow_ups()
             && !self.is_remote()
             && self.settings.mono.is_none()
             && !self.settings.worktree_removed
@@ -304,7 +304,7 @@ impl Conversation {
             return true;
         }
         if !self.git_actions_ready() {
-            self.status = if self.busy || !self.follow_ups.state.messages.is_empty() {
+            self.status = if self.busy || self.unscheduled_follow_ups() {
                 format!(
                     "Wait for the current turn and queued messages before /{}.",
                     action.id()

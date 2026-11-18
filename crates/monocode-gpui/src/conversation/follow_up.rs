@@ -14,6 +14,12 @@ pub(super) struct FollowUps {
     pub ready: bool,
     pub draft_selected: bool,
     pub edit: Option<QueueEdit>,
+    /// Send later: the time the composer's next message waits for.
+    pub armed: Option<u64>,
+    pub schedule: Option<super::schedule::Open>,
+    pub schedule_timer: Option<gpui::Task<()>>,
+    /// The time label of the queued row whose time menu is open.
+    pub time_anchor: crate::popover::AnchorSlot,
 }
 pub(super) struct QueueEdit {
     id: String,
@@ -60,6 +66,9 @@ impl Conversation {
             let directory = locked(&store)?.data_dir().map(Path::to_path_buf);
             snapshot.retain_attachments(id, directory.as_deref())?;
             locked(&store)?.save_follow_ups(id, &snapshot)?;
+            // Chats that are not open still send: the shell reads this index.
+            let earliest = snapshot.messages.iter().filter_map(|m| m.send_at).min();
+            let _ = locked(&store)?.set_scheduled_send(id, earliest);
             Ok::<_, String>(snapshot)
         });
         cx.spawn(async move |this, cx| {
@@ -75,6 +84,7 @@ impl Conversation {
                         }
                         this.follow_ups.persisted = this.follow_ups.persisted.max(revision);
                         this.pump_follow_ups(cx);
+                        this.arm_schedule(cx);
                     }
                     Err(error) if this.follow_ups.state.revision == revision => {
                         this.follow_ups.state.paused = true;
@@ -330,10 +340,23 @@ impl Conversation {
             .and_then(|id| self.follow_ups.state.messages.iter().find(|m| &m.id == id))
             .or_else(|| {
                 self.busy
-                    .then(|| self.follow_ups.state.messages.iter().find(|m| m.steer))
+                    .then(|| {
+                        self.follow_ups
+                            .state
+                            .messages
+                            .iter()
+                            .find(|m| m.steer && !m.scheduled())
+                    })
                     .flatten()
             })
-            .or_else(|| self.follow_ups.state.messages.first());
+            // Scheduled messages wait for their time; the rest go in order.
+            .or_else(|| {
+                self.follow_ups
+                    .state
+                    .messages
+                    .iter()
+                    .find(|m| !m.scheduled())
+            });
         let Some(message) = message.cloned() else {
             return;
         };
@@ -431,7 +454,7 @@ impl Conversation {
             self.defer_history_action(|this, cx| this.resume_queue(cx), cx);
             return;
         }
-        if self.busy || !self.follow_ups.state.paused || self.follow_ups.state.messages.is_empty() {
+        if self.busy || !self.follow_ups.state.paused || !self.unscheduled_follow_ups() {
             return;
         }
         // Resume the interrupted provider turn before releasing its outbox,
@@ -529,8 +552,21 @@ impl Conversation {
             .messages
             .iter()
             .any(|m| m.error.is_some());
+        let now = monocode_core::time::now_ms();
+        let accent = accent_color();
+        let amber: gpui::Hsla = gpui::rgb(0xffb900).into();
+        let time_target = self
+            .follow_ups
+            .schedule
+            .as_ref()
+            .and_then(|open| match &open.target {
+                super::schedule::Target::Queued(id) => Some(id.clone()),
+                super::schedule::Target::Composer => None,
+            });
+        // Scheduled messages wait on their own; only the rest can be paused.
+        let held = self.follow_ups.state.paused && self.unscheduled_follow_ups();
         let card = composer_shelf::card("message-queue-card", self.classic_layout)
-            .when(self.follow_ups.state.paused && !self.follow_ups.resuming, |d| d.child(
+            .when(held && !self.follow_ups.resuming, |d| d.child(
                 div().h(px(28.)).flex().items_center().gap_2().border_b_1().border_color(content(0.1))
                     .child(icon("queue-pause", 14.))
                     .child(div().flex_1().min_w_0().truncate().child(if failed { "A message couldn't be sent" } else { "Queue paused because you interrupted" }))
@@ -541,15 +577,42 @@ impl Conversation {
                 let editing = self.follow_ups.edit.as_ref().filter(|edit| edit.id == id);
                 let sending = self.follow_ups.sending.as_ref() == Some(&id);
                 div().id(SharedString::from(format!("queued-{id}"))).role(Role::Group).aria_label(format!("Queued message: {}", message.label())).min_h(px(32.)).flex().items_center().gap(px(10.)).when(index > 0, |d| d.border_t_1().border_color(content(0.05)))
-                    .child(icon("queue-list", 14.).text_color(content(0.35)))
+                    .child(match message.send_at {
+                        Some(at) => icon("clock", 14.).text_color(if monocode_core::schedule::missed(at, now) { amber } else { accent }),
+                        None => icon("queue-list", 14.).text_color(content(0.35)),
+                    })
                     .map(|row| if let Some(edit) = editing {
                         row.child(div().flex_1().min_w_0().px(px(6.)).py(px(2.)).rounded_md().border_1().border_color(content(0.3)).bg(content(0.05)).on_action(cx.listener(|this, _: &crate::shell::DismissMenu, window, cx| { this.finish_queue_edit(false, window, cx); cx.stop_propagation(); })).child(edit.input.clone()))
                             .child(queue_button("queue-save", "Save queued message", "check").on_click(cx.listener(|this, _, window, cx| this.finish_queue_edit(true, window, cx))))
                             .child(queue_button("queue-cancel", "Cancel queued message edit", "close").on_click(cx.listener(|this, _, window, cx| this.finish_queue_edit(false, window, cx))))
                     } else {
                         let (steer, edit, remove) = (id.clone(), id.clone(), id);
+                        let (retime, release) = (steer.clone(), steer.clone());
+                        let anchored = time_target.as_deref() == Some(steer.as_str());
                         row.child(div().flex_1().min_w_0().py_1().child(div().id("queued-message-text").role(Role::Label).aria_label(message.label()).truncate().text_color(content(0.75)).child(message.label())).when_some(message.error.clone(), |d, error| d.child(div().id("queue-error").role(Role::Alert).text_color(gpui::rgb(0xf87171)).child(error))))
-                            .when(Kind::from_id(&self.summary.provider).can_steer(), |d| d.child(queue_button("queue-steer", "Steer queued message", "queue-steer").w_auto().px_2().gap(px(6.)).opacity(if sending { 0.4 } else { 1. }).child("Steer").on_click(cx.listener(move |this, _, _, cx| {
+                            .when_some(message.send_at, |d, at| {
+                                let missed = monocode_core::schedule::missed(at, now);
+                                let label = if missed {
+                                    format!("Missed · {}", monocode_core::schedule::short_now(at))
+                                } else {
+                                    format!("{} · {}", monocode_core::schedule::label_now(at), monocode_core::schedule::countdown(at, now))
+                                };
+                                let color = if missed { amber } else { accent };
+                                d.child(div().id("queue-send-at").role(Role::Button).aria_label(format!("Scheduled for {label}. Change time")).relative().flex_shrink_0().h(px(24.)).px(px(6.)).rounded_md().flex().items_center().text_size(px(12.)).text_color(color).hover(|s| s.bg(content(0.08)))
+                                    .when(anchored, |d| d.bg(content(0.08)).child(self.follow_ups.time_anchor.probe()))
+                                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                    .child(label)
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        let anchor = crate::popover::Anchor::Slot(this.follow_ups.time_anchor.clone());
+                                        this.open_schedule(super::schedule::Target::Queued(retime.clone()), anchor, window, cx);
+                                    })))
+                                    .child(queue_button("queue-send-now", "Send scheduled message now", "queue-play").w_auto().px_2().gap(px(6.)).opacity(if sending { 0.4 } else { 1. }).child("Send now").on_click(cx.listener(move |this, _, _, cx| {
+                                        if !sending {
+                                            this.send_scheduled_now(&release, cx);
+                                        }
+                                    })))
+                            })
+                            .when(message.send_at.is_none() && Kind::from_id(&self.summary.provider).can_steer(), |d| d.child(queue_button("queue-steer", "Steer queued message", "queue-steer").w_auto().px_2().gap(px(6.)).opacity(if sending { 0.4 } else { 1. }).child("Steer").on_click(cx.listener(move |this, _, _, cx| {
                                 if !sending && let Some(message) = this.follow_ups.state.messages.iter_mut().find(|m| m.id == steer) {
                                     if !message.can_steer() && this.busy { return; }
                                     message.steer = true;

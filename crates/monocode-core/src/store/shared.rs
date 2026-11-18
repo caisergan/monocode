@@ -1787,6 +1787,7 @@ fn follow_up(value: &Value) -> crate::follow_up::Message {
             .collect(),
         mode: value["intent"].as_str().map(str::to_owned),
         error: value["error"].as_str().map(str::to_owned),
+        send_at: value["sendAt"].as_u64(),
         ..Default::default()
     }
 }
@@ -1799,6 +1800,14 @@ fn update_follow_up(value: &mut Value, message: &crate::follow_up::Message) {
     }
     if let Some(error) = &message.error {
         value["error"] = json!(error);
+    }
+    match message.send_at {
+        Some(at) => value["sendAt"] = json!(at),
+        None => {
+            if let Some(object) = value.as_object_mut() {
+                object.remove("sendAt");
+            }
+        }
     }
     if value["attachments"].is_null() {
         value["attachments"]=json!(message.attachments.iter().map(|p|json!({"id":p.to_string_lossy(),"path":p,"name":p.file_name().unwrap_or_default().to_string_lossy(),
