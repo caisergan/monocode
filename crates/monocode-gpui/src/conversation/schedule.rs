@@ -55,14 +55,14 @@ impl EventEmitter<Picked> for ScheduleMenu {}
 pub(crate) struct ScheduleMenu {
     field: Entity<TimeField>,
     pub(crate) menu: Entity<Menu>,
-    limit_reset: Option<u64>,
+    limit_reset: Option<schedule::Reset>,
     current: Option<u64>,
     clear: Option<&'static str>,
     _subscriptions: Vec<Subscription>,
 }
 impl ScheduleMenu {
     fn new(
-        limit_reset: Option<u64>,
+        limit_reset: Option<schedule::Reset>,
         current: Option<u64>,
         clear: Option<&'static str>,
         window: &mut Window,
@@ -79,7 +79,7 @@ impl ScheduleMenu {
         let field = cx.new(|_| TimeField {
             input: input.clone(),
         });
-        let items = Self::items(&field, limit_reset, current, clear, cx);
+        let items = Self::items(&field, limit_reset.clone(), current, clear, cx);
         let menu = cx.new(|cx| {
             Menu::new("Send later", items, window, cx)
                 .width(264.)
@@ -110,7 +110,7 @@ impl ScheduleMenu {
     }
     fn items(
         field: &Entity<TimeField>,
-        limit_reset: Option<u64>,
+        limit_reset: Option<schedule::Reset>,
         current: Option<u64>,
         clear: Option<&'static str>,
         cx: &App,
@@ -129,7 +129,7 @@ impl ScheduleMenu {
         };
         if query.trim().is_empty() {
             items.push(MenuItem::Header("Send later".into()));
-            for choice in schedule::presets_now(limit_reset) {
+            for choice in schedule::presets_now(limit_reset.clone()) {
                 let value = schedule::short_now(choice.at);
                 let limit = choice.id == "limit-reset";
                 if limit {
@@ -161,7 +161,13 @@ impl ScheduleMenu {
         items
     }
     fn refresh(&mut self, cx: &mut Context<Self>) {
-        let items = Self::items(&self.field, self.limit_reset, self.current, self.clear, cx);
+        let items = Self::items(
+            &self.field,
+            self.limit_reset.clone(),
+            self.current,
+            self.clear,
+            cx,
+        );
         self.menu.update(cx, |menu, cx| menu.set_items(items, cx));
         cx.notify();
     }
@@ -190,13 +196,28 @@ impl Conversation {
             .iter()
             .any(|m| !m.scheduled())
     }
-    fn limit_reset(&self) -> Option<u64> {
-        self.settings
+    /// The chat's own limit first; otherwise the account's usage windows,
+    /// so the row is there before the limit is hit.
+    fn usage_reset(&self, cx: &mut Context<Self>) -> Option<schedule::Reset> {
+        if let Some(at) = self
+            .settings
             .usage_limit
             .as_ref()
             .and_then(|limit| limit.resets_at)
             .filter(|at| *at > 0)
-            .map(|at| at as u64)
+        {
+            return Some(schedule::Reset::limit(at as u64));
+        }
+        let center = crate::accounts::get(cx)?;
+        let key = crate::accounts::Key::new(
+            Kind::from_id(&self.summary.provider),
+            self.settings.account.clone(),
+            self.account_model(),
+        );
+        // Refresh a stale snapshot for next time; this menu uses what is cached.
+        center.update(cx, |center, cx| center.refresh(key.clone(), false, cx));
+        let snapshot = center.read(cx).usage.get(&key)?.snapshot.clone()?;
+        schedule::Reset::from_usage(&snapshot, monocode_core::time::now_ms())
     }
     pub(super) fn open_schedule(
         &mut self,
@@ -230,7 +251,7 @@ impl Conversation {
                 .find(|m| &m.id == id)
                 .and_then(|m| m.send_at),
         };
-        let limit = self.limit_reset();
+        let limit = self.usage_reset(cx);
         let clear = match &target {
             Target::Composer => current.map(|_| "Don't send later"),
             Target::Queued(_) => Some("Send now"),
