@@ -121,7 +121,7 @@ impl Conversation {
             || composer_busy
             || self.editing_last_turn.pending()
             || self.settings.pending_provider_switch.is_some()
-            || (!self.follow_ups.state.messages.is_empty() && !self.follow_ups.state.paused)
+            || (self.unscheduled_follow_ups() && !self.follow_ups.state.paused)
         {
             let composer = std::mem::replace(&mut self.attachments, attachments);
             self.enqueue_follow_up(prompt, None, cx);

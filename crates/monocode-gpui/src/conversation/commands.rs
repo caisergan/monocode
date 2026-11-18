@@ -40,7 +40,7 @@ impl Conversation {
         if self.input.read(cx).is_composing() {
             return;
         }
-        if self.busy || self.stopping || !self.follow_ups.state.messages.is_empty() {
+        if self.busy || self.stopping || self.unscheduled_follow_ups() {
             self.status = "Wait for the current turn and queued messages before /visualize.".into();
             cx.notify();
             return;
@@ -85,7 +85,7 @@ impl Conversation {
         {
             return;
         }
-        if self.busy || !self.follow_ups.state.messages.is_empty() {
+        if self.busy || self.unscheduled_follow_ups() {
             self.status =
                 "Wait for the current turn and queued messages before compacting context.".into();
             cx.notify();

@@ -68,7 +68,7 @@ impl Conversation {
             && !self.needs_approval()
             && self.questions.is_empty()
             && self.controls.is_none()
-            && self.follow_ups.state.messages.is_empty()
+            && !self.unscheduled_follow_ups()
             && self.follow_ups.state.draft.is_none()
             && self.follow_ups.edit.is_none()
             && self.follow_ups.sending.is_none()
@@ -207,7 +207,7 @@ impl Conversation {
             || self.preparing_worktree
             || self.settings.worktree_removed
             || self.input.read(cx).is_composing()
-            || !self.follow_ups.state.messages.is_empty()
+            || self.unscheduled_follow_ups()
             || self.follow_ups.state.draft.is_some()
             || self.follow_ups.edit.is_some()
             || self.follow_ups.sending.is_some()

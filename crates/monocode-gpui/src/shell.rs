@@ -975,6 +975,7 @@ impl Shell {
                     .update(cx, |this, cx| {
                         this.poll_reminders(cx);
                         this.poll_automations(cx);
+                        this.poll_scheduled_sends(cx);
                         this.update_chat_visibility(cx);
                         if this.workspace.sidebar_visible {
                             this.notify_sidebar(cx);

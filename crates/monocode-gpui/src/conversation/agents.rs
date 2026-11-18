@@ -42,7 +42,7 @@ impl Conversation {
 
     /// The orchestration view of this session right now.
     pub(crate) fn agent_observation(&self, cx: &gpui::App) -> Observation {
-        let queued = !self.follow_ups.state.paused && !self.follow_ups.state.messages.is_empty();
+        let queued = !self.follow_ups.state.paused && self.unscheduled_follow_ups();
         let requests = self
             .approvals
             .iter()
@@ -106,7 +106,7 @@ impl Conversation {
             usage_limited: self.settings.usage_limit.is_some(),
             stopped: self.notification_cancelled,
             error,
-            held: self.follow_ups.state.paused && !self.follow_ups.state.messages.is_empty(),
+            held: self.follow_ups.state.paused && self.unscheduled_follow_ups(),
         }
     }
     /// The loaded rows, or `None` while the history must be restored first.
@@ -176,7 +176,7 @@ impl Conversation {
             || self.stopping
             || self.preparing_worktree
             || self.follow_ups.sending.is_some()
-            || (!self.follow_ups.state.paused && !self.follow_ups.state.messages.is_empty());
+            || (!self.follow_ups.state.paused && self.unscheduled_follow_ups());
         if !running && !self.history_ready() {
             // An idle agent's saved queue may not be in memory yet, and saving
             // now would replace it. Deliver once its history is back.

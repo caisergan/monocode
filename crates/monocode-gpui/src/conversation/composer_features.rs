@@ -462,7 +462,7 @@ impl Conversation {
             && !self.mono_external_pending()
             && self.input.read(cx).content.is_empty()
             && self.attachments.is_empty()
-            && self.follow_ups.state.messages.is_empty()
+            && !self.unscheduled_follow_ups()
             && self.follow_ups.state.draft.is_none()
             && !self.settings.worktree_removed
     }

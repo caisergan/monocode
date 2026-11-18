@@ -19,6 +19,9 @@ pub struct Message {
     pub at: usize,
     pub error: Option<String>,
     pub steer: bool,
+    /// Epoch milliseconds this message waits for before it joins the queue.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub send_at: Option<u64>,
 }
 impl Message {
     pub fn label(&self) -> String {
@@ -62,6 +65,10 @@ impl Message {
     }
     pub fn can_steer(&self) -> bool {
         self.mode.is_none()
+    }
+    /// Waiting for its time: the queue leaves it alone until then.
+    pub fn scheduled(&self) -> bool {
+        self.send_at.is_some()
     }
 }
 
@@ -147,7 +154,8 @@ impl crate::store::Store {
             }
         }
         // Recovery is always explicit, as in React's deserializeSession.
-        state.paused = !state.messages.is_empty();
+        // Scheduled messages keep their own time and do not hold the queue.
+        state.paused = state.messages.iter().any(|m| !m.scheduled());
         Ok(state)
     }
     pub fn save_follow_ups(&self, session: i64, state: &State) -> Result<(), String> {
