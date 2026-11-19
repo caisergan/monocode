@@ -500,7 +500,7 @@ impl Explorer {
         }
         let old = self.lines.len();
         self.lines = lines;
-        self.list.splice(0..old, self.lines.len());
+        replace_rows(&self.list, old, self.lines.len());
         cx.notify();
     }
     fn push_children(&self, parent: &str, depth: usize, lines: &mut Vec<Line>, cx: &App) {
@@ -1740,5 +1740,45 @@ impl Render for Explorer {
             )
             .children(menu)
             .into_any_element()
+    }
+}
+
+/// Swaps every row of `list` for `count` new ones without moving the scroll
+/// position. A splice over the scroll anchor sends GPUI back to the top, and
+/// the tree rebuilds on every click, toggle and context menu.
+fn replace_rows(list: &ListState, old: usize, count: usize) {
+    let scroll_top = list.logical_scroll_top();
+    list.splice(0..old, count);
+    list.scroll_to(scroll_top);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::ListOffset;
+
+    fn scrolled(count: usize, item_ix: usize) -> ListState {
+        let list = ListState::new(count, ListAlignment::Top, px(300.));
+        list.scroll_to(ListOffset {
+            item_ix,
+            offset_in_item: px(7.),
+        });
+        list
+    }
+
+    #[test]
+    fn replacing_rows_keeps_the_scroll_position() {
+        let list = scrolled(60, 30);
+        replace_rows(&list, 60, 64);
+        let top = list.logical_scroll_top();
+        assert_eq!((top.item_ix, top.offset_in_item), (30, px(7.)));
+        assert_eq!(list.item_count(), 64);
+    }
+
+    #[test]
+    fn replacing_rows_with_fewer_clamps_to_the_end() {
+        let list = scrolled(60, 50);
+        replace_rows(&list, 60, 20);
+        assert_eq!(list.logical_scroll_top().item_ix, 20);
     }
 }
