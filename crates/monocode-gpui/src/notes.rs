@@ -903,7 +903,8 @@ impl Notes {
             ))
             .on_drag_move::<DraggedFile>(cx.listener(
                 |this, event: &gpui::DragMoveEvent<DraggedFile>, _, cx| {
-                    this.image_drag = event.bounds.contains(&event.event.position);
+                    this.image_drag =
+                        !event.drag(cx).1 && event.bounds.contains(&event.event.position);
                     cx.notify();
                 },
             ))
@@ -915,7 +916,9 @@ impl Notes {
                 this.add_images(paths.paths().to_vec(), cx)
             }))
             .on_drop(cx.listener(|this, file: &DraggedFile, _, cx| {
-                this.add_images(vec![file.0.clone()], cx)
+                if !file.1 {
+                    this.add_images(vec![file.0.clone()], cx)
+                }
             }))
             .when(self.source, |d| {
                 d.h(px((self.body.read(cx).editor_line_count() as f32 * 20.
