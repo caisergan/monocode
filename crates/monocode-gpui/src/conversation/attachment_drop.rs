@@ -25,7 +25,9 @@ impl Conversation {
             ))
             .on_drag_move::<DraggedFile>(cx.listener(
                 |this, event: &gpui::DragMoveEvent<DraggedFile>, _, cx| {
-                    this.set_file_drag(event.bounds.contains(&event.event.position), cx);
+                    // Explorer folders drag too, but only files attach.
+                    let file = !event.drag(cx).1;
+                    this.set_file_drag(file && event.bounds.contains(&event.event.position), cx);
                 },
             ))
             .on_file_drop_exit(cx.listener(|this, _, _, cx| this.set_file_drag(false, cx)))
@@ -56,6 +58,9 @@ impl Conversation {
             }))
             .on_drop(cx.listener(|this, file: &DraggedFile, window, cx| {
                 this.set_file_drag(false, cx);
+                if file.1 {
+                    return;
+                }
                 this.add_attachments(vec![file.0.clone()], cx);
                 window.focus(&this.input.focus_handle(cx), cx);
             }))

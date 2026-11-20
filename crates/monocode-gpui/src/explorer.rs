@@ -21,7 +21,7 @@ use monocode_core::files::{self, DirEntry, NameIssueKind, Severity};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 const MOD: &str = if cfg!(target_os = "macos") {
@@ -43,10 +43,15 @@ const REVEAL_LABEL: &str = if cfg!(target_os = "macos") {
 };
 const ROW: f32 = 30.;
 const ENTRY_FONT_SIZE: f32 = 13.;
+/// How close to the tree's top or bottom edge a drag starts scrolling it.
+const DRAG_SCROLL_EDGE: f32 = 40.;
+/// The farthest a held drag scrolls the tree in one 16 ms tick.
+const DRAG_SCROLL_STEP: f32 = 14.;
 
-/// A reference to an existing file, distinct from files copied into the tree.
+/// A reference to an existing file or folder (`.1` is true for a folder),
+/// distinct from files copied into the tree.
 #[derive(Clone)]
-pub(crate) struct DraggedFile(pub PathBuf);
+pub(crate) struct DraggedFile(pub PathBuf, pub bool);
 
 impl Render for DraggedFile {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -68,7 +73,7 @@ impl Render for DraggedFile {
             .bg(pane_fill())
             .text_size(px(12.))
             .text_color(content(1.))
-            .child(file_type_icon(&name, false, false, 16.))
+            .child(file_type_icon(&name, self.1, false, 16.))
             .child(div().max_w(px(240.)).truncate().child(name))
     }
 }
@@ -206,6 +211,12 @@ pub(crate) struct Explorer {
     search: Option<Entity<ProjectSearch>>,
     search_events: Option<Subscription>,
     drag_over: Option<String>,
+    /// Pixels per tick while a drag is held near the tree's edge.
+    drag_scroll: f32,
+    drag_scrolling: bool,
+    /// Whether the last drag move was over the tree's visible area. Rows
+    /// scrolled under the root row keep their bounds, so they check this.
+    drag_in_tree: bool,
     op_error: Option<String>,
     lines: Vec<Line>,
     list: ListState,
@@ -298,6 +309,9 @@ impl Explorer {
             search: None,
             search_events: None,
             drag_over: None,
+            drag_scroll: 0.,
+            drag_scrolling: false,
+            drag_in_tree: false,
             op_error: None,
             lines: Vec::new(),
             list: ListState::new(0, ListAlignment::Top, px(300.)),
@@ -935,31 +949,7 @@ impl Explorer {
         }
         let from = clip.path.clone();
         if clip.cut {
-            let to_parent = dest.clone();
-            let task = cx
-                .background_executor()
-                .spawn(async move { files::move_path(Path::new(&from), Path::new(&to_parent)) });
-            let from = clip.path.clone();
-            cx.spawn_in(window, async move |this, cx| {
-                let result = task.await;
-                let _ = this.update_in(cx, |this, window, cx| match result {
-                    Ok(created) => {
-                        if clip.is_dir {
-                            this.forget(&from);
-                        }
-                        for dir in files::dirs_touched_by_move(&from, &created) {
-                            this.read_dir(dir, cx);
-                        }
-                        this.remap(&from, &created);
-                        this.clip = None;
-                        this.expand(std::slice::from_ref(&dest), cx);
-                        this.selected = Some(created);
-                        this.after_op(window, cx);
-                    }
-                    Err(error) => this.fail(error, cx),
-                });
-            })
-            .detach();
+            self.move_entry(from, clip.is_dir, dest, window, cx);
         } else {
             let to = dest.clone();
             self.run(
@@ -970,6 +960,130 @@ impl Explorer {
                 cx,
             );
         }
+    }
+    /// Moves `from` into the folder `dest`, for cut and paste and for drags
+    /// inside the tree. A cut of the moved item is used up.
+    fn move_entry(
+        &mut self,
+        from: String,
+        is_dir: bool,
+        dest: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (source, to_parent) = (from.clone(), dest.clone());
+        let task = cx
+            .background_executor()
+            .spawn(async move { files::move_path(Path::new(&source), Path::new(&to_parent)) });
+        cx.spawn_in(window, async move |this, cx| {
+            let result = task.await;
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(created) => {
+                    if is_dir {
+                        this.forget(&from);
+                    }
+                    for dir in files::dirs_touched_by_move(&from, &created) {
+                        this.read_dir(dir, cx);
+                    }
+                    this.remap(&from, &created);
+                    if is_dir {
+                        // Open folders inside it keep their open state but
+                        // lost their listings with the old path.
+                        let inside = format!("{created}/");
+                        let open: Vec<String> = this
+                            .expanded
+                            .iter()
+                            .filter(|p| **p == created || p.starts_with(&inside))
+                            .cloned()
+                            .collect();
+                        for dir in open {
+                            this.read_dir(dir, cx);
+                        }
+                    }
+                    if this
+                        .clip
+                        .as_ref()
+                        .is_some_and(|c| c.cut && c.path == created)
+                    {
+                        this.clip = None;
+                    }
+                    this.expand(std::slice::from_ref(&dest), cx);
+                    this.selected = Some(created);
+                    this.after_op(window, cx);
+                }
+                Err(error) => this.fail(error, cx),
+            });
+        })
+        .detach();
+    }
+    /// The folder a tree drag of `file` over `at` would land in (the project
+    /// root for empty space), or None where dropping would do nothing.
+    fn drop_target(&self, file: &DraggedFile, at: Option<&str>) -> Option<String> {
+        let dest = at.map_or_else(|| self.cwd.clone(), |at| self.create_parent(Some(at)));
+        can_move_into(&file.0.to_string_lossy(), &dest).then_some(dest)
+    }
+    fn hover_drop(&mut self, file: &DraggedFile, at: Option<&str>, cx: &mut Context<Self>) {
+        let target = self.drop_target(file, at);
+        if self.drag_over != target {
+            self.drag_over = target;
+            cx.notify();
+        }
+    }
+    fn drop_entry(
+        &mut self,
+        file: &DraggedFile,
+        at: Option<&str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.end_drag();
+        if let Some(dest) = self.drop_target(file, at) {
+            let from = file.0.to_string_lossy().into_owned();
+            self.set_operation_error(None, cx);
+            self.move_entry(from, file.1, dest, window, cx);
+        }
+        cx.notify();
+    }
+    fn end_drag(&mut self) {
+        self.drag_over = None;
+        self.drag_scroll = 0.;
+    }
+    /// Scrolls the tree while a drag is held near its top or bottom edge, so
+    /// a folder out of view can still be reached.
+    fn set_drag_scroll(&mut self, step: f32, cx: &mut Context<Self>) {
+        self.drag_scroll = step;
+        if step == 0. || self.drag_scrolling {
+            return;
+        }
+        self.drag_scrolling = true;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(16))
+                    .await;
+                let more = this.update(cx, |this, cx| {
+                    if !cx.has_active_drag() {
+                        this.end_drag();
+                    }
+                    let step = this.drag_scroll;
+                    let top = -this.list.scroll_px_offset_for_scrollbar().y;
+                    let max = this.list.max_offset_for_scrollbar().y;
+                    let step = px(step).min(max - top).max(-top);
+                    if step == px(0.) {
+                        this.drag_scrolling = false;
+                        cx.notify();
+                        return false;
+                    }
+                    this.list.scroll_by(step);
+                    cx.notify();
+                    true
+                });
+                if !matches!(more, Ok(true)) {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
     fn copy_external(
         &mut self,
@@ -1360,6 +1474,7 @@ impl Explorer {
                 let menu_path = entry.path.clone();
                 let drop_path = entry.path.clone();
                 let over_path = entry.path.clone();
+                let (move_over, move_drop) = (entry.path.clone(), entry.path.clone());
                 let is_dir = entry.is_dir;
                 div()
                     .id(("explorer-row", ix))
@@ -1383,11 +1498,10 @@ impl Explorer {
                         d.border_1().border_color(accent_color().opacity(0.4))
                     })
                     .when(cut, |d| d.opacity(0.5))
-                    .when(!is_dir, |d| {
-                        d.on_drag(DraggedFile(PathBuf::from(&entry.path)), |file, _, _, cx| {
-                            cx.new(|_| file.clone())
-                        })
-                    })
+                    .on_drag(
+                        DraggedFile(PathBuf::from(&entry.path), is_dir),
+                        |file, _, _, cx| cx.new(|_| file.clone()),
+                    )
                     .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.keyboard = false;
@@ -1430,6 +1544,17 @@ impl Explorer {
                         this.drag_over = None;
                         let dest = this.create_parent(Some(&drop_path));
                         this.copy_external(paths.paths().to_vec(), dest, window, cx);
+                    }))
+                    .on_drag_move::<DraggedFile>(cx.listener(
+                        move |this, event: &gpui::DragMoveEvent<DraggedFile>, _, cx| {
+                            if this.drag_in_tree && event.bounds.contains(&event.event.position) {
+                                let file = event.drag(cx).clone();
+                                this.hover_drop(&file, Some(&move_over), cx);
+                            }
+                        },
+                    ))
+                    .on_drop(cx.listener(move |this, file: &DraggedFile, window, cx| {
+                        this.drop_entry(file, Some(&move_drop), window, cx)
                     }))
                     .child(
                         div()
@@ -1493,6 +1618,9 @@ impl Render for Explorer {
                 .child("No project folder")
                 .into_any_element();
         }
+        if !cx.has_active_drag() && (self.drag_over.is_some() || self.drag_scroll != 0.) {
+            self.end_drag();
+        }
         let root_open = self.expanded.contains(&self.cwd);
         let name: SharedString = basename(&self.cwd).to_uppercase().into();
         let root_selected = self.drag_over.as_deref() == Some(self.cwd.as_str());
@@ -1514,6 +1642,16 @@ impl Render for Explorer {
             .flex()
             .flex_col()
             .on_key_down(cx.listener(Self::on_key))
+            // Runs before the rows' handlers: each move starts with no target
+            // and the row, root or tree under the pointer sets it again.
+            .on_drag_move::<DraggedFile>(cx.listener(
+                |this, _: &gpui::DragMoveEvent<DraggedFile>, _, cx| {
+                    if this.drag_over.is_some() {
+                        this.drag_over = None;
+                        cx.notify();
+                    }
+                },
+            ))
             .on_action(cx.listener(|this, _: &Down, _, cx| this.step(1, cx)))
             .on_action(cx.listener(|this, _: &Up, _, cx| this.step(-1, cx)))
             .on_action(cx.listener(|this, _: &PageDown, window, cx| {
@@ -1688,6 +1826,17 @@ impl Render for Explorer {
                                 let dest = this.cwd.clone();
                                 this.copy_external(paths.paths().to_vec(), dest, window, cx);
                             }))
+                            .on_drag_move::<DraggedFile>(cx.listener(
+                                |this, event: &gpui::DragMoveEvent<DraggedFile>, _, cx| {
+                                    if event.bounds.contains(&event.event.position) {
+                                        let file = event.drag(cx).clone();
+                                        this.hover_drop(&file, None, cx);
+                                    }
+                                },
+                            ))
+                            .on_drop(cx.listener(|this, file: &DraggedFile, window, cx| {
+                                this.drop_entry(file, None, window, cx)
+                            }))
                             .child(
                                 div()
                                     .size_4()
@@ -1729,6 +1878,31 @@ impl Render for Explorer {
                         let dest = this.cwd.clone();
                         this.copy_external(paths.paths().to_vec(), dest, window, cx);
                     }))
+                    // Empty space below the rows drops into the project root;
+                    // a row under the pointer replaces this target after.
+                    .on_drag_move::<DraggedFile>(cx.listener(
+                        |this, event: &gpui::DragMoveEvent<DraggedFile>, _, cx| {
+                            let (b, p) = (event.bounds, event.event.position);
+                            this.drag_in_tree = b.contains(&p);
+                            if this.drag_in_tree {
+                                let file = event.drag(cx).clone();
+                                this.hover_drop(&file, None, cx);
+                            }
+                            let step = if p.x >= b.left() && p.x <= b.right() {
+                                edge_scroll_step(
+                                    p.y.as_f32(),
+                                    b.top().as_f32(),
+                                    b.bottom().as_f32(),
+                                )
+                            } else {
+                                0.
+                            };
+                            this.set_drag_scroll(step, cx);
+                        },
+                    ))
+                    .on_drop(cx.listener(|this, file: &DraggedFile, window, cx| {
+                        this.drop_entry(file, None, window, cx)
+                    }))
                     .when(root_open, |d| {
                         d.child(
                             list(self.list.clone(), move |ix, _, cx| {
@@ -1741,6 +1915,27 @@ impl Render for Explorer {
             .children(menu)
             .into_any_element()
     }
+}
+
+/// Whether moving `from` into the folder `dest` changes anything: not into
+/// the folder it is already in, and not a folder into itself.
+fn can_move_into(from: &str, dest: &str) -> bool {
+    dest != parent_of(from) && dest != from && !dest.starts_with(&format!("{from}/"))
+}
+
+/// The drag scroll for a pointer at `y` over a tree spanning `top..bottom`:
+/// up near the top, down near the bottom (and just below it, since the tree
+/// ends at the panel's edge), faster the closer the pointer is to the edge.
+fn edge_scroll_step(y: f32, top: f32, bottom: f32) -> f32 {
+    let edge = DRAG_SCROLL_EDGE.min((bottom - top) / 3.);
+    let depth = if y >= top && y < top + edge {
+        -(top + edge - y)
+    } else if y > bottom - edge && y <= bottom + edge {
+        y - (bottom - edge)
+    } else {
+        return 0.;
+    };
+    (depth / edge).clamp(-1., 1.) * DRAG_SCROLL_STEP
 }
 
 /// Swaps every row of `list` for `count` new ones without moving the scroll
@@ -1773,6 +1968,40 @@ mod tests {
         let top = list.logical_scroll_top();
         assert_eq!((top.item_ix, top.offset_in_item), (30, px(7.)));
         assert_eq!(list.item_count(), 64);
+    }
+
+    #[test]
+    fn tree_drags_only_move_somewhere_new() {
+        assert!(can_move_into("/p/a.md", "/p/src"));
+        assert!(can_move_into("/p/src/a.md", "/p"));
+        assert!(can_move_into("/p/src", "/p/tests"));
+        // Its own folder, itself, and its own subfolders do nothing.
+        assert!(!can_move_into("/p/a.md", "/p"));
+        assert!(!can_move_into("/p/src", "/p/src"));
+        assert!(!can_move_into("/p/src", "/p/src/ui"));
+        // A sibling that only shares the name prefix is fine.
+        assert!(can_move_into("/p/src", "/p/src-tauri"));
+    }
+
+    #[test]
+    fn drags_near_an_edge_scroll_toward_it() {
+        let (top, bottom) = (100., 700.);
+        assert_eq!(edge_scroll_step(400., top, bottom), 0.);
+        assert_eq!(edge_scroll_step(top, top, bottom), -DRAG_SCROLL_STEP);
+        assert_eq!(edge_scroll_step(bottom, top, bottom), DRAG_SCROLL_STEP);
+        let near = edge_scroll_step(top + DRAG_SCROLL_EDGE * 0.75, top, bottom);
+        assert!(near < 0. && near > -DRAG_SCROLL_STEP / 2.);
+        // Overshooting the bottom edge keeps scrolling; above the tree (the
+        // root row) does not, so the root stays a drop target.
+        assert_eq!(
+            edge_scroll_step(bottom + 10., top, bottom),
+            DRAG_SCROLL_STEP
+        );
+        assert_eq!(edge_scroll_step(top - 10., top, bottom), 0.);
+        assert_eq!(
+            edge_scroll_step(bottom + DRAG_SCROLL_EDGE + 1., top, bottom),
+            0.
+        );
     }
 
     #[test]
