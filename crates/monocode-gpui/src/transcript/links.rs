@@ -4,11 +4,43 @@ use crate::popover::{Menu, MenuAction, MenuEvent, MenuItem, menu_popover};
 use gpui::{AnyElement, Entity, Point, Subscription};
 use monocode_core::files;
 use std::path::Path;
+use std::time::Duration;
+
+/// How long a failed file action stays on screen.
+const ERROR_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 pub(super) struct State {
     pub(super) open: Option<OpenMenu>,
-    error: Option<String>,
+    error: Option<LinkError>,
+    /// Bumped per error so an older timer cannot hide a newer one.
+    error_id: usize,
+}
+struct LinkError {
+    id: usize,
+    title: String,
+    message: String,
+}
+/// Short heading and body for a failed open or reveal.
+fn describe_error(external: bool, path: &str, error: &str) -> (String, String) {
+    let title = if external {
+        "Couldn't open the file"
+    } else if cfg!(target_os = "macos") {
+        "Couldn't reveal in Finder"
+    } else if cfg!(target_os = "windows") {
+        "Couldn't reveal in File Explorer"
+    } else {
+        "Couldn't open the containing folder"
+    };
+    let name = Path::new(path)
+        .file_name()
+        .map_or_else(|| path.to_owned(), |name| name.to_string_lossy().into_owned());
+    let message = if error.ends_with("No such file or directory") {
+        format!("{name} no longer exists. It may have been moved or deleted.")
+    } else {
+        format!("{name}: {error}")
+    };
+    (title.into(), message)
 }
 pub(super) struct OpenMenu {
     position: Point<Pixels>,
@@ -152,23 +184,21 @@ impl TranscriptView {
             ("open-default" | "reveal", Target::File { path, .. }) => {
                 let path = path.clone();
                 let external = action == "open-default";
-                let work = cx.background_executor().spawn(async move {
-                    if external {
-                        files::open_path_with_default_app(Path::new(&path))
-                    } else {
-                        files::reveal_path(Path::new(&path))
+                let work = cx.background_executor().spawn({
+                    let path = path.clone();
+                    async move {
+                        if external {
+                            files::open_path_with_default_app(Path::new(&path))
+                        } else {
+                            files::reveal_path(Path::new(&path))
+                        }
                     }
                 });
                 cx.spawn(async move |this, cx| {
                     if let Err(error) = work.await {
                         let _ = this.update(cx, |this, cx| {
-                            let action = if external {
-                                "open the file in its default app"
-                            } else {
-                                "complete the file action"
-                            };
-                            this.links.error = Some(format!("Could not {action}: {error}"));
-                            cx.notify();
+                            let (title, message) = describe_error(external, &path, &error);
+                            this.show_link_error(title, message, cx);
                         });
                     }
                 })
@@ -176,6 +206,22 @@ impl TranscriptView {
             }
             _ => {}
         }
+    }
+    fn show_link_error(&mut self, title: String, message: String, cx: &mut Context<Self>) {
+        self.links.error_id += 1;
+        let id = self.links.error_id;
+        self.links.error = Some(LinkError { id, title, message });
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(ERROR_TIMEOUT).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.links.error.as_ref().is_some_and(|error| error.id == id) {
+                    this.links.error = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
     pub(super) fn link_overlays(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
@@ -190,39 +236,132 @@ impl TranscriptView {
             .when_some(self.links.error.as_ref(), |d, error| {
                 d.child(
                     div()
-                        .id("transcript-link-error")
-                        .role(Role::Alert)
                         .absolute()
-                        .bottom(px(16.))
+                        .left(px(16.))
                         .right(px(16.))
-                        .max_w(px(384.))
+                        .bottom(px(16.))
                         .flex()
-                        .items_start()
-                        .gap_3()
-                        .px_3()
-                        .py_2()
-                        .rounded(px(12.))
-                        .border_1()
-                        .border_color(rgb(0xf87171))
-                        .bg(rgb(0x252525))
-                        .text_size(px(12.))
-                        .text_color(rgb(0xfca5a5))
-                        .child(error.clone())
+                        .justify_end()
                         .child(
-                            div()
-                                .id("dismiss-link-error")
-                                .role(Role::Button)
-                                .aria_label("Dismiss file action error")
-                                .flex_shrink_0()
-                                .cursor_pointer()
-                                .child("Dismiss")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.links.error = None;
-                                    cx.notify();
-                                })),
+                            div().w(px(360.)).max_w_full().child(
+                                crate::notifications::errors::titled_card(
+                                    "transcript-link-error",
+                                    error.title.clone(),
+                                    error.message.clone(),
+                                    icon_button(
+                                        "dismiss-link-error",
+                                        "Dismiss file action error",
+                                        "close",
+                                    )
+                                    .debug_selector(|| "dismiss-link-error".into())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.links.error = None;
+                                        cx.notify();
+                                    })),
+                                ),
+                            ),
                         ),
                 )
             })
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{TestAppContext, VisualTestContext, WindowBounds, WindowOptions, point};
+
+    #[test]
+    fn missing_file_names_the_file_not_the_whole_path() {
+        let path = "/Users/me/Desktop/project/docs/plan.md";
+        let error = format!("{path}: No such file or directory");
+        let (title, message) = describe_error(false, path, &error);
+        assert!(title.starts_with("Couldn't "));
+        assert_eq!(
+            message,
+            "plan.md no longer exists. It may have been moved or deleted."
+        );
+        let (title, message) = describe_error(true, path, "No application could open this file.");
+        assert_eq!(title, "Couldn't open the file");
+        assert_eq!(message, "plan.md: No application could open this file.");
+    }
+
+    #[gpui::test]
+    fn link_error_fits_the_transcript_and_hides_after_five_seconds(cx: &mut TestAppContext) {
+        let window = cx.update(|cx| {
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        point(px(0.), px(0.)),
+                        size(px(900.), px(700.)),
+                    ))),
+                    ..Default::default()
+                },
+                |_, cx| cx.new(|_| TranscriptView::new()),
+            )
+            .unwrap()
+        });
+        let visual = &mut VisualTestContext::from_window(window.into(), cx);
+        let long = format!("/Users/me/{}plan.md", "very-long-folder-name/".repeat(12));
+        window
+            .update(visual, |view, _, cx| {
+                let (title, message) = describe_error(false, &long, &long);
+                view.show_link_error(title, message, cx);
+            })
+            .unwrap();
+        visual.run_until_parked();
+        visual.refresh().unwrap();
+        let card = visual.debug_bounds("transcript-link-error").unwrap();
+        assert_eq!(card.size.width, px(360.));
+        assert_eq!(card.right(), px(900. - 16.));
+        assert!(visual.debug_bounds("dismiss-link-error").is_some());
+
+        // A narrow transcript shrinks the card instead of pushing it off-screen.
+        visual.simulate_resize(size(px(300.), px(700.)));
+        visual.run_until_parked();
+        visual.refresh().unwrap();
+        let card = visual.debug_bounds("transcript-link-error").unwrap();
+        assert_eq!(card.left(), px(16.));
+        assert_eq!(card.right(), px(300. - 16.));
+
+        visual.executor().advance_clock(Duration::from_millis(4900));
+        visual.run_until_parked();
+        visual.refresh().unwrap();
+        assert!(visual.debug_bounds("transcript-link-error").is_some());
+        visual.executor().advance_clock(Duration::from_millis(200));
+        visual.run_until_parked();
+        visual.refresh().unwrap();
+        assert!(visual.debug_bounds("transcript-link-error").is_none());
+    }
+
+    #[gpui::test]
+    fn a_newer_error_gets_its_own_five_seconds(cx: &mut TestAppContext) {
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |_, cx| cx.new(|_| TranscriptView::new()))
+                .unwrap()
+        });
+        let show = |cx: &mut TestAppContext, text: &str| {
+            window
+                .update(cx, |view, _, cx| {
+                    view.show_link_error("Couldn't".into(), text.into(), cx)
+                })
+                .unwrap();
+        };
+        show(cx, "first");
+        cx.executor().advance_clock(Duration::from_secs(3));
+        show(cx, "second");
+        cx.executor().advance_clock(Duration::from_secs(3));
+        cx.run_until_parked();
+        let shown = window
+            .update(cx, |view, _, _| view.links.error.as_ref().map(|e| e.message.clone()))
+            .unwrap();
+        assert_eq!(shown.as_deref(), Some("second"));
+        cx.executor().advance_clock(Duration::from_secs(3));
+        cx.run_until_parked();
+        let shown = window
+            .update(cx, |view, _, _| view.links.error.is_some())
+            .unwrap();
+        assert!(!shown);
     }
 }
