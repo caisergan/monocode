@@ -3,6 +3,16 @@ use crate::theme::*;
 use gpui::{Div, FontWeight, Hsla, Role, Stateful, div, prelude::*, px, rgb};
 
 pub(crate) fn card(id: &'static str, message: String, dismiss: impl IntoElement) -> Stateful<Div> {
+    titled_card(id, "Error".into(), message, dismiss)
+}
+
+/// `card` with a heading that names what failed.
+pub(crate) fn titled_card(
+    id: &'static str,
+    title: String,
+    message: String,
+    dismiss: impl IntoElement,
+) -> Stateful<Div> {
     let rose: Hsla = rgb(0xf43f5e).into();
     let mut border = rose;
     border.a = 0.3;
@@ -33,7 +43,8 @@ pub(crate) fn card(id: &'static str, message: String, dismiss: impl IntoElement)
                                 .min_w_0()
                                 .text_size(px(13.))
                                 .font_weight(FontWeight::SEMIBOLD)
-                                .child("Error"),
+                                .truncate()
+                                .child(title),
                         )
                         .child(dismiss),
                 )
