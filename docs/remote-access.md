@@ -45,6 +45,21 @@ Claude Code sessions started in a terminal on the host can continue in MonoCode.
 
 The host reads these sessions from `~/.claude/projects` under its OS account, or from `$CLAUDE_CONFIG_DIR/projects` if the host process has that variable set. Images in the transcript are left out, and very long tool output is shortened.
 
+## Use a machine from your phone
+
+A phone can work with a machine's sessions directly, so the laptop can sleep or stay closed. The phone reaches the machine's host through [Tailscale](https://tailscale.com), and nothing on the machine is opened to the internet.
+
+1. Install Tailscale on the machine and on the phone, and sign both in to the same tailnet.
+2. In Monocode Native, open **Settings → Connections** and click **Pair phone** on the machine. The button appears once the machine's host can pair phones; use **Update Host** if it is missing.
+3. If the dialog asks for it, click **Turn on Serve**. The host runs `tailscale serve --bg` to forward the tailnet to its loopback port, and leaves any other Serve settings as they are. Changing Serve needs Tailscale operator rights or a password-free `sudo`; otherwise the dialog shows the command to run on the machine.
+4. On the phone, open MonoCode, tap **Connect to desktop** (or **Settings → Pair a desktop or machine** when it is already paired), and scan the code. Each code works once, for 15 minutes.
+
+Without a desktop at hand, run `~/.monocode-host/bin/monocode-host phone` on the machine. It prints the same one-use link for the phone's **Paste a pairing link**.
+
+With the tailnet's HTTPS certificates turned on (Tailscale admin console → DNS → HTTPS Certificates), the phone connects over HTTPS. Without them, Serve forwards plain HTTP, which travels only inside the WireGuard-encrypted tailnet; the phone accepts plain HTTP only for tailnet names and addresses. Every request carries the phone's own device credential, which `monocode-host devices` lists and `revoke` removes; **Disconnect machine** on the phone revokes it too.
+
+The phone keeps each paired desktop and machine, and **Settings → Connections** on the phone switches between them. With a machine it lists the machine's projects and sessions, streams conversations, starts sessions (in a new worktree too), sends messages and attachments, stops turns, answers questions and approvals, and shows files and changes, including commits and pull requests through `gh`. The host notifies the phone through Expo when a turn the phone started finishes or needs an answer. Monos, account usage, generated commit messages and usage-limit resume stay with the desktop.
+
 ## Manual connection (advanced / development)
 
 Use Node.js 24 or newer on the host. Install and sign in to the providers you want under the same OS account that runs the host. The host uses that account's default provider credentials and searches its PATH and common per-user and system installation directories.

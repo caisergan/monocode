@@ -6,6 +6,7 @@ mod connections;
 mod general;
 mod inbox;
 mod keybindings;
+mod machine_phone;
 mod mcp;
 mod memory;
 mod mobile;

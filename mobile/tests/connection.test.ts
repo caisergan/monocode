@@ -1,4 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+// The native link module is absent outside the app.
+vi.mock("expo", () => ({ requireOptionalNativeModule: () => null }));
+vi.mock("react-native", () => ({ Platform: { OS: "ios" } }));
 import {
   normalizeSelection,
   selectedWorkspace,
@@ -77,5 +81,65 @@ describe("QR invitation", () => {
     expect(() =>
       parseInvitation(link({ ...invitation, fingerprint: "bad" })),
     ).toThrow();
+  });
+});
+
+const machine = {
+  version: 1,
+  kind: "host",
+  name: "instance-20261117",
+  environmentId: "3779c3c2-6cf7-4506-84d7-9bee2bc38942",
+  url: "http://instance-20261117.tailb56a5a.ts.net:3774",
+  code: "c".repeat(32),
+  expires: Date.now() / 1000 + 900,
+};
+describe("a machine's QR invitation", () => {
+  it("reads where the machine answers and its one-use code", () =>
+    expect(parseInvitation(link(machine))).toEqual(machine));
+  it("takes HTTPS anywhere but HTTP only inside a tailnet", () => {
+    expect(parseInvitation(link({ ...machine, url: "https://box.example.com" }))).toMatchObject({
+      kind: "host",
+    });
+    expect(parseInvitation(link({ ...machine, url: "http://100.110.106.27:3774" }))).toMatchObject({
+      kind: "host",
+    });
+    expect(() => parseInvitation(link({ ...machine, url: "http://192.168.1.9:3774" }))).toThrow();
+    expect(() => parseInvitation(link({ ...machine, url: "ftp://box.ts.net" }))).toThrow();
+    expect(() => parseInvitation(link({ ...machine, code: "short" }))).toThrow();
+    expect(() => parseInvitation(link({ ...machine, expires: 1 }))).toThrow("expired");
+  });
+});
+
+describe("where a request goes", () => {
+  it("pins a desktop by its fingerprint, and sends a machine its credential", async () => {
+    const { linkFor, isMachine } = await import("@/features/connection/nativeLink");
+    const identity = { certificate: "c", privateKey: "k" };
+    const desktop = {
+      desktop: {
+        name: "Mac",
+        fingerprint: "f".repeat(64),
+        addresses: [{ host: "mac.local", port: 38416 }],
+        deviceId: "d",
+      },
+      identity,
+    };
+    expect(linkFor(desktop)).toEqual({
+      identity,
+      pin: "f".repeat(64),
+      addresses: [{ host: "mac.local", port: 38416 }],
+    });
+    expect(isMachine(desktop)).toBe(false);
+    const paired = {
+      desktop: {
+        name: "box",
+        fingerprint: `machine-${machine.environmentId}`,
+        addresses: [],
+        deviceId: "phone",
+        machine: { url: machine.url, environmentId: machine.environmentId },
+      },
+      token: "t".repeat(43),
+    };
+    expect(linkFor(paired)).toEqual({ host: { url: machine.url, token: "t".repeat(43) } });
+    expect(isMachine(paired)).toBe(true);
   });
 });

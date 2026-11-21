@@ -9,6 +9,7 @@ import {
   View,
 } from "react-native";
 
+import { useLinkNoun } from "@/features/connection/ConnectionProvider";
 import { useModelCatalog } from "@/features/models/useModelCatalog";
 import { ProviderLogo } from "@/features/sessions/ProviderLogo";
 import { useDefaultModels } from "@/features/settings/defaultModel";
@@ -24,6 +25,7 @@ import { themedStyles, useColors } from "@/ui/theme";
 // desktop, they start as a session started there would.
 export default function ProvidersScreen() {
   const colors = useColors();
+  const noun = useLinkNoun();
   const styles = useStyles();
   const { projectId } = useLocalSearchParams<{ projectId?: string }>();
   const { projects } = useWorkspace();
@@ -89,7 +91,7 @@ export default function ProvidersScreen() {
       <Text style={styles.note}>
         {defaults.harness
           ? "A model keeps its effort and other settings. Sessions you have already started keep their own."
-          : `New sessions use the provider and model set on the desktop${desktopModel ? `, ${desktopModel}` : ""}.`}
+          : `New sessions use the provider and model set on the ${noun}${desktopModel ? `, ${desktopModel}` : ""}.`}
       </Text>
 
       {/* Only once a provider is picked: until then the desktop's is in use. */}
@@ -100,7 +102,7 @@ export default function ProvidersScreen() {
           style={({ pressed }) => [styles.button, pressed && styles.pressed]}
         >
           <Icon name="computer" size={18} color={colors.content} />
-          <Text style={styles.buttonLabel}>Use desktop default</Text>
+          <Text style={styles.buttonLabel}>Use {noun} default</Text>
         </Pressable>
       ) : null}
 
