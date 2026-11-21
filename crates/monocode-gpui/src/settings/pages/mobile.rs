@@ -73,6 +73,26 @@ pub(super) struct Qr {
     dark: Vec<bool>,
 }
 
+/// What the pairing dialog asks the phone to do: scan a code made for this
+/// desktop, or for one of its machines, whose own controls are given here.
+pub(super) struct PairingDialog {
+    pub title: String,
+    /// After "Open MonoCode on your phone, tap Connect to desktop".
+    pub tail: String,
+    pub body: PairingBody,
+    pub footnote: String,
+    /// While a new code is on its way.
+    pub busy: bool,
+    pub new_code: fn(&mut SettingsView, &mut Context<SettingsView>),
+    pub close: fn(&mut SettingsView, &mut Context<SettingsView>),
+}
+
+pub(super) enum PairingBody {
+    Code { url: String, expires: u64 },
+    /// What the machine needs before a phone can reach it, in the code's place.
+    Setup(AnyElement),
+}
+
 /// The QR code phones scan; low error correction keeps the modules large.
 pub(super) fn qr(text: &str) -> Option<Qr> {
     let code =
@@ -164,6 +184,11 @@ impl SettingsView {
     pub(in crate::settings) fn dismiss_mobile(&mut self, cx: &mut Context<Self>) -> bool {
         if self.section != Section::Connections {
             return false;
+        }
+        // The dialog shows a machine's code over the desktop's, so it goes first.
+        if self.machine_phone_open() {
+            self.close_machine_phone(cx);
+            return true;
         }
         if self.ctx.mobile_invite.is_some() {
             self.close_invite(cx);
@@ -806,9 +831,11 @@ impl SettingsView {
     }
 
     /// PairPhoneDialog.tsx, presented by Shell alongside the other window
-    /// overlays so its scrim and centering cover the entire viewport.
+    /// overlays so its scrim and centering cover the entire viewport. It
+    /// pairs a phone with this desktop, or with one of its machines.
     pub(crate) fn mobile_overlay_open(&self) -> bool {
-        self.section == Section::Connections && self.ctx.mobile_invite.is_some()
+        self.section == Section::Connections
+            && (self.ctx.mobile_invite.is_some() || self.machine_phone_open())
     }
 
     pub(crate) fn mobile_overlay(
@@ -819,11 +846,44 @@ impl SettingsView {
         if !self.mobile_overlay_open() {
             return None;
         }
-        let invite = self.ctx.mobile_invite.clone()?;
-        let left = invite.expires.saturating_sub(now());
-        let expired = left == 0;
-        let busy = self.mobile.pairing.is_some();
-        let qr = self.invite_qr(&invite.url);
+        let dialog = match self.machine_phone_dialog(cx) {
+            Some(dialog) => dialog,
+            None => {
+                let invite = self.ctx.mobile_invite.clone()?;
+                PairingDialog {
+                    title: "Connect a phone to this desktop".into(),
+                    tail: ", and scan the code.".into(),
+                    body: PairingBody::Code {
+                        url: invite.url,
+                        expires: invite.expires,
+                    },
+                    footnote:
+                        "Can’t scan? Copy the link and open it on your phone. Each code works once."
+                            .into(),
+                    busy: self.mobile.pairing.is_some(),
+                    new_code: |this, cx| this.pair_phone(cx),
+                    close: |this, cx| this.close_invite(cx),
+                }
+            }
+        };
+        Some(self.pairing_dialog(dialog, window, cx))
+    }
+
+    fn pairing_dialog(
+        &mut self,
+        dialog: PairingDialog,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let PairingDialog {
+            title,
+            tail,
+            body,
+            footnote,
+            busy,
+            new_code,
+            close,
+        } = dialog;
         let viewport = window.viewport_size();
         let width = DIALOG_WIDTH.min((viewport.width.as_f32() - 24.).max(0.));
         let max_height = (viewport.height.as_f32() - 32.).max(0.);
@@ -831,9 +891,18 @@ impl SettingsView {
         let qr_side = QR_SIDE.min((width - 50.).max(0.));
         let lead = "Open MonoCode on your phone, tap ";
         let action = "Connect to desktop";
-        let instructions = format!("{lead}{action}, and scan the code.");
+        let instructions = format!("{lead}{action}{tail}");
         let bold = lead.len()..lead.len() + action.len();
-        let url = invite.url.clone();
+        let (url, left) = match &body {
+            PairingBody::Code { url, expires } => (url.clone(), expires.saturating_sub(now())),
+            PairingBody::Setup(_) => (String::new(), 0),
+        };
+        let setup = match body {
+            PairingBody::Setup(setup) => Some(setup),
+            PairingBody::Code { .. } => None,
+        };
+        let expired = left == 0 && setup.is_none();
+        let qr = if setup.is_none() { self.invite_qr(&url) } else { None };
         let code = div()
             .id("mobile-pair-code")
             .debug_selector(|| "mobile-pair-code".into())
@@ -881,7 +950,7 @@ impl SettingsView {
                                         d.opacity(0.4)
                                     } else {
                                         d.cursor_pointer().on_click(
-                                            cx.listener(|this, _, _, cx| this.pair_phone(cx)),
+                                            cx.listener(move |this, _, _, cx| new_code(this, cx)),
                                         )
                                     }
                                 }),
@@ -935,7 +1004,7 @@ impl SettingsView {
                     busy,
                 )
                 .when(!busy, |d| {
-                    d.on_click(cx.listener(|this, _, _, cx| this.pair_phone(cx)))
+                    d.on_click(cx.listener(move |this, _, _, cx| new_code(this, cx)))
                 }),
             );
         let body = div()
@@ -950,7 +1019,7 @@ impl SettingsView {
                     .line_height(px(33.))
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(content(1.))
-                    .child("Connect a phone to this desktop"),
+                    .child(title),
             )
             .child(
                 div()
@@ -976,8 +1045,19 @@ impl SettingsView {
                     .flex()
                     .flex_col()
                     .items_center()
-                    .child(code)
-                    .child(status),
+                    .map(|d| match setup {
+                        // Until the phone has a way to the machine, what turns one on.
+                        Some(setup) => d.child(
+                            div()
+                                .w_full()
+                                .min_h(px(qr_side * 0.6))
+                                .flex()
+                                .flex_col()
+                                .justify_center()
+                                .child(setup),
+                        ),
+                        None => d.child(code).child(status),
+                    }),
             )
             .child(
                 div()
@@ -986,10 +1066,9 @@ impl SettingsView {
                     .text_size(px(12.))
                     .line_height(px(19.5))
                     .text_color(content(0.45))
-                    .child("Can’t scan? Copy the link and open it on your phone. Each code works once."),
+                    .child(footnote),
             );
-        Some(
-            div()
+        div()
                 .id("mobile-pair-overlay")
                 .debug_selector(|| "mobile-pair-overlay".into())
                 .absolute()
@@ -1001,9 +1080,9 @@ impl SettingsView {
                 .justify_center()
                 .on_mouse_down(
                     MouseButton::Left,
-                    cx.listener(|this, _, _, cx| {
+                    cx.listener(move |this, _, _, cx| {
                         cx.stop_propagation();
-                        this.close_invite(cx);
+                        close(this, cx);
                     }),
                 )
                 .child(
@@ -1037,8 +1116,7 @@ impl SettingsView {
                                 .child(body),
                         ),
                 )
-                .into_any_element(),
-        )
+                .into_any_element()
     }
 }
 

@@ -70,6 +70,14 @@ describe("watch frames", () => {
       applyFrames([], [{ error: "Mono is no longer available" }])!.error,
     ).toBe("Mono is no longer available");
   });
+  it("takes a machine's approval as it changes, its clear, and leaves it be otherwise", () => {
+    const approval = { requestId: 7, title: "Run npm run deploy", kind: "shell" };
+    const a = turn("a", "done");
+    expect(applyFrames([a], [{ busy: true, approval }])).toMatchObject({ turns: [a], approval });
+    expect(applyFrames([a], [{ approval }, { approval: null }])?.approval).toBeNull();
+    expect(applyFrames([a], [{ busy: false }])).not.toHaveProperty("approval");
+  });
+
   it("applies usage state transitions without transcript edits and preserves explicit clears", () => {
     const usageLimit = { token: "a", resumeAtReset: false, canResume: false, canAutoResume: true,
       resetsAt: 123456, resetLabel: "Resets tomorrow", limitation: "Keep desktop running" };

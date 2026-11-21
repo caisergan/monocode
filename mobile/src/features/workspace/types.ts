@@ -159,6 +159,16 @@ export type QuestionReply =
   | { kind: "answered"; answers: Record<string, string[]>; custom?: Record<string, string> }
   | { kind: "skipped" };
 
+/** What a machine's agent waits on the user to allow: a command to run, say.
+ *  A desktop keeps its approvals to itself and sends none. */
+export type ApprovalPrompt = {
+  requestId: number;
+  title: string;
+  detail?: string;
+  /** The tool's kind, such as "shell" or "edit". */
+  kind?: string;
+};
+
 /** Phone-local identity for one showing, even when the desktop reuses an ID. */
 export type DisplayedQuestionPrompt = QuestionPrompt & { displayId: number };
 

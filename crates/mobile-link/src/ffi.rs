@@ -23,17 +23,16 @@ enum Call {
         identity: Identity,
         invitation: String,
     },
+    /// To a desktop over QUIC, or with `host` to a host on another machine.
     Exchange {
-        identity: Identity,
-        pin: String,
-        addresses: Vec<Address>,
+        #[serde(flatten)]
+        link: Link,
         request: Value,
     },
     /// Opens a watch and returns its ID; `next` then pulls its updates.
     Watch {
-        identity: Identity,
-        pin: String,
-        addresses: Vec<Address>,
+        #[serde(flatten)]
+        link: Link,
         request: Value,
     },
     #[serde(rename_all = "camelCase")]
@@ -70,6 +69,20 @@ enum Call {
     #[serde(rename_all = "camelCase")]
     TranscriptDrop {
         transcript_id: u64,
+    },
+}
+/// Where a request goes: a paired desktop, pinned by its fingerprint, or a
+/// host on another machine by its address and this phone's credential.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Link {
+    Host {
+        host: crate::machine::HostLink,
+    },
+    Desktop {
+        identity: Identity,
+        pin: String,
+        addresses: Vec<Address>,
     },
 }
 fn runtime() -> &'static tokio::runtime::Runtime {
@@ -116,20 +129,28 @@ fn execute(input: &str) -> LinkResult<Value> {
             identity,
             invitation,
         } => Ok(json!(identity.proof(&invitation)?)),
-        Call::Exchange {
-            identity,
-            pin,
-            addresses,
-            request,
-        } => runtime().block_on(crate::exchange(&identity, &pin, &addresses, request)),
-        Call::Watch {
-            identity,
-            pin,
-            addresses,
-            request,
-        } => {
+        Call::Exchange { link, request } => runtime().block_on(async {
+            match link {
+                Link::Host { host } => crate::machine::exchange(&host, request).await,
+                Link::Desktop {
+                    identity,
+                    pin,
+                    addresses,
+                } => crate::exchange(&identity, &pin, &addresses, request).await,
+            }
+        }),
+        Call::Watch { link, request } => {
             static NEXT_ID: AtomicU64 = AtomicU64::new(1);
-            let watch = runtime().block_on(crate::watch(&identity, &pin, &addresses, request))?;
+            let watch = runtime().block_on(async {
+                match link {
+                    Link::Host { host } => crate::machine::watch(&host, request).await,
+                    Link::Desktop {
+                        identity,
+                        pin,
+                        addresses,
+                    } => crate::watch(&identity, &pin, &addresses, request).await,
+                }
+            })?;
             let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
             watches().lock().unwrap().insert(id, Arc::new(watch));
             Ok(json!({ "watchId": id }))
@@ -244,6 +265,35 @@ pub extern "system" fn Java_expo_modules_monocodelink_MonocodeLinkModule_nativeC
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_call_with_a_host_goes_to_the_machine_and_one_with_a_pin_to_the_desktop() {
+        let host: Call = serde_json::from_value(json!({
+            "operation": "exchange",
+            "host": {"url": "https://box.tailnet.ts.net", "token": "t"},
+            "request": {"method": "workspace.list"},
+        }))
+        .unwrap();
+        assert!(
+            matches!(host, Call::Exchange { link: Link::Host { host }, .. } if host.token == "t")
+        );
+        let desktop: Call = serde_json::from_value(json!({
+            "operation": "watch",
+            "identity": {"certificate": "c", "privateKey": "k"},
+            "pin": "f",
+            "addresses": [{"host": "mac.local", "port": 38416}],
+            "request": {"method": "conversation.watch"},
+        }))
+        .unwrap();
+        assert!(
+            matches!(desktop, Call::Watch { link: Link::Desktop { pin, .. }, .. } if pin == "f")
+        );
+        // Neither, as from a build that predates machines: refused, not guessed.
+        assert!(
+            serde_json::from_value::<Call>(json!({"operation": "exchange", "request": {}}))
+                .is_err()
+        );
+    }
+
     #[test]
     fn native_transcript_wire_contract_and_cleanup() {
         let invoke =

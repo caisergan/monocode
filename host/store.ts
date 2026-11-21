@@ -25,6 +25,8 @@ export class HostStore {
   // served from memory instead of re-parsing whole transcripts. Callers must
   // treat returned values as immutable.
   private cache = new Map<string, HostSession>();
+  /** Told the ID of each session saved or deleted, once its write commits. */
+  private listeners = new Set<(id: string) => void>();
 
   constructor(path: string) {
     this.attachmentDir = join(dirname(path), "attachments");
@@ -36,7 +38,9 @@ export class HostStore {
       CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), snapshot TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS receipts (id TEXT PRIMARY KEY, signature TEXT NOT NULL, receipt TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS events (session_id TEXT NOT NULL REFERENCES sessions(id), revision INTEGER NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(session_id, revision));
-      CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, name TEXT NOT NULL, hash TEXT NOT NULL UNIQUE);`);
+      CREATE TABLE IF NOT EXISTS devices (id TEXT PRIMARY KEY, name TEXT NOT NULL, hash TEXT NOT NULL UNIQUE);
+      CREATE TABLE IF NOT EXISTS phone_push (device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE, token TEXT NOT NULL, disabled TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS phone_invites (hash TEXT PRIMARY KEY, expires INTEGER NOT NULL, paired TEXT);`);
     const columns = this.db.prepare("PRAGMA table_info(sessions)").all();
     if (!columns.some((column) => column.name === "summary"))
       this.db.exec("ALTER TABLE sessions ADD COLUMN summary TEXT");
@@ -196,7 +200,30 @@ export class HostStore {
     this.db
       .prepare("DELETE FROM events WHERE session_id=? AND revision<?")
       .run(value.session.id, value.revision - 2_000);
+    this.changed(value.session.id);
     return this.remember(value);
+  }
+
+  /** Calls `listener` with each session's ID after it is saved or deleted;
+   *  returns a function that stops it. */
+  onSessionChange(listener: (id: string) => void): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
+  /** Writes run inside synchronous transactions; listeners hear of them on
+   *  the next microtask, after the commit. */
+  private changed(id: string): void {
+    if (!this.listeners.size) return;
+    queueMicrotask(() => {
+      for (const listener of this.listeners) {
+        try {
+          listener(id);
+        } catch (error) {
+          console.error("Session listener failed:", error);
+        }
+      }
+    });
   }
 
   updateSession(
@@ -247,6 +274,7 @@ export class HostStore {
       this.db.prepare("DELETE FROM events WHERE session_id=?").run(id);
       this.db.prepare("DELETE FROM sessions WHERE id=?").run(id);
       this.cache.delete(id);
+      this.changed(id);
     });
   }
 
@@ -321,6 +349,86 @@ export class HostStore {
     return !!this.db
       .prepare("SELECT id FROM devices WHERE hash=?")
       .get(this.hash(token));
+  }
+
+  /** The device a credential belongs to, while it is valid. */
+  deviceId(token: string): string | undefined {
+    const row = this.db
+      .prepare("SELECT id FROM devices WHERE hash=?")
+      .get(this.hash(token));
+    return row ? String(row.id) : undefined;
+  }
+
+  /** Where a paired phone is notified, and the categories it turned off;
+   *  no token forgets it. Revoking the device forgets it too. */
+  setPhonePush(deviceId: string, token: string | null, disabled: string[]): void {
+    if (token === null) {
+      this.db.prepare("DELETE FROM phone_push WHERE device_id=?").run(deviceId);
+      return;
+    }
+    this.db
+      .prepare(
+        "INSERT INTO phone_push VALUES (?, ?, ?) ON CONFLICT(device_id) DO UPDATE SET token=excluded.token, disabled=excluded.disabled",
+      )
+      .run(deviceId, token, JSON.stringify(disabled));
+  }
+
+  phonePushTargets(): { deviceId: string; token: string; disabled: string[] }[] {
+    return this.db
+      .prepare("SELECT device_id, token, disabled FROM phone_push")
+      .all()
+      .map((row) => ({
+        deviceId: String(row.device_id),
+        token: String(row.token),
+        disabled: JSON.parse(String(row.disabled)) as string[],
+      }));
+  }
+
+  /** Expo says the app is gone from the phone holding `token`. */
+  forgetPushToken(token: string): void {
+    this.db.prepare("DELETE FROM phone_push WHERE token=?").run(token);
+  }
+
+  /** A one-use phone pairing code, by its hash, until `expires` (ms). Kept
+   *  here so the CLI can make one beside the running host. */
+  addPhoneInvite(hash: string, expires: number, limit: number): void {
+    this.transaction(() => {
+      this.db
+        .prepare("DELETE FROM phone_invites WHERE expires<? AND paired IS NULL")
+        .run(Date.now());
+      // Used codes are kept a day, for the desktop to see who paired.
+      this.db
+        .prepare("DELETE FROM phone_invites WHERE expires<?")
+        .run(Date.now() - 24 * 60 * 60_000);
+      this.db
+        .prepare(
+          "DELETE FROM phone_invites WHERE hash IN (SELECT hash FROM phone_invites WHERE paired IS NULL ORDER BY expires DESC LIMIT -1 OFFSET ?)",
+        )
+        .run(limit - 1);
+      this.db.prepare("INSERT INTO phone_invites VALUES (?, ?, NULL)").run(hash, expires);
+    });
+  }
+
+  phoneInvite(hash: string): { expires: number; paired: string | null } | undefined {
+    const row = this.db
+      .prepare("SELECT expires, paired FROM phone_invites WHERE hash=?")
+      .get(hash);
+    return row
+      ? { expires: Number(row.expires), paired: row.paired == null ? null : String(row.paired) }
+      : undefined;
+  }
+
+  /** Uses a code once: true when it was valid and unused. */
+  usePhoneInvite(hash: string, name: string): boolean {
+    return (
+      Number(
+        this.db
+          .prepare(
+            "UPDATE phone_invites SET paired=? WHERE hash=? AND paired IS NULL AND expires>?",
+          )
+          .run(name, hash, Date.now()).changes,
+      ) > 0
+    );
   }
 
   private hash(token: string): string {

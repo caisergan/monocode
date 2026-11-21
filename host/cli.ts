@@ -23,6 +23,8 @@ import { acquireHostOwner } from "./owner";
 import { HostEngine } from "./engine";
 import { hostProviders } from "./providers";
 import { createHostServer } from "./server";
+import { createPhoneInvite, phoneUrl } from "./mobile";
+import { phoneReach } from "./tailscale";
 import {
   REMOTE_PROVIDERS,
   type RemoteProvider,
@@ -84,6 +86,7 @@ async function main() {
   status                Check the running host
   stop                  Stop the host and interrupt its running turns
   pair --name <device>  Issue a device credential (shown once)
+  phone [--url <url>]   Make a one-use link to pair a phone over Tailscale
   devices               List paired devices
   revoke <device-id>    Revoke a device credential
 Options: --data-dir <directory> --port <port> (default 3774)
@@ -194,6 +197,31 @@ Connect another computer using an SSH forward to the loopback port.`);
     store.close();
     return;
   }
+  if (command === "phone") {
+    // Pairs a phone without a desktop: the link the app's Paste a pairing
+    // link takes, to this host through Tailscale Serve.
+    const reach = await phoneReach(readRunning()?.port ?? port);
+    const given = option("url", "");
+    const invite = createPhoneInvite(store, reach, given ? phoneUrl(given) : undefined);
+    store.close();
+    if (args.includes("--json")) {
+      console.log(JSON.stringify(invite));
+      return;
+    }
+    if (!invite.link) {
+      throw new Error(
+        reach.state === "serve"
+          ? `Turn on Tailscale Serve first: sudo ${reach.command.join(" ")}`
+          : reach.state === "stopped"
+            ? "Connect this machine to Tailscale first (tailscale up)"
+            : "Install Tailscale on this machine, or pass --url <https address>",
+      );
+    }
+    console.log(
+      `Open this link on your phone, or paste it in MonoCode's Paste a pairing link. It works once, for 15 minutes.\n\n${invite.link}\n\nThe phone reaches ${invite.name} at ${invite.url}.`,
+    );
+    return;
+  }
   if (command === "devices") {
     console.log(
       JSON.stringify(
@@ -270,7 +298,7 @@ Connect another computer using an SSH forward to the loopback port.`);
           response.writeHead(400).end();
         }
       });
-    });
+    }, { port });
     stop = async () => {
       if (stopping) return;
       stopping = true;

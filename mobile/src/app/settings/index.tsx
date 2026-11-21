@@ -2,7 +2,8 @@ import { router, useLocalSearchParams, useNavigationContainerRef } from "expo-ro
 import { Fragment, useState } from "react";
 import { Alert, Linking, StyleSheet, Switch, Text, View } from "react-native";
 
-import { useConnection } from "@/features/connection/ConnectionProvider";
+import { useConnection, useLinkNoun } from "@/features/connection/ConnectionProvider";
+import { usePairingScanner } from "@/features/connection/PairingScanner";
 import { MONOS_ENABLED } from "@/features/connection/selection";
 import { useNotificationsBlocked } from "@/features/notifications/SessionNotifications";
 import { useAppearancePreference } from "@/features/settings/appearance";
@@ -62,10 +63,28 @@ export default function SettingsScreen() {
   const params = project ? { projectId: project.id } : {};
   const connection = useConnection();
   const selected = connection.selection;
+  const noun = useLinkNoun();
+  const machine = noun === "machine";
+  const others = connection.connections.filter(
+    (entry) => entry.fingerprint !== connection.pairing?.desktop.fingerprint,
+  );
+  // Another desktop or machine, paired from here: the app starts over in it.
+  const scanner = usePairingScanner((link) => {
+    void connection.pair(link).then((paired) => {
+      if (paired) router.replace("/");
+    });
+  });
+  const switchTo = (fingerprint: string) =>
+    void connection
+      .switchTo(fingerprint)
+      .then(() => router.replace("/"))
+      .catch((reason) => Alert.alert("Could not switch", String(reason)));
   const disconnect = () =>
     Alert.alert(
-      "Disconnect desktop?",
-      "You can pair again by scanning a new code. Your workspace choices will be remembered.",
+      machine ? "Disconnect machine?" : "Disconnect desktop?",
+      machine
+        ? "This phone stops working with the machine. Pair it again from desktop Settings → Connections."
+        : "You can pair again by scanning a new code. Your workspace choices will be remembered.",
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -86,7 +105,7 @@ export default function SettingsScreen() {
     <SettingsPage>
       <View style={styles.desktop}>
         <Icon
-          name={connection.connected ? "computer" : "computerOff"}
+          name={machine ? "globe" : connection.connected ? "computer" : "computerOff"}
           size={22}
           color={connection.connected ? colors.content : colors.muted}
         />
@@ -95,16 +114,47 @@ export default function SettingsScreen() {
             {connection.pairing?.desktop.name}
           </Text>
           <Text style={styles.desktopStatus}>
-            {connection.connected
-              ? "Connected to desktop"
-              : "Desktop unavailable. Your saved workspace stays here."}
+            {machine
+              ? connection.connected
+                ? "Connected through Tailscale"
+                : "Machine unavailable. Check Tailscale on this phone. Your saved workspace stays here."
+              : connection.connected
+                ? "Connected to desktop"
+                : "Desktop unavailable. Your saved workspace stays here."}
           </Text>
         </View>
       </View>
 
+      <Text style={styles.heading}>Connections</Text>
+      <View style={styles.card}>
+        {others.map((entry) => (
+          <Fragment key={entry.fingerprint}>
+            <SettingsRow
+              icon={entry.machine ? "globe" : "computer"}
+              label={entry.name}
+              value={entry.machine ? "Machine" : "Desktop"}
+              showChevron={false}
+              onPress={() => switchTo(entry.fingerprint)}
+            />
+            <View style={styles.divider} />
+          </Fragment>
+        ))}
+        <SettingsRow
+          icon="add"
+          label="Pair a desktop or machine"
+          showChevron={false}
+          onPress={scanner.ask}
+        />
+      </View>
+      {others.length ? (
+        <Text style={styles.note}>Tap one to switch. Each keeps its own projects and chats.</Text>
+      ) : null}
+      {scanner.elements}
+
       <Text style={styles.heading}>Notifications</Text>
       <View style={styles.card}>
-        {NOTIFICATION_CATEGORIES.map((category, index) => (
+        {/* A machine has no Monos to hear from. */}
+        {NOTIFICATION_CATEGORIES.filter(({ id }) => !machine || id !== "monoMessages").map((category, index) => (
           <Fragment key={category.id}>
             {index > 0 ? <View style={styles.divider} /> : null}
             <SettingsRow
@@ -150,7 +200,7 @@ export default function SettingsScreen() {
         <SettingsRow
           icon="robot"
           label="Providers"
-          value={defaultModel?.name ?? "Desktop default"}
+          value={defaultModel?.name ?? (machine ? "Machine default" : "Desktop default")}
           onPress={() =>
             router.push({ pathname: "/settings/providers", params })
           }
@@ -160,7 +210,11 @@ export default function SettingsScreen() {
           icon="lock"
           label="Permissions"
           value={
-            defaultAccess ? accessMode(defaultAccess).label : "Desktop default"
+            defaultAccess
+              ? accessMode(defaultAccess).label
+              : machine
+                ? "Machine default"
+                : "Desktop default"
           }
           onPress={() =>
             router.push({ pathname: "/settings/permissions", params })
@@ -188,7 +242,7 @@ export default function SettingsScreen() {
         Turn off to stay on the new session screen and start more sessions.
       </Text>
 
-      {MONOS_ENABLED ? (
+      {MONOS_ENABLED && !machine ? (
         <>
           <Text style={styles.heading}>Layout</Text>
           <View style={styles.card}>
@@ -216,10 +270,10 @@ export default function SettingsScreen() {
       <View style={styles.card}>
         <SettingsRow
           icon="folder"
-          label={MONOS_ENABLED ? "Projects and monos" : "Projects"}
+          label={MONOS_ENABLED && !machine ? "Projects and monos" : "Projects"}
           value={String(
             (selected?.projectIds.length ?? 0) +
-              (MONOS_ENABLED ? (selected?.monoIds.length ?? 0) : 0),
+              (MONOS_ENABLED && !machine ? (selected?.monoIds.length ?? 0) : 0),
           )}
           onPress={() => router.push("/settings/workspace")}
         />
@@ -235,7 +289,7 @@ export default function SettingsScreen() {
       <View style={[styles.card, styles.lastCard]}>
         <SettingsRow
           icon="computerOff"
-          label="Disconnect desktop"
+          label={machine ? "Disconnect machine" : "Disconnect desktop"}
           showChevron={false}
           destructive
           onPress={disconnect}
