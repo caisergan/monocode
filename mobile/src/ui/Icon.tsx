@@ -25,6 +25,7 @@ import InboxIcon from "@hugeicons/core-free-icons/InboxIcon";
 import InformationCircleIcon from "@hugeicons/core-free-icons/InformationCircleIcon";
 import Layers01Icon from "@hugeicons/core-free-icons/Layers01Icon";
 import LayoutAlignRightIcon from "@hugeicons/core-free-icons/LayoutAlignRightIcon";
+import Globe02Icon from "@hugeicons/core-free-icons/Globe02Icon";
 import LockIcon from "@hugeicons/core-free-icons/LockIcon";
 import LeftToRightListBulletIcon from "@hugeicons/core-free-icons/LeftToRightListBulletIcon";
 import Moon02Icon from "@hugeicons/core-free-icons/Moon02Icon";
@@ -99,6 +100,8 @@ const icons = {
   automation: FlashIcon,
   bot: BotIcon,
   lock: LockIcon,
+  /** A machine reached over the network, as the desktop rail marks remote projects. */
+  globe: Globe02Icon,
   shield: Shield01Icon,
   filter: FilterHorizontalIcon,
   appearance: DarkModeIcon,

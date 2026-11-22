@@ -3,6 +3,7 @@ import { useLocalSearchParams } from "expo-router";
 import { Fragment } from "react";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 
+import { useLinkNoun } from "@/features/connection/ConnectionProvider";
 import { ACCESS_MODES, accessMode } from "@/features/models/access";
 import type { RuntimeMode } from "@/features/models/types";
 import { useDefaultModels } from "@/features/settings/defaultModel";
@@ -16,6 +17,7 @@ import { themedStyles, useColors } from "@/ui/theme";
 // this phone start with. Left to the desktop, they start with its own.
 export default function PermissionsScreen() {
   const colors = useColors();
+  const noun = useLinkNoun();
   const styles = useStyles();
   const { projectId } = useLocalSearchParams<{ projectId?: string }>();
   const { projects } = useWorkspace();
@@ -72,7 +74,7 @@ export default function PermissionsScreen() {
       <Text style={styles.note}>
         {chosen
           ? "Sessions you have already started keep their own permissions."
-          : `New sessions use the permissions set on the desktop${desktopMode ? `, ${desktopMode}` : ""}.`}
+          : `New sessions use the permissions set on the ${noun}${desktopMode ? `, ${desktopMode}` : ""}.`}
       </Text>
 
       {/* Only once a mode is picked: until then the desktop's is in use. */}
@@ -83,7 +85,7 @@ export default function PermissionsScreen() {
           style={({ pressed }) => [styles.button, pressed && styles.pressed]}
         >
           <Icon name="computer" size={18} color={colors.content} />
-          <Text style={styles.buttonLabel}>Use desktop default</Text>
+          <Text style={styles.buttonLabel}>Use {noun} default</Text>
         </Pressable>
       ) : null}
     </SettingsPage>

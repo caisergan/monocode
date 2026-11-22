@@ -19,11 +19,39 @@ export type Identity = { certificate: string; privateKey: string };
 export type Address = { host: string; port: number };
 export type Desktop = {
   name: string;
+  /** A desktop's certificate fingerprint; for a machine, its host's ID. Keys
+   *  everything the phone keeps for the connection. */
   fingerprint: string;
   addresses: Address[];
   deviceId: string;
+  /** Set for a MonoCode host on another machine, reached through Tailscale
+   *  rather than a desktop's direct link. */
+  machine?: { url: string; environmentId: string };
 };
-export type Pairing = { desktop: Desktop; identity: Identity };
+/** Either a desktop, which pins its certificate and checks this phone's, or a
+ *  machine's host, which takes this phone's credential. */
+export type Pairing = {
+  desktop: Desktop;
+  identity?: Identity;
+  /** A machine's credential, from the phone's secure storage. */
+  token?: string;
+};
+
+/** Where a native call goes, as the link expects it. */
+export function linkFor(pairing: Pairing): object {
+  const machine = pairing.desktop.machine;
+  if (machine) return { host: { url: machine.url, token: pairing.token ?? "" } };
+  return {
+    identity: pairing.identity,
+    pin: pairing.desktop.fingerprint,
+    addresses: pairing.desktop.addresses,
+  };
+}
+
+/** Whether the phone is paired with a machine's host, not a desktop. */
+export function isMachine(pairing: Pairing | null | undefined): boolean {
+  return !!pairing?.desktop.machine;
+}
 
 export async function nativeCall<T>(input: object): Promise<T> {
   if (!module)
@@ -41,9 +69,7 @@ export function request<T>(
 ): Promise<T> {
   return nativeCall({
     operation: "exchange",
-    identity: pairing.identity,
-    pin: pairing.desktop.fingerprint,
-    addresses: pairing.desktop.addresses,
+    ...linkFor(pairing),
     request: { version: 1, id, method, params },
   });
 }
@@ -58,9 +84,7 @@ export async function openWatch(
 ): Promise<number> {
   const { watchId } = await nativeCall<{ watchId: number }>({
     operation: "watch",
-    identity: pairing.identity,
-    pin: pairing.desktop.fingerprint,
-    addresses: pairing.desktop.addresses,
+    ...linkFor(pairing),
     request: { version: 1, id: makeCommandId(), method, params },
   });
   return watchId;

@@ -49,6 +49,8 @@ import {
   writeHostFile,
 } from "./workspace";
 import { WorkspaceCommands } from "./workspace-commands";
+import { PHONE_CAPABILITY, PhoneLink } from "./mobile";
+import { enablePhoneServe, phoneReach } from "./tailscale";
 import { discoverCodexModels } from "../src/integrations/harness/providers/codex/codexCatalog";
 import { discoverClaudeModels } from "../src/integrations/harness/providers/claude/claudeCatalog";
 import { discoverCursorModels } from "../src/integrations/harness/providers/cursor/cursorCatalog";
@@ -159,6 +161,8 @@ export function createHostServer(
   engine: HostEngine,
   providers: RemoteProvider[],
   lifecycle?: (request: IncomingMessage, response: ServerResponse) => void,
+  /** The port the host listens on, which Tailscale Serve forwards phones to. */
+  options: { port?: number; pushEndpoint?: string } = {},
 ) {
   const catalogs = new Map<
     string,
@@ -215,8 +219,11 @@ export function createHostServer(
     }
     return catalog;
   };
-  return createServer(
-    { requestTimeout: 20_000, headersTimeout: 10_000, maxHeaderSize: 8192 },
+  const port = options.port ?? 3774;
+  const phones = new PhoneLink(engine, providers, models, port, options.pushEndpoint);
+  const server = createServer(
+    // A phone's message can carry megabytes of attachments over a slow network.
+    { requestTimeout: 120_000, headersTimeout: 10_000, maxHeaderSize: 8192 },
     async (request, response) => {
       if (request.url === "/lifecycle" && lifecycle) {
         lifecycle(request, response);
@@ -225,6 +232,11 @@ export function createHostServer(
       response.setHeader("Content-Type", "application/json");
       response.setHeader("Cache-Control", "no-store");
       response.setHeader("X-Content-Type-Options", "nosniff");
+      // Paired phones, through Tailscale Serve to this loopback port.
+      if (request.url === "/mobile") {
+        await phones.handle(request, response);
+        return;
+      }
       try {
         // Desktop native HTTP supplies credentials. This endpoint intentionally
         // accepts no browser origin and provides no permissive CORS escape hatch.
@@ -319,6 +331,7 @@ export function createHostServer(
                 HOST_HANDOFF_CAPABILITY,
                 "sessions.steer",
                 "agentSessions.import",
+                PHONE_CAPABILITY,
               ],
               steerProviders: providers.filter((provider) =>
                 engine.canSteer(provider),
@@ -509,6 +522,20 @@ export function createHostServer(
             break;
           case "attachments.read":
             result = readAttachmentChunk(engine.store, params);
+            break;
+          // A desktop pairs a phone with this host: a one-use code and the
+          // link its QR code holds, and how the phone will reach it.
+          case "phones.invite":
+            result = await phones.invite(params);
+            break;
+          case "phones.inviteStatus":
+            result = phones.inviteStatus(params);
+            break;
+          case "phones.reach":
+            result = await phoneReach(port);
+            break;
+          case "phones.serve":
+            result = await enablePhoneServe(port);
             break;
           case "devices.revokeSelf":
             // Only the caller's own credential. Sessions and other devices
@@ -721,4 +748,7 @@ export function createHostServer(
       }
     },
   );
+  // Long polls end with the server, rather than holding its close open.
+  server.once("close", () => phones.close());
+  return server;
 }

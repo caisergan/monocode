@@ -3,6 +3,7 @@ import {
   use,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -13,6 +14,7 @@ import Constants from "expo-constants";
 import * as SecureStore from "expo-secure-store";
 import Storage from "expo-sqlite/kv-store";
 import type {
+  ApprovalPrompt,
   Project,
   Mono,
   SessionSummary,
@@ -29,6 +31,7 @@ import {
   type Desktop,
   type Identity,
 } from "./nativeLink";
+import type { MachineInvitation } from "./invitation";
 import { normalizeSelection, type MobileSelection } from "./selection";
 
 export type Catalog = {
@@ -44,23 +47,38 @@ export type Catalog = {
   push?: boolean;
   /** The desktop reads and saves a Mono's soul and memory for the phone. */
   monoFiles?: boolean;
+  /** Sends the approval an agent waits on, for the phone to answer; a
+   *  machine's host does, a desktop leaves approvals to itself. */
+  approvals?: boolean;
 };
 const EMPTY: Catalog = { projects: [], monos: [], sessions: [] };
+/** The connection in use, as older builds kept their one desktop. */
 const PAIRING = "monocode.mobile.pairing";
+/** Every desktop and machine paired, most recently used first. */
+const CONNECTIONS = "monocode.mobile.connections";
 const IDENTITY = "monocode.mobile.identity";
 const key = (fingerprint: string, kind: string) =>
   `monocode.mobile.${fingerprint}.${kind}`;
+/** A machine's credential, kept as this installation's identity is. */
+const tokenKey = (environmentId: string) => `monocode.mobile.machine.${environmentId}`;
+const SECURE = { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY };
 type Connection = {
   restoring: boolean;
   pairing: Pairing | null;
+  /** Everything this phone is paired with, the one in use first. */
+  connections: Desktop[];
   catalog: Catalog;
   selection: MobileSelection | null;
   connected: boolean;
   working: boolean;
   error: string | null;
-  pair: (text: string) => Promise<void>;
+  /** Pairs with a desktop's or a machine's code and switches to it; true once paired. */
+  pair: (text: string) => Promise<boolean>;
   refresh: () => Promise<void>;
   select: (selection: MobileSelection) => Promise<void>;
+  /** Uses another paired desktop or machine, by its fingerprint. */
+  switchTo: (fingerprint: string) => Promise<void>;
+  /** Unpairs the one in use, then carries on with the next one paired. */
   disconnect: () => Promise<void>;
   command: <T>(method: string, params?: object, id?: string) => Promise<T>;
 };
@@ -68,6 +86,11 @@ const Context = createContext<Connection | null>(null);
 export function ConnectionProvider({ children }: { children: ReactNode }) {
   const [restoring, setRestoring] = useState(true);
   const [pairing, setPairing] = useState<Pairing | null>(null);
+  const [connections, setConnections] = useState<Desktop[]>([]);
+  const connectionsRef = useRef(connections);
+  useLayoutEffect(() => {
+    connectionsRef.current = connections;
+  }, [connections]);
   const [catalog, setCatalog] = useState<Catalog>(EMPTY);
   const [selection, setSelection] = useState<MobileSelection | null>(null);
   const [connected, setConnected] = useState(false);
@@ -78,31 +101,58 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
   const lastCatalog = useRef<string | null>(null);
   const pairingNow = useRef(false);
   const generation = useRef(0);
+  /** Makes `desktop` the connection in use, with its saved choices and workspace. */
+  const activate = useCallback(async (desktop: Desktop, identity?: Identity) => {
+    const value: Pairing = desktop.machine
+      ? { desktop, token: (await SecureStore.getItemAsync(tokenKey(desktop.machine.environmentId))) ?? "" }
+      : {
+          desktop,
+          identity: identity ?? JSON.parse((await SecureStore.getItemAsync(IDENTITY)) ?? "null"),
+        };
+    if (desktop.machine ? !value.token : !value.identity)
+      throw new Error(`Pair with ${desktop.name} again.`);
+    const [chosen, saved] = await Promise.all([
+      Storage.getItem(key(desktop.fingerprint, "selection")),
+      Storage.getItem(key(desktop.fingerprint, "catalog")),
+    ]);
+    generation.current++;
+    active.current = value;
+    lastCatalog.current = null;
+    setPairing(value);
+    setConnected(false);
+    setError(null);
+    setSelection(chosen ? normalizeSelection(JSON.parse(chosen)) : null);
+    setCatalog(saved ? JSON.parse(saved) : EMPTY);
+    await Storage.setItem(PAIRING, JSON.stringify(desktop));
+    return value;
+  }, []);
+  /** Saves the list, the one in use first. */
+  const remember = useCallback(async (list: Desktop[]) => {
+    connectionsRef.current = list;
+    setConnections(list);
+    await Storage.setItem(CONNECTIONS, JSON.stringify(list));
+  }, []);
   useEffect(() => {
     let disposed = false;
     void (async () => {
       try {
-        const [desktop, identity] = await Promise.all([
+        const [desktop, saved] = await Promise.all([
           Storage.getItem(PAIRING),
-          SecureStore.getItemAsync(IDENTITY),
+          Storage.getItem(CONNECTIONS),
         ]);
-        if (disposed || !desktop || !identity) return;
-        const value: Pairing = {
-          desktop: JSON.parse(desktop),
-          identity: JSON.parse(identity),
-        };
-        const [chosen, saved] = await Promise.all([
-          Storage.getItem(key(value.desktop.fingerprint, "selection")),
-          Storage.getItem(key(value.desktop.fingerprint, "catalog")),
-        ]);
+        // An older build kept its one desktop only.
+        const current: Desktop | null = desktop ? JSON.parse(desktop) : null;
+        let list: Desktop[] = saved ? JSON.parse(saved) : [];
+        if (current && !list.some((entry) => entry.fingerprint === current.fingerprint))
+          list = [current, ...list];
         if (disposed) return;
-        active.current = value;
-        setPairing(value);
-        setSelection(chosen ? normalizeSelection(JSON.parse(chosen)) : null);
-        if (saved) setCatalog(JSON.parse(saved));
+        setConnections(list);
+        if (!saved && list.length) await Storage.setItem(CONNECTIONS, JSON.stringify(list));
+        if (!current || disposed) return;
+        await activate(current);
       } catch {
         if (!disposed)
-          setError("Could not restore the desktop connection. Connect again.");
+          setError("Could not restore the connection. Connect again.");
       } finally {
         if (!disposed) setRestoring(false);
       }
@@ -110,7 +160,7 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
     return () => {
       disposed = true;
     };
-  }, []);
+  }, [activate]);
   const refresh = useCallback(async () => {
     const value = active.current;
     if (!value || refreshing.current) return;
@@ -124,10 +174,16 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
         !Array.isArray(next.monos) ||
         !Array.isArray(next.sessions)
       )
-        throw new Error("Desktop sent an invalid workspace");
-      if (next.addresses?.length) {
+        throw new Error(`${value.desktop.machine ? "Machine" : "Desktop"} sent an invalid workspace`);
+      if (next.addresses?.length && !value.desktop.machine) {
         value.desktop.addresses = next.addresses;
         await Storage.setItem(PAIRING, JSON.stringify(value.desktop));
+        // The saved list too, so switching back reaches it where it is now.
+        await remember(
+          connectionsRef.current.map((entry) =>
+            entry.fingerprint === value.desktop.fingerprint ? value.desktop : entry,
+          ),
+        );
       }
       // The poll repeats every few seconds; only a changed workspace is saved
       // and re-rendered.
@@ -149,7 +205,7 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
     } finally {
       refreshing.current = false;
     }
-  }, []);
+  }, [remember]);
   useEffect(() => {
     if (!pairing) return;
     let disposed = false;
@@ -169,12 +225,19 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
     };
   }, [pairing, refresh]);
   const pair = useCallback(async (text: string) => {
-    if (pairingNow.current) return;
+    if (pairingNow.current) return false;
     pairingNow.current = true;
     setWorking(true);
     setError(null);
     try {
       const invitation = parseInvitation(text);
+      if (invitation.kind === "host") {
+        const desktop = await enrollMachine(invitation);
+        await remember([desktop, ...connectionsRef.current.filter((entry) => entry.fingerprint !== desktop.fingerprint)]);
+        await activate(desktop);
+        await refresh();
+        return true;
+      }
       const existing = await SecureStore.getItemAsync(IDENTITY);
       const identity = existing
         ? (JSON.parse(existing) as Identity)
@@ -207,25 +270,29 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
           },
         },
       });
-      const value = { desktop, identity };
-      await Storage.setItem(PAIRING, JSON.stringify(desktop));
-      const chosen = await Storage.getItem(
-        key(desktop.fingerprint, "selection"),
-      );
-      generation.current++;
-      active.current = value;
-      setPairing(value);
-      setCatalog(EMPTY);
-      lastCatalog.current = null;
-      setSelection(chosen ? normalizeSelection(JSON.parse(chosen)) : null);
+      await remember([desktop, ...connectionsRef.current.filter((entry) => entry.fingerprint !== desktop.fingerprint)]);
+      await activate(desktop, identity);
       await refresh();
+      return true;
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
+      return false;
     } finally {
       pairingNow.current = false;
       setWorking(false);
     }
-  }, [refresh]);
+  }, [activate, refresh, remember]);
+  const switchTo = useCallback(async (fingerprint: string) => {
+    const desktop = connectionsRef.current.find((entry) => entry.fingerprint === fingerprint);
+    if (!desktop || active.current?.desktop.fingerprint === fingerprint) return;
+    // The one left keeps its workspace for next time.
+    const previous = active.current?.desktop.fingerprint;
+    if (previous && lastCatalog.current)
+      await Storage.setItem(key(previous, "catalog"), lastCatalog.current);
+    await remember([desktop, ...connectionsRef.current.filter((entry) => entry !== desktop)]);
+    await activate(desktop);
+    void refresh();
+  }, [activate, refresh, remember]);
   const select = useCallback(async (value: MobileSelection) => {
     const pairing = active.current;
     if (!pairing) return;
@@ -246,12 +313,27 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
     setSelection(null);
     setError(null);
     await Storage.removeItem(PAIRING);
+    const rest = connectionsRef.current.filter(
+      (entry) => entry.fingerprint !== value?.desktop.fingerprint,
+    );
+    await remember(rest);
     if (value) {
-      void request(value, "device.leave").catch(() => {});
+      // Told before its credential goes, so a machine revokes it.
+      void request(value, "device.leave")
+        .catch(() => {})
+        .finally(() => {
+          const machine = value.desktop.machine;
+          if (machine) void SecureStore.deleteItemAsync(tokenKey(machine.environmentId));
+        });
       await Storage.removeItem(key(value.desktop.fingerprint, "catalog"));
     }
     // Keep this installation's identity, so a new invitation can recover cleanly.
-  }, []);
+    // Carry on with the next one paired, if there is one.
+    if (rest[0]) {
+      await activate(rest[0]).catch(() => undefined);
+      void refresh();
+    }
+  }, [activate, refresh, remember]);
   const command = useCallback(
     async <T,>(
       method: string,
@@ -259,7 +341,7 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
       id?: string,
     ): Promise<T> => {
       const value = active.current;
-      if (!value) throw new Error("Connect your desktop first");
+      if (!value) throw new Error("Connect to your desktop or a machine first");
       return request<T>(value, method, params, id);
     },
     [],
@@ -269,6 +351,7 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
     () => ({
       restoring,
       pairing,
+      connections,
       catalog,
       selection,
       connected,
@@ -277,12 +360,14 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
       pair,
       refresh,
       select,
+      switchTo,
       disconnect,
       command,
     }),
     [
       restoring,
       pairing,
+      connections,
       catalog,
       selection,
       connected,
@@ -291,6 +376,7 @@ export function ConnectionProvider({ children }: { children: ReactNode }) {
       pair,
       refresh,
       select,
+      switchTo,
       disconnect,
       command,
     ],
@@ -333,13 +419,53 @@ export type Conversation = {
   /** What the agent waits on the user to answer; absent from an older desktop. */
   question?: QuestionPrompt | null;
   usageLimit?: UsageLimitState | null;
+  /** What the agent waits on the user to allow; only a machine sends it. */
+  approval?: ApprovalPrompt | null;
 };
+
+/**
+ * Pairs with a machine's host: its one-use code buys this phone a credential,
+ * kept in secure storage. The machine is then saved as a desktop is, keyed by
+ * its host's ID, and reached at its Tailscale address.
+ */
+async function enrollMachine(invitation: MachineInvitation): Promise<Desktop> {
+  const enrolled = await nativeCall<{
+    token: string;
+    deviceId: string;
+    name: string;
+    environmentId: string;
+  }>({
+    operation: "exchange",
+    host: { url: invitation.url, token: "" },
+    request: {
+      version: 1,
+      id: "enroll",
+      method: "device.enroll",
+      params: { code: invitation.code, name: deviceName() },
+    },
+  });
+  if (enrolled.environmentId !== invitation.environmentId)
+    throw new Error("That address answered as a different machine. Make a new code.");
+  await SecureStore.setItemAsync(tokenKey(enrolled.environmentId), enrolled.token, SECURE);
+  return {
+    name: enrolled.name || invitation.name,
+    fingerprint: `machine-${enrolled.environmentId}`,
+    addresses: [],
+    deviceId: enrolled.deviceId,
+    machine: { url: invitation.url, environmentId: enrolled.environmentId },
+  };
+}
 
 /** What the desktop lists this phone as, e.g. "Nick's iPhone". */
 function deviceName() {
   return (
     Constants.deviceName?.trim() || (Platform.OS === "ios" ? "iPhone" : "Phone")
   );
+}
+
+/** What the phone is connected to, for its wording: "desktop" or "machine". */
+export function useLinkNoun(): "desktop" | "machine" {
+  return useConnection().pairing?.desktop.machine ? "machine" : "desktop";
 }
 
 /** Whether the desktop can show and change a Mono's profile, reset or delete

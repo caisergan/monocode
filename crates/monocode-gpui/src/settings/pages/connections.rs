@@ -34,12 +34,12 @@ pub(in crate::settings) struct ConnectionsState {
     advanced: bool,
     initialized: bool,
     loaded: bool,
-    machines: Vec<Machine>,
+    pub(super) machines: Vec<Machine>,
     status: HashMap<String, String>,
     needs_update: HashSet<String>,
     busy: bool,
     error: String,
-    notice: String,
+    pub(super) notice: String,
     updating: Option<String>,
     removing: Option<String>,
     revoking: bool,
@@ -52,6 +52,10 @@ pub(in crate::settings) struct ConnectionsState {
     refresh: Option<Task<()>>,
     progress: AnchorSlot,
     reveal_prompt: bool,
+    /// Machines whose host pairs phones for use without this desktop.
+    phones: HashSet<String>,
+    /// A phone being paired with one of them.
+    pub(super) phone: Option<super::machine_phone::PhonePairing>,
 }
 
 /// Dropping Settings while an SSH job is waiting must terminate its askpass wait.
@@ -252,6 +256,7 @@ impl SettingsView {
 
     pub(in crate::settings) fn leave_connections(&mut self, cx: &mut Context<Self>) {
         self.connections.generation += 1;
+        self.connections.phone = None;
         self.connections.poll = None;
         self.connections.timer = None;
         self.connections.refresh = None;
@@ -357,7 +362,11 @@ impl SettingsView {
                         )
                         .and_then(|host| {
                             let head = head.as_deref().filter(|_| machine.ssh.is_some());
+                            let phones = host["capabilities"]
+                                .as_array()
+                                .is_some_and(|all| all.iter().any(|c| c == "phones.direct"));
                             describe_health(&machine.environment_id, &host, head)
+                                .map(|health| (health, phones))
                         });
                     (machine.id.clone(), health)
                 })
@@ -377,7 +386,12 @@ impl SettingsView {
                         this.connections.machines = machines;
                         for (id, health) in statuses {
                             match health {
-                                Ok(health) => {
+                                Ok((health, phones)) => {
+                                    if phones {
+                                        this.connections.phones.insert(id.clone());
+                                    } else {
+                                        this.connections.phones.remove(&id);
+                                    }
                                     this.connections.status.insert(id.clone(), health.label);
                                     if health.needs_update {
                                         this.connections.needs_update.insert(id);
@@ -743,6 +757,8 @@ impl SettingsView {
                     })
                     .unwrap_or_else(|| machine.endpoint.clone());
                 let update = self.connections.needs_update.contains(&id);
+                let phones = self.connections.phones.contains(&id);
+                let phone_id = id.clone();
                 let reconnect_id = id.clone();
                 let update_id = id.clone();
                 let remove_id = id.clone();
@@ -754,6 +770,10 @@ impl SettingsView {
                             .child(paragraph(endpoint).mt_1())
                             .child(paragraph(self.connections.status.get(&id).cloned().unwrap_or_else(|| "Checking connection…".into())).mt_1().text_color(content(0.5)))
                             .when(machine.ssh.is_some() && update, |d| d.child(paragraph("Updating restarts the host and interrupts active agent turns.").mt_1().text_size(px(11.)))))
+                        // A phone paired here works with the machine while this computer sleeps.
+                        .when(phones, |d| d.child(secondary_button(SharedString::from(format!("pair-phone-{id}")), format!("Pair a phone with {}", machine.name), false, disabled)
+                            .child(icon("smart-phone", 16.)).child("Pair phone")
+                            .on_click(cx.listener(move |this, _, _, cx| this.pair_machine_phone(phone_id.clone(), cx)))))
                         .when(machine.ssh.is_some(), |d| d.child(div().flex().items_center().gap_2()
                             .when(update, |d| d.child(secondary_button(SharedString::from(format!("update-host-{id}")), "Update Host", false, disabled)
                                 .child("Update Host").on_click(cx.listener(move |this, _, _, cx| this.begin_connection(Some(update_id.clone()), true, cx)))))

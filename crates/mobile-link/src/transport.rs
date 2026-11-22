@@ -431,7 +431,7 @@ const REQUEST_UPLOAD: Duration = Duration::from_secs(120);
 
 /// The desktop's 30 seconds to answer, and the time to upload the request:
 /// most are tiny, but one carrying attachments can be megabytes.
-fn exchange_timeout(request: &Value) -> Duration {
+pub(crate) fn exchange_timeout(request: &Value) -> Duration {
     let size = serde_json::to_vec(request).map_or(0, |bytes| bytes.len()) as u64;
     Duration::from_secs(35) + Duration::from_secs(size / (256 * 1024)).min(REQUEST_UPLOAD)
 }
@@ -462,14 +462,22 @@ pub async fn exchange(
 
 /// A watch the phone holds open: updates arrive as the desktop sends them.
 pub struct Watch {
-    key: String,
-    endpoint: quinn::Endpoint,
-    connection: quinn::Connection,
+    link: WatchLink,
     updates: tokio::sync::Mutex<mpsc::UnboundedReceiver<LinkResult<Value>>>,
     ready: Arc<Notify>,
     task: tokio::task::JoinHandle<()>,
     /// Set once the stream failed or the desktop ended it.
     ended: Arc<AtomicBool>,
+}
+/// What a watch reads from: a desktop's QUIC stream, or a host's long polls.
+pub(crate) enum WatchLink {
+    Quic {
+        key: String,
+        endpoint: quinn::Endpoint,
+        connection: quinn::Connection,
+    },
+    /// Closing tells the host, so it stops keeping the watch's place.
+    Host(Box<dyn Fn() + Send + Sync>),
 }
 impl Watch {
     /// Wait without consuming/projecting data, so the layout worker remains
@@ -512,11 +520,42 @@ impl Watch {
         // Dropping the task's streams finishes ours and stops the desktop's.
         self.task.abort();
         self.ready.notify_waiters();
-        if self.ended.load(Ordering::Relaxed) || self.connection.close_reason().is_some() {
-            self.connection.close(0_u32.into(), b"Stopped watching");
-            let _ = timeout(Duration::from_secs(2), self.endpoint.wait_idle()).await;
-        } else {
-            give(&self.key, self.endpoint.clone(), self.connection.clone());
+        match &self.link {
+            WatchLink::Quic {
+                key,
+                endpoint,
+                connection,
+            } => {
+                if self.ended.load(Ordering::Relaxed) || connection.close_reason().is_some() {
+                    connection.close(0_u32.into(), b"Stopped watching");
+                    let _ = timeout(Duration::from_secs(2), endpoint.wait_idle()).await;
+                } else {
+                    give(key, endpoint.clone(), connection.clone());
+                }
+            }
+            WatchLink::Host(stop) => {
+                if !self.ended.load(Ordering::Relaxed) {
+                    stop();
+                }
+            }
+        }
+    }
+
+    /// A watch fed by `task`, which sends each update and then any error
+    /// that ends it, notifying `ready` as they arrive.
+    pub(crate) fn new(
+        link: WatchLink,
+        updates: mpsc::UnboundedReceiver<LinkResult<Value>>,
+        ready: Arc<Notify>,
+        task: tokio::task::JoinHandle<()>,
+        ended: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            link,
+            updates: tokio::sync::Mutex::new(updates),
+            ready,
+            task,
+            ended,
         }
     }
 }
@@ -590,15 +629,17 @@ pub async fn watch(
             incoming.notify_waiters();
         }
     });
-    Ok(Watch {
-        key,
-        endpoint,
-        connection,
-        updates: tokio::sync::Mutex::new(updates),
+    Ok(Watch::new(
+        WatchLink::Quic {
+            key,
+            endpoint,
+            connection,
+        },
+        updates,
         ready,
         task,
         ended,
-    })
+    ))
 }
 
 #[cfg(test)]

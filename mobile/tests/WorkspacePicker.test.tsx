@@ -20,6 +20,10 @@ vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ t
 vi.mock("@/features/connection/ConnectionProvider", () => ({
   useConnection: () => ({ connected: true, selection: { projectIds: [], monoIds: [] },
     catalog: { projects: [], monos: [] }, select: vi.fn(), refresh: vi.fn() }),
+  useLinkNoun: () => "desktop",
+}));
+vi.mock("@/features/connection/PairingScanner", () => ({
+  usePairingScanner: () => ({ scan: vi.fn(), paste: vi.fn(), ask: vi.fn(), cameraError: "", elements: null }),
 }));
 vi.mock("@/features/connection/ConnectScreen", () => ({ connectionStyleSheet: () => ({}) }));
 vi.mock("@/features/mascots/PixelMascot", () => ({ MonoMascot: () => null }));

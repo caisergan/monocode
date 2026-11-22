@@ -452,7 +452,11 @@ final class TranscriptSession {
     lock.unlock()
   }
   private func connectionInput(_ operation: String) -> [String: Any] {
-    [
+    // A machine's host, reached by its address and this phone's credential.
+    if let host = configuration["host"] {
+      return ["operation": operation, "host": host]
+    }
+    return [
       "operation": operation, "identity": configuration["identity"] ?? [:],
       "pin": configuration["pin"] ?? "", "addresses": configuration["addresses"] ?? [],
     ]

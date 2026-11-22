@@ -18,6 +18,9 @@ serde_json = "1"
 sha2 = "0.10"
 socket2 = "0.6"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "time", "io-util", "sync", "macros"] }
+# A host on another machine, over Tailscale Serve (see src/machine.rs).
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
+url = "2"
 x509-parser = "0.18"
 
 [target.'cfg(target_os = "android")'.dependencies]

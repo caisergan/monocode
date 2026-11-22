@@ -23,7 +23,8 @@ import { GradualBlur } from "@/ui/GradualBlur";
 import { Icon } from "@/ui/Icon";
 import { LiquidView } from "@/ui/LiquidView";
 import { withAlpha, radii, themedStyles, useColors } from "@/ui/theme";
-import { useConnection } from "./ConnectionProvider";
+import { useConnection, useLinkNoun } from "./ConnectionProvider";
+import { usePairingScanner } from "./PairingScanner";
 import { connectionStyleSheet } from "./ConnectScreen";
 import { MONOS_ENABLED, type MobileSelection } from "./selection";
 
@@ -48,6 +49,9 @@ export function WorkspacePicker({
   const colors = useColors();
   const styles = useStyles();
   const connection = useConnection();
+  const noun = useLinkNoun();
+  // Another one pairs beside this; the phone keeps both and switches to it.
+  const scanner = usePairingScanner((link) => void connection.pair(link));
   const insets = useSafeAreaInsets();
   const androidHeader = editing && Platform.OS === "android";
   const [draft, setDraft] = useState<MobileSelection>(
@@ -106,7 +110,7 @@ export function WorkspacePicker({
           <>
             <Text style={styles.title}>Your mobile{"\n"}workspace</Text>
             <Text style={styles.subtitle}>
-              Pick the {MONOS_ENABLED ? "projects and monos" : "projects"} you
+              Pick the {MONOS_ENABLED && noun === "desktop" ? "projects and monos" : "projects"} you
               want here.{"\n"}You can change this anytime in Settings.
             </Text>
           </>
@@ -201,15 +205,16 @@ export function WorkspacePicker({
         </LiquidView>
         {!connection.connected || !count ? (
           <Pressable hitSlop={8} onPress={() => void connection.refresh()}>
-            <Text style={styles.link}>Refresh desktop</Text>
+            <Text style={styles.link}>Refresh {noun}</Text>
           </Pressable>
         ) : null}
         {editing ? null : (
-          <Pressable hitSlop={8} onPress={() => void connection.disconnect()}>
-            <Text style={styles.link}>Connect another desktop</Text>
+          <Pressable hitSlop={8} onPress={scanner.ask}>
+            <Text style={styles.link}>Connect another desktop or machine</Text>
           </Pressable>
         )}
       </View>
+      {editing ? null : scanner.elements}
     </>
   );
   // Keep the ScrollView at the screen root, like SettingsPage. UIKit then

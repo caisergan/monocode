@@ -481,6 +481,11 @@ fn supported_remote_method(method: &str) -> bool {
             | "git.index"
             | "git.fileDiff"
             | "git.action"
+            // Pairing a phone with the host, for use without this desktop.
+            | "phones.invite"
+            | "phones.inviteStatus"
+            | "phones.reach"
+            | "phones.serve"
     )
 }
 
@@ -980,6 +985,9 @@ mod tests {
             "git.worktreeCreate",
             "attachments.upload",
             "attachments.read",
+            "phones.invite",
+            "phones.inviteStatus",
+            "phones.serve",
         ] {
             assert!(supported_remote_method(method), "{method}");
         }

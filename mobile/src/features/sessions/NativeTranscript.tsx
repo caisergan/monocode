@@ -24,7 +24,7 @@ import {
 import { withTiming } from "react-native-reanimated";
 
 import { useConnection } from "@/features/connection/ConnectionProvider";
-import { hasNativeTranscript } from "@/features/connection/nativeLink";
+import { hasNativeTranscript, linkFor } from "@/features/connection/nativeLink";
 import { useCollapsedToolCalls } from "@/features/settings/toolCalls";
 import {
   useNativeTranscript,
@@ -128,9 +128,9 @@ export function NativeTranscript({
       pairing
         ? JSON.stringify({
             conversationId,
-            identity: pairing.identity,
+            // The fingerprint names the transcript's cache for either kind.
             pin: pairing.desktop.fingerprint,
-            addresses: pairing.desktop.addresses,
+            ...linkFor(pairing),
           })
         : "",
     [pairing, conversationId],

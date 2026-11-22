@@ -1,10 +1,7 @@
-import { CameraView, useCameraPermissions } from "expo-camera";
-import { useRef, useState } from "react";
+import { useRef } from "react";
 import {
   ActivityIndicator,
   Image,
-  Modal,
-  Pressable,
   StyleSheet,
   Text,
   View,
@@ -28,7 +25,7 @@ import { AsciiField } from "@/features/background/AsciiField";
 import { MascotRain } from "@/features/mascots/MascotRain";
 import type { Collider } from "@/features/mascots/mascotPhysics";
 import { useConnection } from "./ConnectionProvider";
-import { PairingLinkSheet } from "./PairingLinkSheet";
+import { usePairingScanner } from "./PairingScanner";
 
 const EASE = Easing.out(Easing.cubic);
 
@@ -39,25 +36,11 @@ const EASE = Easing.out(Easing.cubic);
 // about as the phone tilts. In the light or dark palette, as the app is.
 export function ConnectScreen() {
   const colors = useColors();
-  const connectionStyles = useConnectionStyles();
   const styles = useStyles();
   const connection = useConnection();
   const insets = useSafeAreaInsets();
-  const [permission, requestPermission] = useCameraPermissions();
-  const [scanning, setScanning] = useState(false);
-  const [pasting, setPasting] = useState(false);
-  const [cameraError, setCameraError] = useState("");
-  const scan = async () => {
-    const result = permission?.granted ? permission : await requestPermission();
-    if (result.granted) {
-      setCameraError("");
-      setScanning(true);
-    } else
-      setCameraError(
-        "Allow camera access in your phone’s settings, or paste a pairing link.",
-      );
-  };
-  const error = connection.error || cameraError;
+  const scanner = usePairingScanner((link) => void connection.pair(link));
+  const error = connection.error || scanner.cameraError;
   const colliders = useScreenColliders();
   return (
     <View style={styles.root}>
@@ -104,8 +87,8 @@ export function ConnectScreen() {
             onLayout={colliders.layout("subtitle")}
             onTextLayout={colliders.lines("subtitle")}
           >
-            Pair this phone with Monocode on your desktop to pick up your
-            sessions on the go.
+            Pair this phone with Monocode on your desktop, or with one of its
+            machines, to pick up your sessions on the go.
           </Text>
         </Animated.View>
         <Animated.View
@@ -120,7 +103,7 @@ export function ConnectScreen() {
           <View onLayout={colliders.layout("primary")}>
             {/* Glass in the theme's inverse: white on dark, black on light. */}
             <LiquidView
-              onPress={() => void scan()}
+              onPress={() => void scanner.scan()}
               disabled={connection.working}
               accessibilityLabel="Connect to desktop"
               pressedScale={1.03}
@@ -133,7 +116,7 @@ export function ConnectScreen() {
           </View>
           <View onLayout={colliders.layout("secondary")}>
             <LiquidView
-              onPress={() => setPasting(true)}
+              onPress={scanner.paste}
               disabled={connection.working}
               accessibilityLabel="Paste a pairing link"
               pressedScale={1.03}
@@ -145,40 +128,7 @@ export function ConnectScreen() {
           </View>
         </Animated.View>
       </View>
-      <PairingLinkSheet
-        isPresented={pasting}
-        onDismiss={() => setPasting(false)}
-        onConnect={(link) => {
-          setPasting(false);
-          void connection.pair(link);
-        }}
-      />
-      <Modal
-        visible={scanning}
-        animationType="slide"
-        onRequestClose={() => setScanning(false)}
-      >
-        <View style={{ flex: 1, backgroundColor: colors.background }}>
-          {scanning ? (
-            <CameraView
-              style={{ flex: 1 }}
-              barcodeScannerSettings={{ barcodeTypes: ["qr"] }}
-              onBarcodeScanned={({ data }) => {
-                setScanning(false);
-                void connection.pair(data);
-              }}
-            />
-          ) : null}
-          <View style={{ padding: 24, paddingBottom: insets.bottom + 24 }}>
-            <Text style={[connectionStyles.subtitle, { textAlign: "center" }]}>
-              Scan the code in desktop Settings → Connections
-            </Text>
-            <Pressable onPress={() => setScanning(false)}>
-              <Text style={connectionStyles.secondary}>Cancel</Text>
-            </Pressable>
-          </View>
-        </View>
-      </Modal>
+      {scanner.elements}
     </View>
   );
 }

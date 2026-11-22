@@ -39,6 +39,10 @@ Workspace lists refresh while the phone is active. Opening a conversation reads 
 
 The transport is an Expo local native module in `modules/monocode-link`, built by `scripts/build-native-link.mjs`. **Expo Go cannot load it**; rebuild the development app after changing native code. `npm run native:ios` and `npm run native:android` build the library separately. Generated native libraries and platform folders are ignored by Git.
 
+## Pair with a machine
+
+The app can also work with a MonoCode host on another machine without the desktop running. In desktop **Settings → Connections**, choose **Pair phone** on the machine and scan its code; the phone reaches the host through Tailscale Serve (see `docs/remote-access.md`). Requests go to the host's `/mobile` route over HTTPS, or HTTP inside the tailnet, through the same native module: `crates/mobile-link/src/machine.rs` carries them, and the host answers in `host/mobile.ts` with the same shapes a desktop sends. **Settings → Connections** on the phone switches between paired desktops and machines. A machine also sends the approval its agent waits on, which the phone answers from a card over the composer.
+
 ## Switch provider accounts
 
 Tap the model in the composer, then **Account**, to choose a Claude Code or Codex profile saved on your desktop. Each provider keeps its own selection. Choosing another account from an existing chat opens a new conversation with the same model and permissions; the original stays in history. Add accounts and complete sign-in in desktop **Settings → Accounts**.

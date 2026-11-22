@@ -25,7 +25,7 @@ import {
 import { selectedWorkspace } from "@/features/connection/selection";
 import type { ModelCatalog, ModelChoice } from "@/features/models/types";
 import { toWire, type Attachment } from "@/features/sessions/attachments";
-import type { DisplayedQuestionPrompt, Message, UsageLimitState, Mono, MonoSubsessions, Project, QuestionPrompt, QuestionReply, SessionSummary, Turn, TurnItem } from "./types";
+import type { ApprovalPrompt, DisplayedQuestionPrompt, Message, UsageLimitState, Mono, MonoSubsessions, Project, QuestionPrompt, QuestionReply, SessionSummary, Turn, TurnItem } from "./types";
 import { applyFrames, type WatchFrame } from "./watchUpdates";
 /**
  * The workspace: what the desktop has and what can be done with it. Changes
@@ -73,6 +73,8 @@ type Workspace = {
   ) => Promise<void>;
   /** Stops a timed question skipping itself while it is being answered, as on desktop. */
   keepQuestionOpen: (conversationId: string, requestId: number) => Promise<void>;
+  /** Allows or denies what a machine's agent waits on; its card goes at once. */
+  approve: (conversationId: string, requestId: number, decision: "allow" | "deny") => Promise<void>;
   /** A page of a project's sessions, newest first, beyond the recent ones the poll carries. */
   listSessions: (
     projectId: string,
@@ -124,6 +126,8 @@ type Status = {
   /** What each conversation's agent waits on the user to answer. */
   questions: Record<string, DisplayedQuestionPrompt>;
   usageLimits: Record<string, UsageLimitState>;
+  /** What each conversation's agent waits on the user to allow. */
+  approvals: Record<string, ApprovalPrompt>;
 };
 export type SessionPage = { sessions: SessionSummary[]; hasMore: boolean };
 /** Narrows a page to sessions active since a time, and without some providers.
@@ -152,6 +156,8 @@ export type NativeTranscriptStatus = {
   /** Absent from a native build that predates questions. */
   question?: QuestionPrompt | null;
   usageLimit?: UsageLimitState | null;
+  /** A machine's pending approval; absent from native builds before machines. */
+  approval?: ApprovalPrompt | null;
   /** Persistent across coalesced snapshots; absent from older native builds. */
   questionGeneration?: number;
 };
@@ -214,6 +220,22 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       : withoutKey(previous, id));
   }, []);
   const usagePending = useRef(new Set<string>());
+  const [approvals, setApprovals] = useState<Record<string, ApprovalPrompt>>({});
+  // The request each conversation allowed or denied here last: a frame sent
+  // before the machine took the answer must not bring its card back.
+  const decided = useRef(new Map<string, number>());
+  const showApproval = useCallback((id: string, approval: ApprovalPrompt | null | undefined) => {
+    if (approval === undefined) return;
+    if (!approval) decided.current.delete(id);
+    const shown = approval && decided.current.get(id) !== approval.requestId ? approval : null;
+    setApprovals((previous) =>
+      shown
+        ? JSON.stringify(previous[id]) === JSON.stringify(shown)
+          ? previous
+          : withValue(previous, id, shown)
+        : withoutKey(previous, id),
+    );
+  }, []);
   const [questions, setQuestions] = useState<Record<string, DisplayedQuestionPrompt>>({});
   // The question each conversation answered here last. A frame sent before
   // the desktop took the answer must not bring its card back.
@@ -290,6 +312,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       setBusy((previous) => withValue(previous, id, result.busy));
       showQuestion(id, result.question);
       showUsageLimit(id, result.usageLimit);
+      showApproval(id, result.approval ?? null);
       // A read carries the whole conversation.
       setWindowOlder((previous) => withValue(previous, id, false));
       setErrors((previous) => withoutKey(previous, id));
@@ -298,7 +321,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       if (current.current.pairing === paired && !startupCatalogError(starting.current, id, message))
         setErrors((previous) => withValue(previous, id, message));
     }
-  }, [showQuestion, showUsageLimit]);
+  }, [showQuestion, showUsageLimit, showApproval]);
   // The open conversation streams from the desktop: one watch, whose frames
   // land as the desktop sends them. A desktop that cannot watch, or a dropped
   // link, falls back to reading once a second until a watch opens again.
@@ -337,6 +360,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       if (countUserItems(applied.turns) > 0) starting.current.delete(id);
       if (applied.busy !== undefined) setBusy((previous) => withValue(previous, id, applied.busy!));
       if (applied.usageLimit !== undefined) showUsageLimit(id, applied.usageLimit);
+      showApproval(id, applied.approval);
       for (const question of applied.questions) showQuestion(id, question);
       if (applied.older !== undefined)
         setWindowOlder((previous) => withValue(previous, id, applied.older!));
@@ -412,7 +436,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       save();
       if (watchId !== null) void closeWatch(watchId);
     };
-  }, [watching, desktop, read, showQuestion, showUsageLimit]);
+  }, [watching, desktop, read, showQuestion, showUsageLimit, showApproval]);
   const mutationIds = useRef(new Map<string, string>());
   const { command, refresh } = connection;
   const mutate = useCallback(async <T,>(method: string, params: object): Promise<T> => {
@@ -589,6 +613,18 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     },
     [mutate],
   );
+  const approve = useCallback(
+    async (conversationId: string, requestId: number, decision: "allow" | "deny") => {
+      await mutate("session.approve", { conversationId, requestId, decision });
+      decided.current.set(conversationId, requestId);
+      setApprovals((previous) =>
+        previous[conversationId]?.requestId === requestId
+          ? withoutKey(previous, conversationId)
+          : previous,
+      );
+    },
+    [mutate],
+  );
   const keepQuestionOpen = useCallback(
     async (conversationId: string, requestId: number) => {
       await mutate("session.keepQuestionOpen", { conversationId, requestId });
@@ -700,6 +736,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     setBusy((previous) => withValue(previous, id, status.busy));
     showQuestion(id, status.question, status.questionGeneration);
     showUsageLimit(id, status.usageLimit);
+    showApproval(id, status.approval);
     if (status.userCount > 0) starting.current.delete(id);
     if (!status.pendingId) {
       setPending((previous) => {
@@ -710,7 +747,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         return confirmed ? withoutKey(previous, id) : previous;
       });
     }
-  }, [showQuestion, showUsageLimit]);
+  }, [showQuestion, showUsageLimit, showApproval]);
   const workspace = useMemo<Workspace>(() => {
     const selected = selectedWorkspace(catalog, selection);
     const known = new Set(selected.sessions.map((session) => session.id));
@@ -741,6 +778,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       stop,
       answerQuestion,
       keepQuestionOpen,
+      approve,
       recoverUsage,
       listSessions,
       rememberSession,
@@ -767,6 +805,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     stop,
     answerQuestion,
     keepQuestionOpen,
+    approve,
     recoverUsage,
     listSessions,
     rememberSession,
@@ -783,8 +822,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     [messages, turns, pending, history, windowOlder],
   );
   const status = useMemo<Status>(
-    () => ({ busy, errors, questions, usageLimits }),
-    [busy, errors, questions, usageLimits],
+    () => ({ busy, errors, questions, usageLimits, approvals }),
+    [busy, errors, questions, usageLimits, approvals],
   );
   return (
     <WorkspaceContext value={workspace}>
@@ -826,6 +865,7 @@ export function useConversation(id: string | null, watching = true) {
     error: id ? (status.errors[id] ?? null) : null,
     question: id ? (status.questions[id] ?? null) : null,
     usageLimit: id ? (status.usageLimits[id] ?? null) : null,
+    approval: id ? (status.approvals[id] ?? null) : null,
   };
 }
 /** A conversation's turns as they stream in. Re-renders with every frame. */
