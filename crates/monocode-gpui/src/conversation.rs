@@ -34,7 +34,7 @@ use crate::{
     input,
     pickers::{
         ModelList, ModelPicked, cached_model_name, hosted_model, model_display_name, model_name,
-        remember_model,
+        model_source, remember_model, source_label,
     },
     popover::{
         Align, Anchor, AnchorSlot, Flyout, Menu, MenuAction, MenuEvent, MenuItem, MenuStyle, Side,
@@ -2291,6 +2291,21 @@ impl Conversation {
             name
         }
     }
+    /// The provider a Pi or OMP model comes from, when another one offers a
+    /// model of the same name.
+    fn model_source_note(&self) -> Option<SharedString> {
+        let kind = Kind::from_id(&self.summary.provider);
+        let id = self.model.as_deref().or(self.resolved_model.as_deref())?;
+        let source = model_source(kind, id)?;
+        let name = &self.catalog.iter().find(|model| model.id == id)?.name;
+        self.catalog
+            .iter()
+            .any(|model| {
+                model.name == *name
+                    && model_source(kind, &model.id).is_some_and(|other| other != source)
+            })
+            .then(|| source_label(source))
+    }
     /// A different provider is armed for the next submission. The running
     /// provider retains its controls, account and immutable turn identity.
     pub(super) fn apply_model_pick(
@@ -2808,9 +2823,14 @@ impl Conversation {
                     }
                 };
                 let id = serde_json::to_string(&(kind.id(), &model)).unwrap_or_default();
+                let source = model.as_deref().and_then(|id| model_source(kind, id));
+                let description: SharedString = match source {
+                    Some(source) => format!("{} · {}", kind.label(), source_label(source)).into(),
+                    None => kind.label().into(),
+                };
                 MenuAction::new(format!("recent-model:{id}"), name)
                     .image(kind.id())
-                    .description(kind.label())
+                    .description(description)
                     .checked(selected)
                     .into()
             })
@@ -3094,9 +3114,12 @@ impl Conversation {
                                             .max_w(px(220.))
                                             .flex_shrink(1.)
                                             .aria_label(format!(
-                                                "{}, {}{}",
+                                                "{}, {}{}{}",
                                                 kind.label(),
                                                 self.model_label(),
+                                                self.model_source_note()
+                                                    .map(|source| format!(", {source}"))
+                                                    .unwrap_or_default(),
                                                 trigger_effort
                                                     .as_ref()
                                                     .map(|effort| format!(", effort {effort}"))
@@ -3116,6 +3139,7 @@ impl Conversation {
                                             )
                                             .child(provider_icon(&self.summary.provider, 16.))
                                             .child(pill_label(self.model_label()))
+                                            .children(self.model_source_note().map(source_pill_note))
                                             .when_some(trigger_effort, |d, effort| {
                                                 d.child(
                                                     div()
@@ -4307,6 +4331,17 @@ fn bar_trigger(
         )
         .child(div().min_w_0().truncate().child(label))
 }
+/// Which provider the model pill's model comes from.
+fn source_pill_note(note: SharedString) -> impl IntoElement {
+    div()
+        .debug_selector(|| "composer-model-source".into())
+        .flex_shrink(1.)
+        .min_w_0()
+        .truncate()
+        .text_size(px(11.))
+        .text_color(content(0.5))
+        .child(note)
+}
 fn pill_label(label: impl Into<SharedString>) -> impl IntoElement {
     div()
         .min_w_0()
@@ -4416,6 +4451,44 @@ mod menu_tests {
                 );
             })
             .unwrap();
+    }
+
+    #[gpui::test]
+    fn the_model_pill_names_a_provider_only_to_tell_two_models_apart(cx: &mut TestAppContext) {
+        let window = conversation(cx);
+        let model = |id: &str, name: &str| Model {
+            alias_target: None,
+            id: id.into(),
+            name: name.into(),
+            efforts: Vec::new(),
+            default_effort: None,
+            fast: false,
+            thinking: false,
+            default: false,
+            tiers: Vec::new(),
+            controls: Vec::new(),
+        };
+        window
+            .update(cx, |view, _, cx| {
+                view.summary.provider = "omp".into();
+                view.catalog = vec![
+                    model("anthropic/opus", "Opus"),
+                    model("openrouter/opus", "Opus"),
+                    model("anthropic/sonnet", "Sonnet"),
+                ];
+                view.model = Some("anthropic/sonnet".into());
+                assert_eq!(view.model_source_note(), None);
+                view.model = None;
+                assert_eq!(view.model_source_note(), None);
+                view.model = Some("openrouter/opus".into());
+                assert_eq!(view.model_source_note().as_deref(), Some("OpenRouter"));
+                cx.set_global(crate::settings::Preferences::default());
+                cx.notify();
+            })
+            .unwrap();
+        let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.refresh().unwrap();
+        assert!(visual.debug_bounds("composer-model-source").is_some());
     }
 
     #[gpui::test]

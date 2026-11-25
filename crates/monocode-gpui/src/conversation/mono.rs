@@ -908,9 +908,12 @@ impl Conversation {
                                     .max_w(px(220.))
                                     .flex_shrink(1.)
                                     .aria_label(format!(
-                                        "{}, {}{}",
+                                        "{}, {}{}{}",
                                         kind.label(),
                                         self.model_label(),
+                                        self.model_source_note()
+                                            .map(|source| format!(", {source}"))
+                                            .unwrap_or_default(),
                                         trigger_effort
                                             .as_ref()
                                             .map(|effort| format!(", effort {effort}"))
@@ -931,6 +934,7 @@ impl Conversation {
                                     )
                                     .child(provider_icon(&self.summary.provider, 16.))
                                     .child(pill_label(self.model_label()))
+                                    .children(self.model_source_note().map(source_pill_note))
                                     .when_some(trigger_effort, |d, effort| {
                                         d.child(
                                             div()
