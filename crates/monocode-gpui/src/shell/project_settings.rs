@@ -105,6 +105,7 @@ impl Shell {
         Flyout {
             view: menu.into(),
             width,
+            max_width: None,
             padding: 8.,
             height: None,
             max_height: Some(640.),

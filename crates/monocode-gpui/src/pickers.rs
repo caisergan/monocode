@@ -3,11 +3,14 @@
 // owns a search field; arrows and Enter in it move and pick in the list.
 use crate::{input, theme::*, workspace::project_name};
 use gpui::{
-    AnyElement, Context, Entity, EventEmitter, FocusHandle, Focusable, Role, SharedString,
-    Subscription, Window, div, prelude::*, px,
+    AnyElement, Context, Entity, EventEmitter, FocusHandle, Focusable, KeyDownEvent, Role,
+    ScrollHandle, SharedString, Subscription, Window, div, prelude::*, px,
 };
 use monocode_core::catalog::{self, Model};
 use monocode_core::provider::{self, Kind};
+
+mod model_source;
+pub(crate) use model_source::{model_source, source_label};
 
 /// Friendly names used before a provider's live catalog arrives.
 pub(crate) const CLAUDE_MODELS: &[(&str, &str)] = &[
@@ -643,6 +646,340 @@ mod model_label_tests {
             })
             .unwrap();
     }
+
+    /// An OMP picker whose models come from three providers, one of them twice.
+    fn sourced_picker(
+        cx: &mut gpui::TestAppContext,
+    ) -> (gpui::WindowHandle<ModelList>, Picks, Subscription) {
+        cx.update(|cx| cx.set_global(crate::settings::Preferences::default()));
+        let picker = rendered_picker(
+            cx,
+            Kind::Omp,
+            "/work",
+            &[
+                "openrouter/opus",
+                "anthropic/opus",
+                "anthropic/sonnet",
+                "commandcode/vendor/flash",
+            ],
+        );
+        picker
+            .0
+            .update(cx, |list, _, cx| {
+                for model in &mut list.catalogs[0].1 {
+                    model.name = model.id.rsplit('/').next().unwrap().into();
+                }
+                cx.notify();
+            })
+            .unwrap();
+        picker
+    }
+    fn strip(list: &ModelList, cx: &gpui::App) -> Vec<(String, usize)> {
+        list.source_tabs(cx)
+            .iter()
+            .map(|tab| (tab.label().to_string(), tab.count))
+            .collect()
+    }
+    fn ids(list: &ModelList, cx: &gpui::App) -> Vec<String> {
+        list.entries(cx)
+            .into_iter()
+            .map(|entry| entry.id.unwrap_or_else(|| "default".into()))
+            .collect()
+    }
+    fn search(list: &mut ModelList, text: &str, cx: &mut Context<ModelList>) {
+        list.search
+            .update(cx, |search, cx| search.set_text(text.into(), cx));
+    }
+    fn tabs(expected: &[(&str, usize)]) -> Vec<(String, usize)> {
+        expected
+            .iter()
+            .map(|(name, count)| ((*name).to_owned(), *count))
+            .collect()
+    }
+
+    #[gpui::test]
+    fn a_provider_tab_narrows_the_list_to_its_models(cx: &mut gpui::TestAppContext) {
+        let (window, picks, _events) = sourced_picker(cx);
+        window
+            .update(cx, |list, _, cx| {
+                assert_eq!(
+                    strip(list, cx),
+                    tabs(&[
+                        ("All", 4),
+                        ("Anthropic", 2),
+                        ("commandcode", 1),
+                        ("OpenRouter", 1)
+                    ])
+                );
+                let entries = list.entries(cx);
+                assert_eq!(list.source_note(&entries[0]), None, "Default has none");
+                assert_eq!(list.source_note(&entries[1]).as_deref(), Some("OpenRouter"));
+                assert_eq!(entries[1].full_name(), "opus, OpenRouter");
+            })
+            .unwrap();
+        let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.refresh().unwrap();
+        let anthropic = visual.debug_bounds("model-source-1").unwrap();
+        visual.simulate_click(anthropic.center(), Default::default());
+        visual.refresh().unwrap();
+        window
+            .update(visual, |list, _, cx| {
+                assert_eq!(ids(list, cx), ["anthropic/opus", "anthropic/sonnet"]);
+                // The strip says it once, so the rows don't repeat it.
+                assert_eq!(list.source_note(&list.entries(cx)[0]), None);
+                list.pick(0, cx);
+            })
+            .unwrap();
+        assert_eq!(
+            picks.borrow().as_slice(),
+            [("omp", Some("anthropic/opus".to_owned()))]
+        );
+        let all = visual.debug_bounds("model-source-0").unwrap();
+        visual.simulate_click(all.center(), Default::default());
+        window
+            .update(visual, |list, _, cx| assert_eq!(ids(list, cx).len(), 5))
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn search_finds_a_provider_and_counts_matches_per_provider(cx: &mut gpui::TestAppContext) {
+        let (window, _, _events) = sourced_picker(cx);
+        window
+            .update(cx, |list, _, cx| {
+                search(list, "openrouter", cx);
+                assert_eq!(ids(list, cx), ["openrouter/opus"]);
+                search(list, "opus anthropic", cx);
+                assert_eq!(ids(list, cx), ["anthropic/opus"]);
+                search(list, "opus", cx);
+                assert_eq!(
+                    strip(list, cx),
+                    tabs(&[
+                        ("All", 2),
+                        ("Anthropic", 1),
+                        ("commandcode", 0),
+                        ("OpenRouter", 1)
+                    ])
+                );
+                // The search runs within the chosen provider.
+                list.select_source(Some("openrouter".into()), cx);
+                assert_eq!(ids(list, cx), ["openrouter/opus"]);
+                search(list, "sonnet", cx);
+                assert!(ids(list, cx).is_empty());
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn option_arrows_move_through_the_providers(cx: &mut gpui::TestAppContext) {
+        let (window, _, _events) = sourced_picker(cx);
+        cx.update(crate::input::bind);
+        let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        window
+            .update(visual, |list, window, cx| {
+                window.focus(&list.search_focus(cx), cx)
+            })
+            .unwrap();
+        visual.refresh().unwrap();
+        let mut press = |keys: &str| {
+            visual.simulate_keystrokes(keys);
+            window
+                .update(visual, |list, _, _| list.source.clone())
+                .unwrap()
+        };
+        assert_eq!(press("alt-up"), None);
+        assert_eq!(press("alt-down").as_deref(), Some("anthropic"));
+        assert_eq!(
+            press("alt-down alt-down alt-down").as_deref(),
+            Some("openrouter")
+        );
+        assert_eq!(press("down").as_deref(), Some("openrouter"));
+        assert_eq!(press("alt-up").as_deref(), Some("commandcode"));
+    }
+
+    #[gpui::test]
+    fn one_provider_or_another_harness_gets_no_strip(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| cx.set_global(crate::settings::Preferences::default()));
+        let (window, _, _events) =
+            rendered_picker(cx, Kind::Pi, "/work", &["explabs/luna", "explabs/flash"]);
+        window
+            .update(cx, |list, _, cx| {
+                assert!(list.source_tabs(cx).is_empty());
+                let entries = list.entries(cx);
+                assert_eq!(list.source_note(&entries[1]).as_deref(), Some("explabs"));
+            })
+            .unwrap();
+        let (window, _, _events) =
+            rendered_picker(cx, Kind::OpenCode, "/work", &["a/model", "b/model"]);
+        window
+            .update(cx, |list, _, cx| {
+                assert!(list.source_tabs(cx).is_empty());
+                assert_eq!(list.source_note(&list.entries(cx)[1]), None);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn a_provider_a_refresh_dropped_stops_filtering(cx: &mut gpui::TestAppContext) {
+        let (window, _, _events) = sourced_picker(cx);
+        window
+            .update(cx, |list, window, cx| {
+                list.select_source(Some("openrouter".into()), cx);
+                list.catalogs[0]
+                    .1
+                    .retain(|model| !model.id.starts_with("openrouter"));
+                assert_eq!(ids(list, cx).len(), 4);
+                let entries = list.entries(cx);
+                assert!(list.source_note(&entries[1]).is_some());
+                // Another tab starts from all of its providers.
+                list.select_source(Some("anthropic".into()), cx);
+                list.select_tab(ModelTab::Favorites, window, cx);
+                list.select_tab(ModelTab::Harness(Kind::Omp), window, cx);
+                assert_eq!(list.source, None);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn favorites_say_which_provider_a_model_comes_from(cx: &mut gpui::TestAppContext) {
+        let (window, _, _events) = sourced_picker(cx);
+        window
+            .update(cx, |list, window, cx| {
+                list.toggle_favorite(Kind::Omp, Some("anthropic/opus".into()), cx);
+                list.toggle_favorite(Kind::Omp, Some("openrouter/opus".into()), cx);
+                list.select_tab(ModelTab::Favorites, window, cx);
+                let notes: Vec<_> = list
+                    .entries(cx)
+                    .iter()
+                    .filter_map(|entry| list.source_note(entry))
+                    .collect();
+                assert_eq!(notes, ["Anthropic", "OpenRouter"]);
+                assert!(list.source_tabs(cx).is_empty());
+                search(list, "openrouter", cx);
+                assert_eq!(ids(list, cx), ["openrouter/opus"]);
+            })
+            .unwrap();
+    }
+
+    /// A picker that may widen, with one model called `name`.
+    fn widening_picker(
+        cx: &mut gpui::TestAppContext,
+        name: &str,
+    ) -> (gpui::WindowHandle<ModelList>, Picks, Subscription) {
+        cx.update(|cx| {
+            cx.set_reduce_motion(true);
+            cx.set_global(crate::settings::Preferences::default());
+        });
+        let picker = rendered_picker(cx, Kind::Codex, "/work", &["model"]);
+        picker
+            .0
+            .update(cx, |list, _, cx| {
+                list.catalogs[0].1[0].name = name.into();
+                list.widening = Some(Widening::new(true));
+                cx.notify();
+            })
+            .unwrap();
+        picker
+    }
+    fn width(window: gpui::WindowHandle<ModelList>, cx: &mut gpui::VisualTestContext) -> f32 {
+        cx.refresh().unwrap();
+        window
+            .update(cx, |list, _, _| list.widening.as_ref().unwrap().to)
+            .unwrap()
+    }
+
+    #[gpui::test]
+    fn the_card_stays_as_it_is_when_every_name_fits(cx: &mut gpui::TestAppContext) {
+        let (window, _, _events) = widening_picker(cx, "Sonnet");
+        let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        assert_eq!(width(window, visual), Widening::REST);
+        let list = visual.debug_bounds("model-list").unwrap();
+        visual.simulate_mouse_move(list.center(), None, Default::default());
+        assert_eq!(width(window, visual), Widening::REST);
+        let mut hovered = |x: gpui::Pixels| {
+            visual.simulate_mouse_move(gpui::point(x, list.center().y), None, Default::default());
+            visual.refresh().unwrap();
+            window
+                .update(visual, |list, _, _| list.widening.as_ref().unwrap().hovered)
+                .unwrap()
+        };
+        assert!(hovered(list.center().x), "the list is under the pointer");
+        assert!(hovered(px(20.)), "the rail is still inside the card");
+        assert!(!hovered(list.right() + px(60.)), "the pointer left");
+        assert!(!hovered(px(20.)), "the rail alone doesn't widen it");
+    }
+
+    #[gpui::test]
+    fn widening_fits_the_longest_name_up_to_the_limit(cx: &mut gpui::TestAppContext) {
+        let (window, _, _events) = widening_picker(cx, "Sonnet");
+        window
+            .update(cx, |list, window, cx| {
+                let short = list.widest_row(&list.entries(cx), window);
+                list.catalogs[0].1[0].name = "DeepSeek V4.1 Flash 1017 Uncensored".into();
+                let long = list.widest_row(&list.entries(cx), window);
+                assert!(short < Widening::REST && long > short, "{short} {long}");
+                // Being the current model takes room for its check too.
+                list.current = Some("model".into());
+                assert_eq!(list.widest_row(&list.entries(cx), window), long + ROW_CHECK);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn widening_never_leaves_the_window_or_flips_the_card() {
+        let card = |left: f32, from_right: bool| {
+            let widening = Widening::new(from_right);
+            widening.bounds.set(Some(gpui::Bounds::new(
+                gpui::point(px(left), px(0.)),
+                gpui::size(px(Widening::REST), px(440.)),
+            )));
+            widening
+        };
+        let most = MODEL_LIST_MAX_WIDTH - CARD_RULES;
+        assert_eq!(card(500., false).room(1600.), most);
+        // Not enough room to the right, then to the left.
+        assert_eq!(card(500., false).room(900.), 391.);
+        assert_eq!(card(60., false).room(1600.), 359.);
+        assert_eq!(card(8., false).room(316.), Widening::REST);
+        // Hung from the right, the room to the right doesn't count.
+        assert_eq!(card(500., true).room(820.), most);
+        assert_eq!(Widening::new(true).room(1600.), Widening::REST);
+    }
+
+    #[gpui::test]
+    fn the_pointer_widens_the_list_and_leaving_settles_it(cx: &mut gpui::TestAppContext) {
+        let (window, _, _events) =
+            widening_picker(cx, "A model with a name far too long for the resting card");
+        let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.refresh().unwrap();
+        // Give the card room on its left, which its corner of the test window
+        // doesn't have.
+        let place = |cx: &mut gpui::VisualTestContext, hovering: bool| {
+            window
+                .update(cx, |list, window, cx| {
+                    let widening = list.widening.as_mut().unwrap();
+                    widening.bounds.set(Some(gpui::Bounds::new(
+                        gpui::point(px(900.), px(0.)),
+                        gpui::size(px(Widening::REST), px(440.)),
+                    )));
+                    if hovering {
+                        list.hover_list(cx);
+                    } else {
+                        list.leave_card(cx);
+                    }
+                    let entries = list.entries(cx);
+                    list.content_width(&entries, window, cx).unwrap()
+                })
+                .unwrap()
+        };
+        let wide = place(visual, true);
+        assert!(wide > Widening::REST, "{wide}");
+        // A search that leaves only short names keeps the edge where it is.
+        window
+            .update(visual, |list, _, cx| search(list, "default", cx))
+            .unwrap();
+        assert_eq!(place(visual, true), wide);
+        assert_eq!(place(visual, false), Widening::REST);
+    }
 }
 
 fn search_field<T: 'static>(
@@ -666,6 +1003,118 @@ struct ModelEntry {
     name: SharedString,
     enabled: bool,
 }
+impl ModelEntry {
+    /// The model provider behind a Pi or OMP model.
+    fn source(&self) -> Option<&str> {
+        model_source(self.kind, self.id.as_deref()?)
+    }
+    /// Every word of the query is somewhere in the row's name, its harness,
+    /// or the provider it comes from.
+    fn matches(&self, query: &str) -> bool {
+        let mut text = format!("{} {}", self.name, self.kind.label());
+        if let (Some(source), Some(id)) = (self.source(), &self.id) {
+            text.push_str(&format!(" {} {id}", source_label(source)));
+        }
+        let text = text.to_lowercase();
+        query.split_whitespace().all(|word| text.contains(word))
+    }
+    /// What the row is called where its provider isn't otherwise shown.
+    fn full_name(&self) -> SharedString {
+        match self.source() {
+            Some(source) => format!("{}, {}", self.name, source_label(source)).into(),
+            None => self.name.clone(),
+        }
+    }
+}
+
+const SOURCE_STRIP_HEIGHT: f32 = 37.;
+/// ModelFlyout's card, and how far it widens to show a long name.
+pub(crate) const MODEL_LIST_WIDTH: f32 = 310.;
+pub(crate) const MODEL_LIST_MAX_WIDTH: f32 = 560.;
+/// The card's 1px rule on both sides.
+const CARD_RULES: f32 = 2.;
+/// Beside a row's text: the rail, the list's and the row's padding, the star.
+const ROW_CHROME: f32 = 44. + 8. + 8. + 12. + 24.;
+const ROW_CHECK: f32 = 24.;
+const NOTE_MAX_WIDTH: f32 = 112.;
+/// The same curve as a popover's entrance.
+const WIDEN: f32 = 0.17;
+
+/// A card that widens under the pointer and settles back when it leaves.
+struct Widening {
+    /// The content's width at the end of the motion, and at its start.
+    to: f32,
+    from: f32,
+    started: Option<std::time::Instant>,
+    hovered: bool,
+    /// The card hangs from its right edge, so it only grows leftwards.
+    from_right: bool,
+    bounds: crate::popover::AnchorSlot,
+}
+impl Widening {
+    const REST: f32 = MODEL_LIST_WIDTH - CARD_RULES;
+
+    fn new(from_right: bool) -> Self {
+        Self {
+            to: Self::REST,
+            from: Self::REST,
+            started: None,
+            hovered: false,
+            from_right,
+            bounds: Default::default(),
+        }
+    }
+    /// The width to draw now, and whether it is still moving.
+    fn now(&self, reduced: bool) -> (f32, bool) {
+        let elapsed = self.started.map(|at| at.elapsed().as_secs_f32());
+        match elapsed {
+            Some(elapsed) if !reduced && elapsed < WIDEN => {
+                let t = crate::reveal::bezier(elapsed / WIDEN, 0.16, 1., 0.3, 1.);
+                (self.from + (self.to - self.from) * t, true)
+            }
+            _ => (self.to, false),
+        }
+    }
+    fn go(&mut self, to: f32, reduced: bool) {
+        if to != self.to {
+            self.from = self.now(reduced).0;
+            self.to = to;
+            self.started = Some(std::time::Instant::now());
+        }
+    }
+    /// The widest content that stays in the window. A flyout may hang off
+    /// either side of its menu, so it is held to the room on both: growing
+    /// must never flip the card out from under the pointer.
+    fn room(&self, viewport: f32) -> f32 {
+        let Some(bounds) = self.bounds.get() else {
+            return Self::REST;
+        };
+        let margin = 8. + CARD_RULES / 2.;
+        let leftwards = f32::from(bounds.right()) - margin;
+        let rightwards = viewport - margin - f32::from(bounds.left());
+        let room = if self.from_right {
+            leftwards
+        } else {
+            leftwards.min(rightwards)
+        };
+        room.clamp(Self::REST, MODEL_LIST_MAX_WIDTH - CARD_RULES)
+    }
+}
+
+/// A model provider in the strip under the search field, and how many of its
+/// models match the search. `None` is all of them.
+#[derive(Debug, PartialEq)]
+struct SourceTab {
+    source: Option<String>,
+    count: usize,
+}
+impl SourceTab {
+    fn label(&self) -> SharedString {
+        self.source
+            .as_deref()
+            .map_or_else(|| "All".into(), source_label)
+    }
+}
 
 /// The model the next turn uses; `None` is the provider's default.
 pub(crate) struct ModelPicked(pub Kind, pub Option<String>);
@@ -688,6 +1137,12 @@ pub(crate) struct ModelList {
     /// QuickModelSelector.tsx: providers as tabs above the search and list.
     quick: bool,
     tab: ModelTab,
+    /// The model provider the list is narrowed to; `None` shows them all.
+    source: Option<String>,
+    source_scroll: ScrollHandle,
+    list_scroll: ScrollHandle,
+    /// Set where the card may widen; elsewhere the host sets the width.
+    widening: Option<Widening>,
     highlighted: usize,
     search: Entity<input::Input>,
     _changed: Subscription,
@@ -713,6 +1168,7 @@ impl ModelList {
         let search = search_field("Search models", "Search models", 0.4, cx);
         let changed = cx.subscribe(&search, |this, _, _: &input::Changed, cx| {
             this.highlighted = this.current_index(cx);
+            this.list_scroll.set_offset(Default::default());
             cx.notify();
         });
         let mut list = Self {
@@ -740,6 +1196,10 @@ impl ModelList {
                     }
                 })
                 .unwrap_or(ModelTab::Harness(provider)),
+            source: None,
+            source_scroll: ScrollHandle::new(),
+            list_scroll: ScrollHandle::new(),
+            widening: None,
             highlighted: 0,
             search,
             _changed: changed,
@@ -774,6 +1234,90 @@ impl ModelList {
         }
         self.hidden = hidden;
         self
+    }
+    /// The card widens under the pointer until the names it lists fit.
+    pub(crate) fn widening(mut self, from_right: bool) -> Self {
+        self.widening = Some(Widening::new(from_right));
+        self
+    }
+    fn hover_list(&mut self, cx: &mut Context<Self>) {
+        if let Some(widening) = &mut self.widening
+            && !widening.hovered
+        {
+            widening.hovered = true;
+            cx.notify();
+        }
+    }
+    fn leave_card(&mut self, cx: &mut Context<Self>) {
+        let reduced = cx.reduce_motion();
+        if let Some(widening) = &mut self.widening
+            && widening.hovered
+        {
+            widening.hovered = false;
+            widening.go(Widening::REST, reduced);
+            cx.notify();
+        }
+    }
+    /// The content's width this frame, widening while the pointer is in. It
+    /// only ever grows until the pointer leaves, so searching and switching
+    /// tabs don't move the edge back and forth.
+    fn content_width(
+        &mut self,
+        entries: &[ModelEntry],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<f32> {
+        let reduced = cx.reduce_motion();
+        let hovered = self.widening.as_ref()?.hovered;
+        let wanted = if hovered {
+            self.widest_row(entries, window)
+        } else {
+            0.
+        };
+        let viewport = f32::from(window.viewport_size().width);
+        let widening = self.widening.as_mut()?;
+        if hovered {
+            let to = wanted.min(widening.room(viewport)).max(widening.to);
+            widening.go(to, reduced);
+        }
+        let (width, moving) = widening.now(reduced);
+        if moving {
+            window.request_animation_frame();
+        }
+        Some(width)
+    }
+    /// The content width at which no row's name is cut.
+    fn widest_row(&self, entries: &[ModelEntry], window: &Window) -> f32 {
+        let style = window.text_style();
+        let measure = |text: SharedString, size: f32| {
+            let run = gpui::TextRun {
+                len: text.len(),
+                font: style.font(),
+                color: style.color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let line = window
+                .text_system()
+                .shape_line(text, px(size), &[run], None);
+            f32::from(line.width()).ceil()
+        };
+        entries
+            .iter()
+            .map(|entry| {
+                let note = self
+                    .source_note(entry)
+                    .map_or(0., |note| measure(note, 11.).min(NOTE_MAX_WIDTH));
+                let check = if self.is_current(entry) {
+                    ROW_CHECK
+                } else {
+                    0.
+                };
+                // A pixel spare: text laid out at exactly its width may cut.
+                ROW_CHROME + measure(entry.name.clone(), 13.) + note + check + 1.
+            })
+            .fold(0., f32::max)
     }
     /// The quick composer's inline selector: providers in a row of tabs,
     /// a favorite star on every model, and no hover-to-switch.
@@ -983,9 +1527,97 @@ impl ModelList {
     fn query(&self, cx: &gpui::App) -> String {
         self.search.read(cx).content.to_lowercase()
     }
+    /// The rows on show: those of the chosen provider that match the search.
     fn entries(&self, cx: &gpui::App) -> Vec<ModelEntry> {
+        let query = self.query(cx);
+        let rows = self.rows(cx);
+        let source = self.active_source(&rows).map(str::to_owned);
+        rows.into_iter()
+            .filter(|row| source.is_none() || row.source() == source.as_deref())
+            .filter(|row| row.matches(&query))
+            .collect()
+    }
+    /// The model providers among a tab's rows, by name.
+    fn sources(rows: &[ModelEntry]) -> Vec<&str> {
+        let mut sources: Vec<_> = rows.iter().filter_map(ModelEntry::source).collect();
+        sources.sort_by_cached_key(|source| (source_label(source).to_lowercase(), *source));
+        sources.dedup();
+        sources
+    }
+    /// The chosen provider, unless a refresh left it without models.
+    fn active_source(&self, rows: &[ModelEntry]) -> Option<&str> {
+        let ModelTab::Harness(_) = self.tab else {
+            return None;
+        };
+        self.source
+            .as_deref()
+            .filter(|source| rows.iter().any(|row| row.source() == Some(*source)))
+    }
+    /// The strip's tabs; empty unless there is more than one to choose from.
+    fn source_tabs(&self, cx: &gpui::App) -> Vec<SourceTab> {
+        let ModelTab::Harness(_) = self.tab else {
+            return Vec::new();
+        };
+        let query = self.query(cx);
+        let rows = self.rows(cx);
+        let sources = Self::sources(&rows);
+        if sources.len() < 2 {
+            return Vec::new();
+        }
+        let count = |source: Option<&str>| {
+            rows.iter()
+                .filter(|row| row.id.is_some() && (source.is_none() || row.source() == source))
+                .filter(|row| row.matches(&query))
+                .count()
+        };
+        std::iter::once(None)
+            .chain(sources.into_iter().map(Some))
+            .map(|source| SourceTab {
+                source: source.map(str::to_owned),
+                count: count(source),
+            })
+            .collect()
+    }
+    fn select_source(&mut self, source: Option<String>, cx: &mut Context<Self>) {
+        self.source = source;
+        if let Some(ix) = self
+            .source_tabs(cx)
+            .iter()
+            .position(|tab| tab.source == self.source)
+        {
+            self.source_scroll.scroll_to_item(ix);
+        }
+        self.list_scroll.set_offset(Default::default());
+        self.highlighted = self.current_index(cx);
+        cx.notify();
+    }
+    /// Option-Up and Option-Down move through the providers.
+    fn source_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let modifiers = event.keystroke.modifiers;
+        if !modifiers.alt || modifiers.control || modifiers.platform || modifiers.shift {
+            return;
+        }
+        let direction = match event.keystroke.key.as_str() {
+            "up" => -1,
+            "down" => 1,
+            _ => return,
+        };
+        let tabs = self.source_tabs(cx);
+        if tabs.is_empty() {
+            return;
+        }
+        cx.stop_propagation();
+        let at = tabs
+            .iter()
+            .position(|tab| tab.source == self.source)
+            .unwrap_or(0) as isize;
+        let next = (at + direction).clamp(0, tabs.len() as isize - 1) as usize;
+        let source = tabs.into_iter().nth(next).and_then(|tab| tab.source);
+        self.select_source(source, cx);
+    }
+    /// Every row of the tab, before the search and the provider narrow them.
+    fn rows(&self, cx: &gpui::App) -> Vec<ModelEntry> {
         let ModelTab::Harness(kind) = self.tab else {
-            let query = self.query(cx);
             let mut seen: Vec<(Kind, Option<String>)> = Vec::new();
             return cx
                 .try_global::<crate::settings::Preferences>()
@@ -1003,9 +1635,6 @@ impl ModelList {
                     seen.push((kind, id.clone()));
                     let name = self.saved_model_name(kind, id.as_deref());
                     let name: SharedString = format!("{} · {}", kind.label(), name).into();
-                    if !query.is_empty() && !name.to_lowercase().contains(&query) {
-                        return None;
-                    }
                     Some(ModelEntry {
                         kind,
                         id,
@@ -1083,16 +1712,7 @@ impl ModelList {
                 enabled,
             });
         }
-        let query = self.query(cx);
         entries
-            .into_iter()
-            .filter(|e| {
-                query.is_empty()
-                    || format!("{} {}", e.name, kind.label())
-                        .to_lowercase()
-                        .contains(&query)
-            })
-            .collect()
     }
     /// A saved choice as this picker offers it, and whether it can be picked.
     /// On a remote project that takes the host's catalog: a choice it doesn't
@@ -1140,6 +1760,9 @@ impl ModelList {
             return;
         }
         self.tab = tab;
+        self.source = None;
+        self.source_scroll.set_offset(Default::default());
+        self.list_scroll.set_offset(Default::default());
         if cx.has_global::<crate::settings::Preferences>() {
             cx.update_global::<crate::settings::Preferences, _>(|prefs, _| {
                 prefs.model_picker_tab = Some(
@@ -1169,6 +1792,7 @@ impl ModelList {
         if count > 0 {
             self.highlighted =
                 (self.highlighted as isize + direction).clamp(0, count as isize - 1) as usize;
+            self.list_scroll.scroll_to_item(self.highlighted);
             cx.notify();
         }
     }
@@ -1179,6 +1803,82 @@ impl ModelList {
             remember_model(entry.kind, entry.id.clone(), cx);
             cx.emit(ModelPicked(entry.kind, entry.id));
         }
+    }
+    /// The provider at the end of a row, where nothing else on screen says it.
+    fn source_note(&self, entry: &ModelEntry) -> Option<SharedString> {
+        let source = entry.source()?;
+        (self.source.as_deref() != Some(source)).then(|| source_label(source))
+    }
+    /// Pi and OMP: the model providers behind the list, to narrow it to one.
+    fn source_strip(&self, tabs: Vec<SourceTab>, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if tabs.is_empty() {
+            return None;
+        }
+        let shown = tabs.iter().any(|tab| tab.source == self.source);
+        let chips = tabs.into_iter().enumerate().map(|(ix, tab)| {
+            let label = tab.label();
+            let selected = if shown {
+                tab.source == self.source
+            } else {
+                tab.source.is_none()
+            };
+            let group: SharedString = format!("model-source-{ix}").into();
+            let source = tab.source;
+            div()
+                .id(("model-source", ix))
+                .debug_selector(move || format!("model-source-{ix}"))
+                .role(Role::Tab)
+                .aria_label(format!("{label}, {} models", tab.count))
+                .aria_selected(selected)
+                .group(group.clone())
+                .cursor_pointer()
+                .flex_shrink_0()
+                .h(px(24.))
+                .px_2()
+                .rounded(px(6.))
+                .flex()
+                .items_center()
+                .gap_1()
+                .text_size(px(12.))
+                .when(selected, |d| d.bg(content(0.12)))
+                .when(!selected, |d| d.hover(|s| s.bg(content(0.06))))
+                .child(
+                    div()
+                        .text_color(content(if selected { 1. } else { 0.6 }))
+                        .group_hover(group, |s| s.text_color(content(1.)))
+                        .child(label),
+                )
+                .child(div().text_color(content(0.4)).child(tab.count.to_string()))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.select_source(source.clone(), cx);
+                    window.focus(&this.search.focus_handle(cx), cx);
+                }))
+        });
+        Some(
+            div()
+                .flex_shrink_0()
+                .h(px(SOURCE_STRIP_HEIGHT))
+                .px_2()
+                .flex()
+                .items_center()
+                .border_b_1()
+                .border_color(content(0.07))
+                // Inset, so a tab scrolled to either end keeps off the edge.
+                .child(
+                    div()
+                        .id("model-sources")
+                        .role(Role::TabList)
+                        .aria_label("Model providers")
+                        .track_scroll(&self.source_scroll)
+                        .overflow_x_scroll()
+                        .rounded(px(6.))
+                        .w_full()
+                        .flex()
+                        .gap_1()
+                        .children(chips),
+                )
+                .into_any_element(),
+        )
     }
     fn tab(&self, tab: ModelTab, cx: &mut Context<Self>) -> AnyElement {
         let selected = self.tab == tab;
@@ -1227,12 +1927,24 @@ impl ModelList {
             .into_any()
     }
 }
+/// A row's quiet second fact, kept short so the model's name has the room.
+fn row_note(note: SharedString) -> impl IntoElement {
+    div()
+        .flex_shrink_0()
+        .max_w(px(NOTE_MAX_WIDTH))
+        .truncate()
+        .text_size(px(11.))
+        .text_color(content(0.45))
+        .child(note)
+}
 impl Render for ModelList {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.quick {
             return self.render_quick(cx);
         }
         let entries = self.entries(cx);
+        let width = self.content_width(&entries, window, cx);
+        let source_tabs = self.source_tabs(cx);
         let kind = match self.tab {
             ModelTab::Harness(kind) => Some(kind),
             _ => None,
@@ -1285,7 +1997,7 @@ impl Render for ModelList {
                         div()
                             .id(("model-option", ix))
                             .role(Role::ListBoxOption)
-                            .aria_label(entry.name.clone())
+                            .aria_label(entry.full_name())
                             .aria_selected(current)
                             .when(!entry.enabled, |d| {
                                 d.aria_description(if self.missing.contains(&entry.kind) {
@@ -1309,6 +2021,7 @@ impl Render for ModelList {
                                     .truncate()
                                     .child(entry.name.clone()),
                             )
+                            .children(self.source_note(&entry).map(row_note))
                             .on_click(cx.listener(move |this, _, _, cx| this.pick(ix, cx))),
                     )
                     .child(
@@ -1316,7 +2029,7 @@ impl Render for ModelList {
                             .id(("model-star", ix))
                             .debug_selector(move || format!("model-star-{ix}"))
                             .role(Role::Button)
-                            .aria_label(favorite_label(starred, &entry.name))
+                            .aria_label(favorite_label(starred, &entry.full_name()))
                             .cursor_pointer()
                             .size(px(24.))
                             .flex_shrink_0()
@@ -1357,6 +2070,18 @@ impl Render for ModelList {
             .size_full()
             .min_h_0()
             .flex()
+            .relative()
+            .when_some(width, |d, width| d.w(px(width)))
+            .children(
+                self.widening
+                    .as_ref()
+                    .map(|widening| widening.bounds.probe()),
+            )
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if !*hovered {
+                    this.leave_card(cx);
+                }
+            }))
             .capture_action(cx.listener(|this, _: &input::Up, _, cx| {
                 this.step(-1, cx);
                 cx.stop_propagation();
@@ -1369,6 +2094,7 @@ impl Render for ModelList {
                 this.pick(this.highlighted, cx);
                 cx.stop_propagation();
             }))
+            .capture_key_down(cx.listener(Self::source_key))
             .child(
                 div()
                     .id("model-providers")
@@ -1425,9 +2151,17 @@ impl Render for ModelList {
                             .child(icon("search", 14.).text_color(content(0.5)))
                             .child(div().flex_1().min_w_0().child(self.search.clone())),
                     )
+                    .children(self.source_strip(source_tabs, cx))
                     .child(
                         div()
                             .id("model-list")
+                            .track_scroll(&self.list_scroll)
+                            .debug_selector(|| "model-list".into())
+                            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                                if *hovered {
+                                    this.hover_list(cx);
+                                }
+                            }))
                             .role(Role::ListBox)
                             .aria_label("Models")
                             .flex_1()
@@ -1489,6 +2223,7 @@ impl Render for ModelList {
 impl ModelList {
     fn render_quick(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let entries = self.entries(cx);
+        let source_tabs = self.source_tabs(cx);
         let kind = match self.tab {
             ModelTab::Harness(kind) => Some(kind),
             _ => None,
@@ -1535,7 +2270,7 @@ impl ModelList {
                         div()
                             .id(("quick-model-option", ix))
                             .role(Role::ListBoxOption)
-                            .aria_label(entry.name.clone())
+                            .aria_label(entry.full_name())
                             .aria_selected(current)
                             .flex_1()
                             .min_w_0()
@@ -1549,9 +2284,16 @@ impl ModelList {
                             .when(!entry.enabled, |d| d.opacity(0.35))
                             .when(entry.enabled, |d| d.cursor_pointer())
                             .when(favorites, |d| d.child(provider_icon(entry.kind.id(), 14.)))
-                            .child(div().min_w_0().truncate().child(entry.name.clone()))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .child(entry.name.clone()),
+                            )
+                            .children(self.source_note(&entry).map(row_note))
                             .when(current, |d| {
-                                d.child(icon("check-2", 14.).ml_auto().text_color(accent_color()))
+                                d.child(icon("check-2", 14.).text_color(accent_color()))
                             })
                             .on_click(cx.listener(move |this, _, _, cx| this.pick(ix, cx))),
                     )
@@ -1559,7 +2301,7 @@ impl ModelList {
                         div()
                             .id(("quick-model-star", ix))
                             .role(Role::Button)
-                            .aria_label(favorite_label(starred, &entry.name))
+                            .aria_label(favorite_label(starred, &entry.full_name()))
                             .group("quick-model-star")
                             .cursor_pointer()
                             .size(px(32.))
@@ -1591,6 +2333,13 @@ impl ModelList {
                     .map(ModelTab::Harness),
             )
             .collect();
+        // The strip takes its room from the list, so the panel keeps its height.
+        let strip = self.source_strip(source_tabs, cx);
+        let list_height = if strip.is_some() {
+            240. - SOURCE_STRIP_HEIGHT
+        } else {
+            240.
+        };
         div()
             .id("quick-model-selector")
             .role(Role::Group)
@@ -1610,6 +2359,7 @@ impl ModelList {
                 this.pick(this.highlighted, cx);
                 cx.stop_propagation();
             }))
+            .capture_key_down(cx.listener(Self::source_key))
             .child(
                 div()
                     .id("quick-model-providers")
@@ -1681,12 +2431,14 @@ impl ModelList {
                     .child(icon("search", 14.).text_color(content(0.4)))
                     .child(div().flex_1().min_w_0().child(self.search.clone())),
             )
+            .children(strip)
             .child(
                 div()
                     .id("quick-model-list")
+                    .track_scroll(&self.list_scroll)
                     .role(Role::ListBox)
                     .aria_label("Models")
-                    .h(px(240.))
+                    .h(px(list_height))
                     .flex_shrink_0()
                     .overflow_y_scroll()
                     .p_2()

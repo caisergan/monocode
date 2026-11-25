@@ -780,6 +780,8 @@ impl MenuStyle {
 pub(crate) struct Flyout {
     pub view: AnyView,
     pub width: f32,
+    /// Let the view size itself between `width` and this.
+    pub max_width: Option<f32>,
     /// Card inset for content that does not provide its own padding.
     pub padding: f32,
     pub height: Option<f32>,
@@ -1573,8 +1575,11 @@ impl Render for Menu {
                 self.sub_region.clone(),
             );
             if let Some(flyout) = &action.flyout {
-                let p = submenu
-                    .width(flyout.width)
+                let p = match flyout.max_width {
+                    Some(max) => submenu.min_width(flyout.width).max_width(max),
+                    None => submenu.width(flyout.width),
+                };
+                let p = p
                     .padding(flyout.padding)
                     .when_some(flyout.surface.clone(), |p, slot| p.track(slot));
                 let p = match (flyout.height, flyout.max_height) {
@@ -1998,6 +2003,7 @@ mod tests {
                                     .flyout(Flyout {
                                         view: nested.into(),
                                         width: MENU_WIDTH,
+                                        max_width: None,
                                         padding: 0.,
                                         height: None,
                                         max_height: None,
