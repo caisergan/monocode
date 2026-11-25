@@ -12,10 +12,15 @@ own icons). This page records the decisions and how the engine works.
 ## Decisions
 
 - One Master, not a Mono and not a slash command. It is off until set up.
-- Runs on any provider; the default is Pi with DeepSeek. Pi gets a `monocode`
-  tool from a bundled extension and only read tools (`--no-mcp -e <ext>
-  --tools read,grep,find,ls,monocode`), so it has no shell and no edit tool.
-  Other providers reach the same actions through the `monocode_app` MCP server.
+- Runs on Pi (the default, with DeepSeek) or Claude Code, and has no shell
+  and no edit tool on either. Pi gets a `monocode` tool from a bundled
+  extension and only read tools (`--no-mcp -e <ext> --tools
+  read,grep,find,ls,monocode`). Claude Code gets `--tools Read,Glob,Grep`,
+  the `monocode_app` MCP server started as `app-mcp master` (the same `app`
+  tool, describing Master's actions), `--strict-mcp-config` so none of the
+  user's own MCP servers load, and those tools pre-allowed, so it never asks.
+  Other providers would hand Master a shell, so MonoCode refuses to launch it
+  there until they have a route.
 - Reaches every local project except those the user excludes. Remote projects
   are not supported yet. Sessions in an excluded project cannot be listed,
   searched, read or messaged.

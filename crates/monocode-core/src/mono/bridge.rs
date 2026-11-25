@@ -303,6 +303,16 @@ pub fn mcp_server(
     Some(json!({"type":"stdio","command":mono.executable,"args":["app-mcp"]}))
 }
 
+/// Claude's stdio server entry for Master's chat: the same `app` tool,
+/// offering Master's actions instead of a Mono's. None without app access.
+pub fn master_mcp_server(environment: &HashMap<String, String>) -> Option<Value> {
+    if !configured(environment) {
+        return None;
+    }
+    let executable = std::env::current_exe().ok()?;
+    Some(json!({"type":"stdio","command":executable,"args":["app-mcp","master"]}))
+}
+
 /// ACP's stdio server shape, which names the server and passes its env.
 pub fn acp_server(
     mono: Option<&crate::agent::MonoContext>,
@@ -342,13 +352,28 @@ pub fn configure_codex(
 }
 
 pub fn tool_definitions() -> Vec<Value> {
+    tool_definitions_for(false)
+}
+/// The one `app` tool, described for a Mono or, with `master`, for Master.
+pub fn tool_definitions_for(master: bool) -> Vec<Value> {
+    let (description, example) = if master {
+        (
+            format!("Run a MonoCode Master action: read sessions across the user's projects, propose plans, and drive the sessions of a plan the user started. Pass the action name and its JSON input. Retry an uncertain change with the same requestId and identical input.\n\n{}", crate::master::HELP),
+            "For example master.sessions or master.plan",
+        )
+    } else {
+        (
+            format!("Run a MonoCode app action: sessions, worktrees, folders, notes, artifacts, soul, memory, habits and chat cards. Pass the action name and its JSON input. Retry an uncertain mutation with the same requestId and identical input.\n\n{HELP}"),
+            "For example memory.add or sessions.start",
+        )
+    };
     vec![json!({
         "name": "app",
-        "description": format!("Run a MonoCode app action: sessions, worktrees, folders, notes, artifacts, soul, memory, habits and chat cards. Pass the action name and its JSON input. Retry an uncertain mutation with the same requestId and identical input.\n\n{HELP}"),
+        "description": description,
         "inputSchema": {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "description": "For example memory.add or sessions.start"},
+                "action": {"type": "string", "description": example},
                 "input": {"type": "object", "description": "The action's input object"},
                 "requestId": {"type": "string", "maxLength": 128, "description": "Reuse when retrying an uncertain mutation"}
             },
@@ -359,7 +384,7 @@ pub fn tool_definitions() -> Vec<Value> {
     })]
 }
 
-fn mcp_response(request: Value) -> Option<Value> {
+fn mcp_response(request: Value, master: bool) -> Option<Value> {
     let id = request.get("id")?.clone();
     let result = match request["method"].as_str().unwrap_or("") {
         "initialize" => Ok(json!({
@@ -368,7 +393,7 @@ fn mcp_response(request: Value) -> Option<Value> {
             "serverInfo": {"name": MCP_SERVER, "version": env!("CARGO_PKG_VERSION")}
         })),
         "ping" => Ok(json!({})),
-        "tools/list" => Ok(json!({"tools": tool_definitions()})),
+        "tools/list" => Ok(json!({"tools": tool_definitions_for(master)})),
         "tools/call" => {
             let arguments = &request["params"]["arguments"];
             let result = if request["params"]["name"].as_str() != Some("app") {
@@ -403,7 +428,9 @@ fn mcp_response(request: Value) -> Option<Value> {
 }
 
 /// Runs before GUI initialization. stdout carries MCP JSON-RPC frames only.
-pub fn mcp_stdio() -> Result<(), String> {
+/// `master` describes Master's actions; the app still checks every call
+/// against the calling session.
+pub fn mcp_stdio(master: bool) -> Result<(), String> {
     const MAX_FRAME: usize = 4 * 1024 * 1024;
     let mut input = std::io::stdin().lock();
     let mut output = std::io::stdout().lock();
@@ -420,7 +447,7 @@ pub fn mcp_stdio() -> Result<(), String> {
             return Err("Oversized or incomplete MCP frame".into());
         }
         let response = match serde_json::from_str(&line) {
-            Ok(request) => mcp_response(request),
+            Ok(request) => mcp_response(request, master),
             Err(_) => Some(
                 json!({"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"Parse error"}}),
             ),
@@ -486,17 +513,46 @@ mod capability_tests {
         assert_eq!(acp["name"], MCP_SERVER);
         assert_eq!(acp["env"].as_array().unwrap().len(), 3);
 
-        let list = mcp_response(json!({"jsonrpc":"2.0","id":1,"method":"tools/list"})).unwrap();
+        let list =
+            mcp_response(json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}), false).unwrap();
         let tools = list["result"]["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["name"], "app");
-        let unknown = mcp_response(json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"other","arguments":{}}})).unwrap();
+        let unknown = mcp_response(json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"other","arguments":{}}}), false).unwrap();
         assert_eq!(unknown["result"]["isError"], true);
-        let missing = mcp_response(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"app","arguments":{}}})).unwrap();
+        let missing = mcp_response(json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"app","arguments":{}}}), false).unwrap();
         assert_eq!(missing["result"]["isError"], true);
-        assert!(
-            mcp_response(json!({"jsonrpc":"2.0","method":"notifications/initialized"})).is_none()
-        );
+        assert!(mcp_response(
+            json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            false
+        )
+        .is_none());
+    }
+    #[test]
+    fn masters_server_describes_masters_actions_through_the_same_app_tool() {
+        let (server, _rx) = Server::start().unwrap();
+        assert!(master_mcp_server(&HashMap::new()).is_none());
+        let entry = master_mcp_server(&server.environment(7)).unwrap();
+        assert_eq!(entry["args"], json!(["app-mcp", "master"]));
+        let list = |master| {
+            mcp_response(
+                json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+                master,
+            )
+            .unwrap()["result"]["tools"]
+                .clone()
+        };
+        let tools = list(true);
+        assert_eq!(tools.as_array().unwrap().len(), 1);
+        // The same name keeps Claude's mcp__monocode_app allowlist entry.
+        assert_eq!(tools[0]["name"], "app");
+        let description = tools[0]["description"].as_str().unwrap();
+        assert!(description.contains("master.plan"));
+        assert!(!description.contains("memory.add"));
+        assert!(!list(false)[0]["description"]
+            .as_str()
+            .unwrap()
+            .contains("master.plan"));
     }
     #[test]
     fn capability_is_bound_to_its_session_and_only_authenticated_calls_reach_the_app() {

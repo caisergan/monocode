@@ -32,6 +32,8 @@ pub struct Config {
     pub effort: Option<String>,
     /// Project paths Master cannot see. New projects are included.
     pub excluded: Vec<String>,
+    /// Sessions the user hid from Master ("Hide from Master").
+    pub hidden: Vec<i64>,
     /// Models a step may run on; the first for a harness is its default.
     /// Empty allows any model.
     pub models: Vec<AllowedModel>,
@@ -53,6 +55,7 @@ impl Default for Config {
             model: None,
             effort: None,
             excluded: Vec::new(),
+            hidden: Vec::new(),
             models: Vec::new(),
             access: AccessMode::Auto,
             safe_list: Vec::new(),
@@ -798,7 +801,8 @@ pub struct Update {
     pub step: String,
     pub session: i64,
     pub project: String,
-    /// finished, stopped, failed, usageLimited or blocked.
+    /// finished, stopped, failed, usageLimited, blocked, or decided: the
+    /// user decided a plan change (`report` says how).
     pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
@@ -864,7 +868,20 @@ impl Update {
         }
         value
     }
+    /// The user's decision on a plan change, for Master's next turn.
+    pub fn decided(task: &Task, text: String, at: u64) -> Update {
+        Update {
+            task: task.id.clone(),
+            kind: "decided".into(),
+            report: text,
+            at,
+            ..Update::default()
+        }
+    }
     fn clause(&self) -> String {
+        if self.kind == "decided" {
+            return format!("task {} has the user's decision", self.task);
+        }
         format!(
             "{} {}",
             crate::search::project_name(&self.project),
@@ -892,6 +909,10 @@ pub fn wake_message(updates: &[Update], tasks: &[Task], last: bool) -> String {
     }
     let mut out = format!("{UPDATE_TAG} {}\n", clauses.join(" · "));
     for update in updates {
+        if update.kind == "decided" {
+            out.push_str(&format!("- Task {}: {}\n", update.task, update.report));
+            continue;
+        }
         let task = tasks.iter().find(|t| t.id == update.task);
         let step = task.and_then(|t| t.steps.iter().find(|s| s.id == update.step));
         let place = format!(
@@ -1289,6 +1310,35 @@ pub fn step_prompt(task: &Task, step: &Step, checkout: &str, branch: Option<&str
         "MonoCode's Master started this session for step {} of the task \"{}\". Your checkout is {place}. Other sessions may work in parallel in their own checkouts; touch only what this step needs. Commit on your branch. Do not push, open pull requests or deploy. Master reads your final message as your report.\n\n{}",
         step.id, task.title, step.prompt
     )
+}
+
+/// Pi's `monocode` tool, written to the temp folder under a name that
+/// changes with its content and loaded with `-e`. None when it cannot be
+/// written; Master then runs with read tools only.
+pub fn pi_extension() -> Option<std::path::PathBuf> {
+    let source = include_str!("master/pi_extension.ts")
+        .replace("__MONOCODE_HELP__", &serde_json::to_string(HELP).ok()?);
+    let hash = crate::mono::files::content_hash(&source);
+    let path = std::env::temp_dir().join(format!(
+        "monocode-master-{}.ts",
+        &hash[..hash.len().min(16)]
+    ));
+    if !path.is_file() {
+        let partial = path.with_extension(format!("{}.tmp", std::process::id()));
+        std::fs::write(&partial, &source).ok()?;
+        std::fs::rename(&partial, &path).ok()?;
+    }
+    Some(path)
+}
+/// Master's tools on Pi: read tools and MonoCode's, no shell and no edits.
+pub const PI_TOOLS: &str = "read,grep,find,ls,monocode";
+/// Claude Code's built-in tools for Master; its MonoCode tool comes from the
+/// `monocode_app` MCP server, and no other MCP server is loaded.
+pub const CLAUDE_TOOLS: &str = "Read,Glob,Grep";
+/// Providers whose launch keeps Master to reading and its own tool. Others
+/// would hand it a shell, so they are refused until they have a route.
+pub fn supported_harness(harness: &str) -> bool {
+    matches!(harness, "pi" | "claude")
 }
 
 /// The sender recorded on a message and its turn: `master:<task>:<step>`.

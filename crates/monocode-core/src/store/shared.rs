@@ -198,6 +198,8 @@ pub(super) fn project_turns(
                         metrics,
                         // The shared store has no stream to measure.
                         output_rate: None,
+                        // Nor a record of who sent a turn's message.
+                        sender: None,
                     },
                 );
             }
