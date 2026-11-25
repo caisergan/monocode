@@ -166,6 +166,7 @@ impl Conversation {
                     .flyout(Flyout {
                         view: models.into(),
                         width: 240.,
+                        max_width: None,
                         padding: 4.,
                         height: None,
                         max_height: Some(288.),

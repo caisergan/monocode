@@ -137,6 +137,7 @@ impl Shell {
             focus: Some(view.read(cx).focus(cx)),
             view: view.into(),
             width: 280.,
+            max_width: None,
             padding: 0.,
             height: None,
             max_height: Some(360.),

@@ -859,6 +859,127 @@ mod model_label_tests {
             })
             .unwrap();
     }
+
+    /// A picker that may widen, with one model called `name`.
+    fn widening_picker(
+        cx: &mut gpui::TestAppContext,
+        name: &str,
+    ) -> (gpui::WindowHandle<ModelList>, Picks, Subscription) {
+        cx.update(|cx| {
+            cx.set_reduce_motion(true);
+            cx.set_global(crate::settings::Preferences::default());
+        });
+        let picker = rendered_picker(cx, Kind::Codex, "/work", &["model"]);
+        picker
+            .0
+            .update(cx, |list, _, cx| {
+                list.catalogs[0].1[0].name = name.into();
+                list.widening = Some(Widening::new(true));
+                cx.notify();
+            })
+            .unwrap();
+        picker
+    }
+    fn width(window: gpui::WindowHandle<ModelList>, cx: &mut gpui::VisualTestContext) -> f32 {
+        cx.refresh().unwrap();
+        window
+            .update(cx, |list, _, _| list.widening.as_ref().unwrap().to)
+            .unwrap()
+    }
+
+    #[gpui::test]
+    fn the_card_stays_as_it_is_when_every_name_fits(cx: &mut gpui::TestAppContext) {
+        let (window, _, _events) = widening_picker(cx, "Sonnet");
+        let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        assert_eq!(width(window, visual), Widening::REST);
+        let list = visual.debug_bounds("model-list").unwrap();
+        visual.simulate_mouse_move(list.center(), None, Default::default());
+        assert_eq!(width(window, visual), Widening::REST);
+        let mut hovered = |x: gpui::Pixels| {
+            visual.simulate_mouse_move(gpui::point(x, list.center().y), None, Default::default());
+            visual.refresh().unwrap();
+            window
+                .update(visual, |list, _, _| list.widening.as_ref().unwrap().hovered)
+                .unwrap()
+        };
+        assert!(hovered(list.center().x), "the list is under the pointer");
+        assert!(hovered(px(20.)), "the rail is still inside the card");
+        assert!(!hovered(list.right() + px(60.)), "the pointer left");
+        assert!(!hovered(px(20.)), "the rail alone doesn't widen it");
+    }
+
+    #[gpui::test]
+    fn widening_fits_the_longest_name_up_to_the_limit(cx: &mut gpui::TestAppContext) {
+        let (window, _, _events) = widening_picker(cx, "Sonnet");
+        window
+            .update(cx, |list, window, cx| {
+                let short = list.widest_row(&list.entries(cx), window);
+                list.catalogs[0].1[0].name = "DeepSeek V4.1 Flash 1017 Uncensored".into();
+                let long = list.widest_row(&list.entries(cx), window);
+                assert!(short < Widening::REST && long > short, "{short} {long}");
+                // Being the current model takes room for its check too.
+                list.current = Some("model".into());
+                assert_eq!(list.widest_row(&list.entries(cx), window), long + ROW_CHECK);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn widening_never_leaves_the_window_or_flips_the_card() {
+        let card = |left: f32, from_right: bool| {
+            let widening = Widening::new(from_right);
+            widening.bounds.set(Some(gpui::Bounds::new(
+                gpui::point(px(left), px(0.)),
+                gpui::size(px(Widening::REST), px(440.)),
+            )));
+            widening
+        };
+        let most = MODEL_LIST_MAX_WIDTH - CARD_RULES;
+        assert_eq!(card(500., false).room(1600.), most);
+        // Not enough room to the right, then to the left.
+        assert_eq!(card(500., false).room(900.), 391.);
+        assert_eq!(card(60., false).room(1600.), 359.);
+        assert_eq!(card(8., false).room(316.), Widening::REST);
+        // Hung from the right, the room to the right doesn't count.
+        assert_eq!(card(500., true).room(820.), most);
+        assert_eq!(Widening::new(true).room(1600.), Widening::REST);
+    }
+
+    #[gpui::test]
+    fn the_pointer_widens_the_list_and_leaving_settles_it(cx: &mut gpui::TestAppContext) {
+        let (window, _, _events) =
+            widening_picker(cx, "A model with a name far too long for the resting card");
+        let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.refresh().unwrap();
+        // Give the card room on its left, which its corner of the test window
+        // doesn't have.
+        let place = |cx: &mut gpui::VisualTestContext, hovering: bool| {
+            window
+                .update(cx, |list, window, cx| {
+                    let widening = list.widening.as_mut().unwrap();
+                    widening.bounds.set(Some(gpui::Bounds::new(
+                        gpui::point(px(900.), px(0.)),
+                        gpui::size(px(Widening::REST), px(440.)),
+                    )));
+                    if hovering {
+                        list.hover_list(cx);
+                    } else {
+                        list.leave_card(cx);
+                    }
+                    let entries = list.entries(cx);
+                    list.content_width(&entries, window, cx).unwrap()
+                })
+                .unwrap()
+        };
+        let wide = place(visual, true);
+        assert!(wide > Widening::REST, "{wide}");
+        // A search that leaves only short names keeps the edge where it is.
+        window
+            .update(visual, |list, _, cx| search(list, "default", cx))
+            .unwrap();
+        assert_eq!(place(visual, true), wide);
+        assert_eq!(place(visual, false), Widening::REST);
+    }
 }
 
 fn search_field<T: 'static>(
@@ -907,6 +1028,78 @@ impl ModelEntry {
 }
 
 const SOURCE_STRIP_HEIGHT: f32 = 37.;
+/// ModelFlyout's card, and how far it widens to show a long name.
+pub(crate) const MODEL_LIST_WIDTH: f32 = 310.;
+pub(crate) const MODEL_LIST_MAX_WIDTH: f32 = 560.;
+/// The card's 1px rule on both sides.
+const CARD_RULES: f32 = 2.;
+/// Beside a row's text: the rail, the list's and the row's padding, the star.
+const ROW_CHROME: f32 = 44. + 8. + 8. + 12. + 24.;
+const ROW_CHECK: f32 = 24.;
+const NOTE_MAX_WIDTH: f32 = 112.;
+/// The same curve as a popover's entrance.
+const WIDEN: f32 = 0.17;
+
+/// A card that widens under the pointer and settles back when it leaves.
+struct Widening {
+    /// The content's width at the end of the motion, and at its start.
+    to: f32,
+    from: f32,
+    started: Option<std::time::Instant>,
+    hovered: bool,
+    /// The card hangs from its right edge, so it only grows leftwards.
+    from_right: bool,
+    bounds: crate::popover::AnchorSlot,
+}
+impl Widening {
+    const REST: f32 = MODEL_LIST_WIDTH - CARD_RULES;
+
+    fn new(from_right: bool) -> Self {
+        Self {
+            to: Self::REST,
+            from: Self::REST,
+            started: None,
+            hovered: false,
+            from_right,
+            bounds: Default::default(),
+        }
+    }
+    /// The width to draw now, and whether it is still moving.
+    fn now(&self, reduced: bool) -> (f32, bool) {
+        let elapsed = self.started.map(|at| at.elapsed().as_secs_f32());
+        match elapsed {
+            Some(elapsed) if !reduced && elapsed < WIDEN => {
+                let t = crate::reveal::bezier(elapsed / WIDEN, 0.16, 1., 0.3, 1.);
+                (self.from + (self.to - self.from) * t, true)
+            }
+            _ => (self.to, false),
+        }
+    }
+    fn go(&mut self, to: f32, reduced: bool) {
+        if to != self.to {
+            self.from = self.now(reduced).0;
+            self.to = to;
+            self.started = Some(std::time::Instant::now());
+        }
+    }
+    /// The widest content that stays in the window. A flyout may hang off
+    /// either side of its menu, so it is held to the room on both: growing
+    /// must never flip the card out from under the pointer.
+    fn room(&self, viewport: f32) -> f32 {
+        let Some(bounds) = self.bounds.get() else {
+            return Self::REST;
+        };
+        let margin = 8. + CARD_RULES / 2.;
+        let leftwards = f32::from(bounds.right()) - margin;
+        let rightwards = viewport - margin - f32::from(bounds.left());
+        let room = if self.from_right {
+            leftwards
+        } else {
+            leftwards.min(rightwards)
+        };
+        room.clamp(Self::REST, MODEL_LIST_MAX_WIDTH - CARD_RULES)
+    }
+}
 
 /// A model provider in the strip under the search field, and how many of its
 /// models match the search. `None` is all of them.
@@ -948,6 +1141,8 @@ pub(crate) struct ModelList {
     source: Option<String>,
     source_scroll: ScrollHandle,
     list_scroll: ScrollHandle,
+    /// Set where the card may widen; elsewhere the host sets the width.
+    widening: Option<Widening>,
     highlighted: usize,
     search: Entity<input::Input>,
     _changed: Subscription,
@@ -1004,6 +1199,7 @@ impl ModelList {
             source: None,
             source_scroll: ScrollHandle::new(),
             list_scroll: ScrollHandle::new(),
+            widening: None,
             highlighted: 0,
             search,
             _changed: changed,
@@ -1038,6 +1234,90 @@ impl ModelList {
         }
         self.hidden = hidden;
         self
+    }
+    /// The card widens under the pointer until the names it lists fit.
+    pub(crate) fn widening(mut self, from_right: bool) -> Self {
+        self.widening = Some(Widening::new(from_right));
+        self
+    }
+    fn hover_list(&mut self, cx: &mut Context<Self>) {
+        if let Some(widening) = &mut self.widening
+            && !widening.hovered
+        {
+            widening.hovered = true;
+            cx.notify();
+        }
+    }
+    fn leave_card(&mut self, cx: &mut Context<Self>) {
+        let reduced = cx.reduce_motion();
+        if let Some(widening) = &mut self.widening
+            && widening.hovered
+        {
+            widening.hovered = false;
+            widening.go(Widening::REST, reduced);
+            cx.notify();
+        }
+    }
+    /// The content's width this frame, widening while the pointer is in. It
+    /// only ever grows until the pointer leaves, so searching and switching
+    /// tabs don't move the edge back and forth.
+    fn content_width(
+        &mut self,
+        entries: &[ModelEntry],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<f32> {
+        let reduced = cx.reduce_motion();
+        let hovered = self.widening.as_ref()?.hovered;
+        let wanted = if hovered {
+            self.widest_row(entries, window)
+        } else {
+            0.
+        };
+        let viewport = f32::from(window.viewport_size().width);
+        let widening = self.widening.as_mut()?;
+        if hovered {
+            let to = wanted.min(widening.room(viewport)).max(widening.to);
+            widening.go(to, reduced);
+        }
+        let (width, moving) = widening.now(reduced);
+        if moving {
+            window.request_animation_frame();
+        }
+        Some(width)
+    }
+    /// The content width at which no row's name is cut.
+    fn widest_row(&self, entries: &[ModelEntry], window: &Window) -> f32 {
+        let style = window.text_style();
+        let measure = |text: SharedString, size: f32| {
+            let run = gpui::TextRun {
+                len: text.len(),
+                font: style.font(),
+                color: style.color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let line = window
+                .text_system()
+                .shape_line(text, px(size), &[run], None);
+            f32::from(line.width()).ceil()
+        };
+        entries
+            .iter()
+            .map(|entry| {
+                let note = self
+                    .source_note(entry)
+                    .map_or(0., |note| measure(note, 11.).min(NOTE_MAX_WIDTH));
+                let check = if self.is_current(entry) {
+                    ROW_CHECK
+                } else {
+                    0.
+                };
+                // A pixel spare: text laid out at exactly its width may cut.
+                ROW_CHROME + measure(entry.name.clone(), 13.) + note + check + 1.
+            })
+            .fold(0., f32::max)
     }
     /// The quick composer's inline selector: providers in a row of tabs,
     /// a favorite star on every model, and no hover-to-switch.
@@ -1651,18 +1931,19 @@ impl ModelList {
 fn row_note(note: SharedString) -> impl IntoElement {
     div()
         .flex_shrink_0()
-        .max_w(px(112.))
+        .max_w(px(NOTE_MAX_WIDTH))
         .truncate()
         .text_size(px(11.))
         .text_color(content(0.45))
         .child(note)
 }
 impl Render for ModelList {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         if self.quick {
             return self.render_quick(cx);
         }
         let entries = self.entries(cx);
+        let width = self.content_width(&entries, window, cx);
         let source_tabs = self.source_tabs(cx);
         let kind = match self.tab {
             ModelTab::Harness(kind) => Some(kind),
@@ -1789,6 +2070,18 @@ impl Render for ModelList {
             .size_full()
             .min_h_0()
             .flex()
+            .relative()
+            .when_some(width, |d, width| d.w(px(width)))
+            .children(
+                self.widening
+                    .as_ref()
+                    .map(|widening| widening.bounds.probe()),
+            )
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                if !*hovered {
+                    this.leave_card(cx);
+                }
+            }))
             .capture_action(cx.listener(|this, _: &input::Up, _, cx| {
                 this.step(-1, cx);
                 cx.stop_propagation();
@@ -1863,6 +2156,12 @@ impl Render for ModelList {
                         div()
                             .id("model-list")
                             .track_scroll(&self.list_scroll)
+                            .debug_selector(|| "model-list".into())
+                            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                                if *hovered {
+                                    this.hover_list(cx);
+                                }
+                            }))
                             .role(Role::ListBox)
                             .aria_label("Models")
                             .flex_1()

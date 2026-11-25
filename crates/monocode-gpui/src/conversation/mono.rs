@@ -729,6 +729,7 @@ impl Conversation {
             )
             .hide_providers(hidden)
             .allow_provider_switch(true)
+            .widening(true)
         });
         let events = vec![cx.subscribe_in(
             &list,
@@ -750,7 +751,8 @@ impl Conversation {
             popover("composer-models", Anchor::Slot(self.model_anchor.clone()))
                 .side(Side::Top)
                 .align(Align::End)
-                .width(310.)
+                .min_width(MODEL_LIST_WIDTH)
+                .max_width(MODEL_LIST_MAX_WIDTH)
                 .height(442.)
                 .on_dismiss(move |window, cx| {
                     let _ = this.update(cx, |this, cx| this.close_mono_models(window, cx));

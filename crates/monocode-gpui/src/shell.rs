@@ -5768,6 +5768,7 @@ impl Shell {
                         .flyout(Flyout {
                             view: picker.into(),
                             width: 286.,
+                            max_width: None,
                             padding: 0.,
                             height: None,
                             max_height: Some(380.),

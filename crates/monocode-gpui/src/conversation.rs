@@ -33,8 +33,8 @@ use crate::{
     git_picker::{GitPicker, Mode as GitMode, Picked as GitPicked},
     input,
     pickers::{
-        ModelList, ModelPicked, cached_model_name, hosted_model, model_display_name, model_name,
-        model_source, remember_model, source_label,
+        MODEL_LIST_MAX_WIDTH, MODEL_LIST_WIDTH, ModelList, ModelPicked, cached_model_name,
+        hosted_model, model_display_name, model_name, model_source, remember_model, source_label,
     },
     popover::{
         Align, Anchor, AnchorSlot, Flyout, Menu, MenuAction, MenuEvent, MenuItem, MenuStyle, Side,
@@ -2613,6 +2613,7 @@ impl Conversation {
                             .flyout(Flyout {
                                 view: picker.into(),
                                 width: 300.,
+                                max_width: None,
                                 padding: 0.,
                                 height: None,
                                 max_height: Some(320.),
@@ -2693,6 +2694,7 @@ impl Conversation {
                     )
                     .hide_providers(hidden)
                     .allow_provider_switch(true)
+                    .widening(false)
                 });
                 events.push(cx.subscribe_in(
                     &list,
@@ -2721,7 +2723,8 @@ impl Conversation {
                         ))
                         .flyout(Flyout {
                             view: list.into(),
-                            width: 310.,
+                            width: MODEL_LIST_WIDTH,
+                            max_width: Some(MODEL_LIST_MAX_WIDTH),
                             padding: 0.,
                             height: Some(442.),
                             max_height: None,
