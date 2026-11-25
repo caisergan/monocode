@@ -18,6 +18,7 @@ pub mod github_star;
 pub mod harness_updates;
 pub mod hermes_memory;
 pub mod inbox;
+pub mod master;
 pub mod mobile;
 pub mod mono;
 pub mod notes;
