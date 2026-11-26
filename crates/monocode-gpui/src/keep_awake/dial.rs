@@ -137,10 +137,11 @@ fn paint_wisp(window: &mut Window, bounds: Bounds<Pixels>, side: f32, x: f32, t:
         return;
     }
     let unit = side / 24.;
-    // The cup's rim sits at 7.5 on the 24-unit grid.
-    let lift = 1.6 - 3.6 * t;
+    // The cup is centred on the 24-unit grid, so its rim sits at 5.5 and
+    // the wisps rise just above the glyph's box as they fade.
+    let lift = 1.4 - 3.4 * t;
     let stretch = 0.75 + 0.3 * t;
-    let (bottom, height) = (6. + lift, 4.8 * stretch);
+    let (bottom, height) = (4. + lift, 4.2 * stretch);
     let mut path = PathBuilder::stroke(px(1.75 * unit));
     let steps = 14;
     for step in 0..=steps {

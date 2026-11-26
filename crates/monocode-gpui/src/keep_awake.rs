@@ -419,11 +419,16 @@ impl KeepAwake {
             return (None, Some("Agents".into()));
         }
         let count = (!self.holders.is_empty()).then(|| format!("{} working", self.holders.len()));
-        let time = match session.ends {
-            Some(ends) => format!("{} left", remaining(ends.saturating_sub(now))),
-            None => elapsed_short(now.saturating_sub(self.holding_since.unwrap_or(now))),
+        let time = match (session.mode, session.ends) {
+            (_, Some(ends)) => Some(format!("{} left", remaining(ends.saturating_sub(now)))),
+            // How long agents mode lasts is up to the agents, so it shows
+            // only who is working, or "Awake" through the grace period.
+            (Mode::Agents, None) => count.is_none().then(|| "Awake".to_owned()),
+            (_, None) => Some(elapsed_short(
+                now.saturating_sub(self.holding_since.unwrap_or(now)),
+            )),
         };
-        (count, Some(time))
+        (count, time)
     }
 }
 
@@ -652,10 +657,12 @@ impl KeepAwake {
             }),
             Some(s) => (
                 "Awake".into(),
-                Some(format!(
-                    "for {}",
-                    elapsed_long(now.saturating_sub(self.holding_since.unwrap_or(now)))
-                )),
+                (s.mode != Mode::Agents).then(|| {
+                    format!(
+                        "for {}",
+                        elapsed_long(now.saturating_sub(self.holding_since.unwrap_or(now)))
+                    )
+                }),
                 if working > 0 {
                     agents
                 } else if self.scheduled_soon > 0 {
@@ -1320,13 +1327,14 @@ mod tests {
             );
             let (count, time) = k.chip_text(now_ms());
             assert_eq!(count.as_deref(), Some("2 working"));
-            assert_eq!(time.as_deref(), Some("<1m"));
+            assert_eq!(time, None, "agents mode has no timer");
 
             k.set_holders(Vec::new(), cx);
             assert!(
                 k.assertions.holds_system(),
                 "the grace period keeps holding"
             );
+            assert_eq!(k.chip_text(now_ms()), (None, Some("Awake".into())));
             k.last_busy = Some(now_ms() - GRACE_MS - 1);
             k.sync(cx);
             assert!(!k.assertions.holds_system());
