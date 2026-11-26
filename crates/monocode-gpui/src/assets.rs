@@ -235,6 +235,28 @@ fn icon_body(path: &str) -> Option<&'static str> {
         "circle-dashed" => {
             "<path d='M12 3a9 9 0 0 1 4.5 1.2m3.3 3.3A9 9 0 0 1 21 12m-1.2 4.5a9 9 0 0 1-3.3 3.3M12 21a9 9 0 0 1-4.5-1.2m-3.3-3.3A9 9 0 0 1 3 12m1.2-4.5a9 9 0 0 1 3.3-3.3'/>"
         }
+        // Keep awake: the cup (its steam is painted live), the timed modes'
+        // clock faces with the session's share of the hour marked, and the
+        // popover's display and idle marks.
+        "keep-awake-cup" => {
+            "<path d='M4.5 10.5h11v4.25a5.25 5.25 0 0 1-5.25 5.25h-.5A5.25 5.25 0 0 1 4.5 14.75Z'/><path d='M15.5 12h1.25a2.25 2.25 0 0 1 0 4.5H15'/>"
+        }
+        "keep-awake-1h" => {
+            "<circle cx='12' cy='12' r='8.5'/><path d='M12 3.5a8.5 8.5 0 0 1 4.25 1.14' stroke-width='3'/><path d='M12 7.5V12'/>"
+        }
+        "keep-awake-2h" => {
+            "<circle cx='12' cy='12' r='8.5'/><path d='M12 3.5a8.5 8.5 0 0 1 7.36 4.25' stroke-width='3'/><path d='M12 7.5V12'/>"
+        }
+        "keep-awake-4h" => {
+            "<circle cx='12' cy='12' r='8.5'/><path d='M12 3.5a8.5 8.5 0 0 1 8.5 8.5' stroke-width='3'/><path d='M12 7.5V12'/>"
+        }
+        "infinity" => {
+            "<path d='M7.5 15.5C5.6 15.5 4 13.9 4 12s1.6-3.5 3.5-3.5c3.5 0 5.5 7 9 7 1.9 0 3.5-1.6 3.5-3.5s-1.6-3.5-3.5-3.5c-3.5 0-5.5 7-9 7Z'/>"
+        }
+        "display" => {
+            "<rect x='3' y='4.5' width='18' height='12' rx='3'/><path d='M9 20h6M12 16.5V20'/>"
+        }
+        "moon" => "<path d='M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z'/>",
         _ => return None,
     })
 }

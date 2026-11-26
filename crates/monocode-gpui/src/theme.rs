@@ -279,7 +279,11 @@ pub(crate) fn primary_action(enabled: bool) -> Option<(Hsla, Hsla)> {
     if !enabled {
         return Some((accent.opacity(0.28), content(0.35)));
     }
-    let rgba = accent.to_rgb();
+    Some((accent, ink_on(accent)))
+}
+/// Black or white ink for text on `fill`, by its relative luminance.
+pub(crate) fn ink_on(fill: Hsla) -> Hsla {
+    let rgba = fill.to_rgb();
     let linear = |v: f32| {
         if v <= 0.04045 {
             v / 12.92
@@ -288,14 +292,11 @@ pub(crate) fn primary_action(enabled: bool) -> Option<(Hsla, Hsla)> {
         }
     };
     let luminance = 0.2126 * linear(rgba.r) + 0.7152 * linear(rgba.g) + 0.0722 * linear(rgba.b);
-    Some((
-        accent,
-        if luminance > 0.179 {
-            black(1.)
-        } else {
-            white(1.)
-        },
-    ))
+    if luminance > 0.179 {
+        black(1.)
+    } else {
+        white(1.)
+    }
 }
 
 /// Selected text is tinted with the accent; light surfaces get a paler wash

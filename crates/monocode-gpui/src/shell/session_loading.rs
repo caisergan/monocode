@@ -31,6 +31,7 @@ impl Shell {
         let Ok(index) = locked(&self.store).and_then(|store| store.scheduled_sends()) else {
             return;
         };
+        self.sync_keep_awake_schedule(&index, cx);
         let now = monocode_core::time::now_ms();
         for (id, at) in index {
             if at > now

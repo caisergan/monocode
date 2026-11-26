@@ -31,6 +31,13 @@ pub(crate) struct Preferences {
     /// Terminal tab) or "title" (their own title bar tabs). Empty falls back
     /// to `terminal_in_panel`.
     pub terminal_placement: String,
+    /// Keep awake: show its footer chip, the mode Start begins ("agents",
+    /// "1h", "2h", "4h" or "always"), keep the display on too, and the
+    /// battery percent that ends a session on battery power (0 never does).
+    pub keep_awake_footer: bool,
+    pub keep_awake_mode: String,
+    pub keep_awake_display: bool,
+    pub keep_awake_battery: u32,
     // Appearance
     pub theme: String,
     pub wayland_window_decorations: bool,
@@ -134,6 +141,10 @@ impl Default for Preferences {
             action_opens_terminal: true,
             terminal_in_panel: false,
             terminal_placement: String::new(),
+            keep_awake_footer: false,
+            keep_awake_mode: "agents".into(),
+            keep_awake_display: false,
+            keep_awake_battery: 20,
             theme: "dark".into(),
             wayland_window_decorations: true,
             workspace_theme: "default".into(),
