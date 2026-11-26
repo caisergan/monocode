@@ -837,28 +837,24 @@ impl Shell {
                     .cached(StyleRefinement::default().flex_1().min_w_0().h(px(height))),
             )
             .map(|d| {
-                let keep_awake = self.keep_awake_chip(cx);
+                // High usage, then keep awake, then the terminal controls,
+                // with a hairline between each pair.
                 let pressure = self.pressure_chip(cx);
+                let keep_awake = self.keep_awake_chip(cx);
                 let terminal = self.terminal_footer(cx);
-                let between = pressure.is_some() && terminal.is_some();
-                let after_keep_awake =
-                    keep_awake.is_some() && (pressure.is_some() || terminal.is_some());
-                d.children(keep_awake)
-                    .when(after_keep_awake, |d| {
-                        d.child(
-                            super::terminal_dock::footer_separator()
-                                .mr(px(super::terminal_dock::FOOTER_GAP + 3.))
-                                .when(!self.workspace.boxy_layout(), |d| d.mb(px(2.))),
-                        )
-                    })
-                    .children(pressure)
-                    .when(between, |d| {
-                        d.child(
-                            super::terminal_dock::footer_separator()
-                                .mr(px(super::terminal_dock::FOOTER_GAP + 3.))
-                                .when(!self.workspace.boxy_layout(), |d| d.mb(px(2.))),
-                        )
-                    })
+                let after_pressure =
+                    pressure.is_some() && (keep_awake.is_some() || terminal.is_some());
+                let after_keep_awake = keep_awake.is_some() && terminal.is_some();
+                let boxy = self.workspace.boxy_layout();
+                let separator = move || {
+                    super::terminal_dock::footer_separator()
+                        .mr(px(super::terminal_dock::FOOTER_GAP + 3.))
+                        .when(!boxy, |d| d.mb(px(2.)))
+                };
+                d.children(pressure)
+                    .when(after_pressure, |d| d.child(separator()))
+                    .children(keep_awake)
+                    .when(after_keep_awake, |d| d.child(separator()))
                     .children(terminal)
             })
     }
