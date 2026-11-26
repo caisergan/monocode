@@ -2867,6 +2867,9 @@ impl Shell {
                 .into_any_element();
         };
         let state = review.read(cx).state.clone();
+        // A native HTML preview moves and shows its web view as it paints;
+        // replaying the cached frame would leave it hidden.
+        let native_preview = review.read(cx).shows_native_preview(cx);
         let (ratio, deferred) = match sliding {
             Some((width, _, opening, _)) => {
                 window.request_animation_frame();
@@ -2963,7 +2966,13 @@ impl Shell {
                         // The same progress drives both directions, so a
                         // reversal cannot flash from a faded exit to opaque.
                         let d = d.opacity(if moving { header * 0.4 } else { header });
-                        let review = review.cached(StyleRefinement::default().size_full());
+                        let review = if native_preview {
+                            review.into_any_element()
+                        } else {
+                            review
+                                .cached(StyleRefinement::default().size_full())
+                                .into_any_element()
+                        };
                         if sliding_now && !chat_hidden {
                             d.child(
                                 div()

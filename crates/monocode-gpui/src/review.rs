@@ -722,6 +722,15 @@ impl ReviewPane {
         })
         .detach();
     }
+    /// Whether the active file shows an HTML preview, a native view that
+    /// must repaint every frame.
+    pub(crate) fn shows_native_preview(&self, cx: &gpui::App) -> bool {
+        self.sources
+            .get(self.state.active)
+            .filter(|s| s.editor_mode)
+            .and_then(|s| s.editor.as_ref())
+            .is_some_and(|e| e.read(cx).shows_html_preview())
+    }
     #[cfg(test)]
     pub(crate) fn active_editor(&self) -> Option<Entity<FileEditor>> {
         self.sources
