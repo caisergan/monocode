@@ -5695,8 +5695,9 @@ impl Shell {
                         (monos, manager.active.clone())
                     })
                     .unwrap_or_default();
+                let listed = self.projects_by_last_worked(self.workspace.projects.clone(), cx);
                 let picker = cx.new(|cx| {
-                    ProjectPicker::new(&self.workspace.projects, &self.workspace.project, cx)
+                    ProjectPicker::new(&listed, &self.workspace.project, cx)
                         .appearance(self.workspace.project_appearance.clone())
                         .allow_remote()
                         .monos(monos, active, cx)
@@ -5739,6 +5740,7 @@ impl Shell {
                 let chats = self.workspace.project == "~";
                 let mut listed = vec!["~".to_owned()];
                 listed.extend(self.workspace.projects.iter().cloned());
+                let listed = self.projects_by_last_worked(listed, cx);
                 let picker = cx.new(|cx| {
                     ProjectPicker::new(&listed, &self.workspace.project, cx)
                         .appearance(self.workspace.project_appearance.clone())
