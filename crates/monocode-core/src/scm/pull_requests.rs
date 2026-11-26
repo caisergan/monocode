@@ -1,6 +1,6 @@
 //! GitPullRequests.tsx's list: the pull requests of the repository this
 //! working copy pushes to, by state (Tauri's git_github_pull_requests).
-use super::{expand_home, gh_run, git_stdout, github_repo_for, remote_workspace};
+use super::{expand_home, gh_run, git_run, git_stdout, github_repo_for, remote_workspace};
 use serde::Deserialize;
 use std::path::Path;
 use std::sync::Mutex;
@@ -29,6 +29,22 @@ pub struct PullRequest {
     /// Rolled-up CI for open pull requests: `pass`, `fail`, `pending`, or
     /// empty when there are no checks or they were not requested.
     pub checks: String,
+    /// How the open pull request's checks stand, one count per state.
+    pub check_counts: CheckCounts,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CheckCounts {
+    pub passed: u32,
+    pub failed: u32,
+    pub pending: u32,
+    /// Skipped, cancelled, neutral and anything else that is neither.
+    pub other: u32,
+}
+impl CheckCounts {
+    pub fn total(&self) -> u32 {
+        self.passed + self.failed + self.pending + self.other
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -37,6 +53,8 @@ pub struct PullRequestList {
     /// The signed-in GitHub login, so the list can tell your pull requests apart.
     pub viewer: String,
     pub items: Vec<PullRequest>,
+    /// The checkout's local branches, so merged rows can offer to delete theirs.
+    pub local_branches: Vec<String>,
 }
 
 pub fn pull_requests(cwd: &Path, state: &str, limit: u32) -> Result<PullRequestList, String> {
@@ -72,7 +90,68 @@ pub fn pull_requests(cwd: &Path, state: &str, limit: u32) -> Result<PullRequestL
         items: parse(&json)?,
         viewer: viewer(&root),
         repo,
+        local_branches: local_branches(&root),
     })
+}
+
+fn local_branches(root: &Path) -> Vec<String> {
+    git_stdout(
+        root,
+        &["for-each-ref", "--format=%(refname:short)", "refs/heads"],
+    )
+    .map(|text| text.lines().map(|line| line.trim().to_owned()).collect())
+    .unwrap_or_default()
+}
+
+/// gh prints nothing on stdout for several write commands, which gh_run
+/// reports as an error.
+fn gh_quiet(root: &Path, args: &[&str]) -> Result<(), String> {
+    match gh_run(root, args) {
+        Ok(_) => Ok(()),
+        Err(error) if error == "gh returned no output" => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// `gh pr merge`: `merge`, `squash` or `rebase`. `auto` waits for required
+/// checks and reviews, as the repository's auto-merge setting allows.
+pub fn merge(cwd: &Path, number: u64, method: &str, auto: bool) -> Result<(), String> {
+    if remote_workspace::is_remote(cwd) {
+        return Err("Pull requests are merged from local projects only".into());
+    }
+    let flag = match method {
+        "squash" => "--squash",
+        "rebase" => "--rebase",
+        _ => "--merge",
+    };
+    let number = number.to_string();
+    let mut args = vec!["pr", "merge", number.as_str(), flag];
+    if auto {
+        args.push("--auto");
+    }
+    gh_quiet(&expand_home(cwd), &args)
+}
+
+/// Take a draft pull request out of draft.
+pub fn mark_ready(cwd: &Path, number: u64) -> Result<(), String> {
+    if remote_workspace::is_remote(cwd) {
+        return Err("Pull requests are changed from local projects only".into());
+    }
+    gh_quiet(&expand_home(cwd), &["pr", "ready", &number.to_string()])
+}
+
+/// Delete a merged pull request's local branch. Never the checked-out one.
+pub fn delete_local_branch(cwd: &Path, branch: &str) -> Result<(), String> {
+    if remote_workspace::is_remote(cwd) {
+        return Err("Branches are deleted in local projects only".into());
+    }
+    let root = expand_home(cwd);
+    if git_stdout(&root, &["branch", "--show-current"]).as_deref() == Some(branch) {
+        return Err(format!("{branch} is checked out"));
+    }
+    git_run(&root, &["branch", "-D", "--", branch])
+        .map(|_| ())
+        .ok_or_else(|| format!("Could not delete {branch}"))
 }
 
 /// Check out a pull request's branch, including one from a fork.
@@ -179,6 +258,12 @@ fn parse(json: &str) -> Result<Vec<PullRequest>, String> {
         .into_iter()
         .map(|row| {
             let author = row.author.unwrap_or_default();
+            let check_states: Vec<String> = row
+                .status_check_rollup
+                .unwrap_or_default()
+                .into_iter()
+                .map(|row| crate::inbox::github::github_pr_check_from_row(row).state)
+                .collect();
             PullRequest {
                 number: row.number,
                 title: row.title,
@@ -194,23 +279,33 @@ fn parse(json: &str) -> Result<Vec<PullRequest>, String> {
                 merged_at: row.merged_at.filter(|value| !value.is_empty()),
                 closed_at: row.closed_at.filter(|value| !value.is_empty()),
                 review_decision: row.review_decision.unwrap_or_default().to_uppercase(),
-                checks: rollup(row.status_check_rollup.unwrap_or_default()),
+                check_counts: counts(&check_states),
+                checks: rollup(&check_states),
             }
         })
         .collect())
 }
 
 /// One word for a PR's CI: any failure wins, then anything still running.
-fn rollup(rows: Vec<crate::inbox::github::GitHubStatusCheckRow>) -> String {
-    let states: Vec<String> = rows
-        .into_iter()
-        .map(|row| crate::inbox::github::github_pr_check_from_row(row).state)
-        .collect();
+fn rollup(states: &[String]) -> String {
     ["fail", "pending", "pass"]
         .into_iter()
         .find(|state| states.iter().any(|s| s == state))
         .unwrap_or("")
         .to_owned()
+}
+
+fn counts(states: &[String]) -> CheckCounts {
+    let mut counts = CheckCounts::default();
+    for state in states {
+        match state.as_str() {
+            "pass" => counts.passed += 1,
+            "fail" => counts.failed += 1,
+            "pending" => counts.pending += 1,
+            _ => counts.other += 1,
+        }
+    }
+    counts
 }
 
 impl PullRequest {
@@ -267,6 +362,14 @@ mod tests {
         assert!(rows[0].draft);
         assert_eq!(rows[0].review_decision, "APPROVED");
         assert_eq!(rows[0].checks, "pending");
+        assert_eq!(
+            rows[0].check_counts,
+            CheckCounts {
+                passed: 1,
+                pending: 1,
+                ..Default::default()
+            }
+        );
         assert_eq!(rows[1].author, "");
         assert_eq!(rows[1].checks, "");
         assert_eq!(rows[1].closed_at, None);

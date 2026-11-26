@@ -1193,7 +1193,12 @@ mod tests {
                 assert_eq!(panel.read(cx).tab(), RightTab::Terminal);
                 assert_eq!(
                     panel.read(cx).tabs(),
-                    [RightTab::Files, RightTab::Terminal, RightTab::Graph]
+                    [
+                        RightTab::Files,
+                        RightTab::Terminal,
+                        RightTab::Graph,
+                        RightTab::PullRequests
+                    ]
                 );
             })
             .unwrap();

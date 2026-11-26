@@ -2005,6 +2005,27 @@ impl Shell {
                 crate::changes::ChangesEvent::OpenPullRequest(item) => {
                     this.open_project_pull_request(item.as_ref().clone(), window, cx);
                 }
+                crate::changes::ChangesEvent::ShowPullRequests => {
+                    if let Some(panel) = this.right_panel.clone() {
+                        let closing = panel.read(cx).tab();
+                        let tab = crate::right_panel::RightTab::PullRequests;
+                        if closing != tab {
+                            this.corner_reveal =
+                                Some(crate::project_tabs::TabReveal::new(tab, closing));
+                        }
+                        panel.update(cx, |p, cx| p.select(tab, cx));
+                        this.invalidate_chrome(cx);
+                        cx.notify();
+                    }
+                }
+            },
+        ));
+        let pull_requests = panel.read(cx).pull_requests.clone();
+        self.observations.push(cx.subscribe_in(
+            &pull_requests,
+            window,
+            |this, _, event: &crate::pull_requests::OpenPullRequest, window, cx| {
+                this.open_project_pull_request(event.0.clone(), window, cx);
             },
         ));
         let history = panel.read(cx).history.clone();
@@ -5334,7 +5355,7 @@ impl Shell {
     /// Explorer and History, and Terminal when it lives in the panel. Changes
     /// opens from the diff stat instead.
     fn right_tab_count(&self, cx: &App) -> usize {
-        2 + usize::from(self.terminal_in_panel(cx))
+        3 + usize::from(self.terminal_in_panel(cx))
     }
     /// The toggle's room at the end of the strip: `pl-1.5`, the button, `pr-3`.
     fn toggle_room(&self, cx: &App) -> f32 {

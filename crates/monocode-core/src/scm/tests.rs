@@ -880,7 +880,7 @@ fn split_github_repo_reads_owner_and_name() {
 fn pr_create_rejects_empty_title() {
     let dir = tmp();
     assert_eq!(
-        pr_create(dir.path(), "  ", "", "main", "feature").unwrap_err(),
+        pr_create(dir.path(), "  ", "", "main", "feature", false).unwrap_err(),
         "Pull request title cannot be empty"
     );
 }

@@ -363,6 +363,8 @@ impl Monos {
                     crate::changes::ChangesEvent::OpenPullRequest(item) => {
                         cx.emit(crate::monos::OpenPullRequest(item.as_ref().clone()))
                     }
+                    // Monos keep the section; they have no Pull requests tab.
+                    crate::changes::ChangesEvent::ShowPullRequests => {}
                 },
             );
             let summary_id = mono.id.clone();

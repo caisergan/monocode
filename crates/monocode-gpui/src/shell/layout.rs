@@ -579,7 +579,18 @@ impl Shell {
                 RightTab::Files,
             ),
             ("right-panel-history", "History", "clock", RightTab::Graph),
+            (
+                "right-panel-pull-requests",
+                "Pull requests",
+                "git-pull-request",
+                RightTab::PullRequests,
+            ),
         ];
+        let open_count = self
+            .right_panel
+            .as_ref()
+            .and_then(|p| p.read(cx).pull_requests.read(cx).open_count())
+            .unwrap_or(0);
         if self.terminal_in_panel(cx) {
             tabs.insert(
                 1,
@@ -618,7 +629,15 @@ impl Shell {
                                 };
                                 tab_button(
                                     id,
-                                    crate::project_tabs::TabLabel::from(label).max_width(
+                                    crate::project_tabs::TabLabel::from((
+                                        label,
+                                        if tab == RightTab::PullRequests {
+                                            open_count
+                                        } else {
+                                            0
+                                        },
+                                    ))
+                                    .max_width(
                                         crate::right_panel::tab_label_width(
                                             self.project_tabs_width(cx),
                                             count,
@@ -958,7 +977,9 @@ mod tests {
             };
             let label_selector = Box::leak(format!("{}-label", selectors[1]).into_boxed_str());
             let mut full_label_width = None;
-            for width in [420., 290., 270., 260., 220., 420.] {
+            // Each width is 28px wider than with two tabs: the Pull requests
+            // tab and its gap.
+            for width in [420., 318., 298., 288., 248., 420.] {
                 window
                     .update(visual, |shell, _, cx| {
                         shell.workspace.new_layout_boxy = boxy;
@@ -991,7 +1012,7 @@ mod tests {
                         assert_eq!(label.size.width, full_width);
                     }
                     full_label_width = Some(label.size.width);
-                } else if width == 290. {
+                } else if width == 318. {
                     let label = visual.debug_bounds(label_selector).unwrap();
                     assert!(label.size.width > px(0.));
                     assert!(label.size.width < full_label_width.unwrap());

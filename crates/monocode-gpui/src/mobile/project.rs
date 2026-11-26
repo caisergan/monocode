@@ -446,7 +446,7 @@ fn create_pr_url(
     root: &Path,
     harness: Option<crate::changes::TextHarness>,
 ) -> Result<String, String> {
-    crate::changes::create_pr_blocking(harness, root).map(|url| url.trim().to_string())
+    crate::changes::create_pr_blocking(harness, root, false).map(|url| url.trim().to_string())
 }
 
 // ---------------------------------------------------------------------------
