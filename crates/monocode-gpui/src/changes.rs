@@ -56,6 +56,8 @@ pub(crate) enum ChangesEvent {
     },
     /// A pull request row was clicked; the linked-work panel shows it.
     OpenPullRequest(Box<monocode_core::inbox::Item>),
+    /// The branch's PR button: show the right panel's Pull requests tab.
+    ShowPullRequests,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
@@ -241,6 +243,9 @@ pub(crate) struct Changes {
     commit_anchor: AnchorSlot,
     /// GitPullRequests: the project's pull requests, under the changed files.
     pull_requests: Entity<crate::pull_requests::PullRequests>,
+    /// The right panel has a Pull requests tab, so the section stays out and
+    /// the branch's PR button opens that tab.
+    pull_requests_tab: bool,
     _subscriptions: Vec<Subscription>,
 }
 impl EventEmitter<ChangesEvent> for Changes {}
@@ -285,10 +290,28 @@ impl Changes {
             branch_anchor: AnchorSlot::default(),
             commit_anchor: AnchorSlot::default(),
             pull_requests: pull_requests.clone(),
+            pull_requests_tab: false,
             _subscriptions: subscriptions,
         };
         this.rebuild(cx);
         this
+    }
+    /// Leave pull requests to the right panel's own tab.
+    pub(crate) fn use_pull_requests_tab(&mut self, cx: &mut Context<Self>) {
+        self.pull_requests_tab = true;
+        let cwd = self.cwd.clone();
+        self.pull_requests
+            .update(cx, |list, cx| list.set_project(&cwd, None, false, cx));
+        cx.notify();
+    }
+    /// Pushing or creating a pull request.
+    pub(crate) fn busy_with_branch(&self) -> bool {
+        matches!(self.busy.as_deref(), Some("pr" | "sync"))
+    }
+    pub(crate) fn push_branch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.busy.is_none() {
+            self.sync(window, cx);
+        }
     }
     pub(crate) fn set_view(&mut self, view: ChangesView, cx: &mut Context<Self>) {
         self.view = view;
@@ -339,7 +362,11 @@ impl Changes {
                 .update(cx, |m, cx| m.set_text(String::new(), cx));
         }
         let branch = index.as_ref().and_then(|i| i.branch.clone());
-        let (cwd, enabled, current) = (self.cwd.clone(), self.enabled, branch.clone());
+        let (cwd, enabled, current) = (
+            self.cwd.clone(),
+            self.enabled && !self.pull_requests_tab,
+            branch.clone(),
+        );
         self.pull_requests
             .update(cx, |list, cx| list.set_project(&cwd, current, enabled, cx));
         if self.enabled && branch != self.pr_branch {
@@ -810,7 +837,7 @@ impl Changes {
                 this.message
                     .update(cx, |m, cx| m.set_text(String::new(), cx));
                 if let Some(harness) = pr {
-                    this.open_created_pr(harness, window, cx);
+                    this.open_created_pr(harness, false, window, cx);
                 }
             },
             window,
@@ -821,6 +848,7 @@ impl Changes {
     fn open_created_pr(
         &mut self,
         harness: Option<TextHarness>,
+        draft: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -829,7 +857,7 @@ impl Changes {
         let cwd = PathBuf::from(&self.cwd);
         let work = cx
             .background_executor()
-            .spawn(async move { create_pr_blocking(harness, &cwd) });
+            .spawn(async move { create_pr_blocking(harness, &cwd, draft) });
         cx.spawn_in(window, async move |this, cx| {
             let result = work.await;
             let _ = this.update_in(cx, |this, window, cx| {
@@ -854,7 +882,7 @@ impl Changes {
             cx,
         );
     }
-    fn create_pr(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn create_pr(&mut self, draft: bool, window: &mut Window, cx: &mut Context<Self>) {
         let index = self.index(cx);
         let ahead = index.as_ref().is_some_and(|i| i.ahead > 0);
         let question = Self::on_default(index.as_ref()).then(|| {
@@ -883,12 +911,12 @@ impl Changes {
                     this.run_git(
                         "pr".into(),
                         |path| scm::push(&path),
-                        move |this, window, cx| this.open_created_pr(harness, window, cx),
+                        move |this, window, cx| this.open_created_pr(harness, draft, window, cx),
                         window,
                         cx,
                     );
                 } else {
-                    this.open_created_pr(harness, window, cx);
+                    this.open_created_pr(harness, draft, window, cx);
                 }
             });
         })
@@ -1244,18 +1272,9 @@ impl Changes {
         let (ahead, behind) = (index.ahead, index.behind);
         let has_open_pr = self.pr.as_ref().is_some_and(|p| p.state == "open");
         let on_default = Self::on_default(Some(index));
-        let diverged = ahead > 0 && behind > 0;
-        let files = index.files.len();
         let can_publish = index.upstream.is_none();
         let can_sync = index.upstream.is_some() && (ahead > 0 || behind > 0);
-        let can_create_pr = index.branch.is_some()
-            && index.default_branch.is_some()
-            && !has_open_pr
-            && !on_default
-            && !diverged
-            && files == 0
-            && index.ahead_of_default > 0
-            && behind == 0;
+        let can_create_pr = !has_open_pr && create_pr_blocker(index).is_none();
         let can_view_pr = has_open_pr && self.pr.as_ref().is_some_and(|p| !p.url.is_empty());
         let show_create = !has_open_pr && !on_default;
         if !can_publish && !can_sync && !show_create && !has_open_pr {
@@ -1374,7 +1393,9 @@ impl Changes {
                         .child("Create PR")
                         .when(enabled, |d| {
                             d.on_click(
-                                cx.listener(|this, _, window, cx| this.create_pr(window, cx)),
+                                cx.listener(|this, _, window, cx| {
+                                    this.create_pr(false, window, cx)
+                                }),
                             )
                         }),
                 )
@@ -1391,17 +1412,44 @@ impl Changes {
                 } else {
                     format!("View PR #{}: {}", pr.number, pr.title)
                 };
-                let enabled = can_view_pr && !busy;
+                let tab = self.pull_requests_tab;
+                let enabled = (can_view_pr || tab) && !busy;
                 let url = pr.url.clone();
                 d.child(
                     button("view-pr", title, enabled)
-                        .child(glyph("external-link"))
-                        .child(div().min_w_0().truncate().child(if pr.number > 0 {
-                            format!("View PR #{}", pr.number)
+                        .when(tab, |d| d.justify_start().px(px(10.)))
+                        .child(if tab {
+                            icon("git-pull-request", 14.)
+                                .text_color(gpui::rgb(0x4ade80))
+                                .into_any_element()
                         } else {
-                            "View PR".into()
-                        }))
-                        .when(enabled, |d| d.on_click(move |_, _, cx| cx.open_url(&url))),
+                            glyph("external-link")
+                        })
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .child(match (pr.number > 0, tab) {
+                                    (true, true) if !pr.title.is_empty() => {
+                                        format!("#{} · {}", pr.number, pr.title)
+                                    }
+                                    (true, _) => format!("View PR #{}", pr.number),
+                                    (false, _) => "View PR".into(),
+                                }),
+                        )
+                        .when(tab, |d| {
+                            d.child(div().flex_1())
+                                .child(icon("chevron-right", 13.).text_color(content(0.5)))
+                        })
+                        .when(enabled, |d| {
+                            d.on_click(cx.listener(move |_, _, _, cx| {
+                                if tab {
+                                    cx.emit(ChangesEvent::ShowPullRequests)
+                                } else {
+                                    cx.open_url(&url)
+                                }
+                            }))
+                        }),
                 )
             })
             .into_any_element()
@@ -1869,11 +1917,48 @@ pub(crate) fn generate_commit_message(
     })
 }
 
+/// Why the checked-out branch can't open a pull request yet, or None when it
+/// can. An existing pull request is the caller's to check.
+pub(crate) fn create_pr_blocker(index: &DiffIndex) -> Option<String> {
+    let plural = |n: usize| if n == 1 { "" } else { "s" };
+    let files = index.files.len();
+    let Some(branch) = &index.branch else {
+        return Some("Not on a branch".into());
+    };
+    let Some(base) = &index.default_branch else {
+        return Some("No default branch to merge into".into());
+    };
+    if branch == base {
+        return Some(format!("{branch} is the default branch"));
+    }
+    if index.ahead > 0 && index.behind > 0 {
+        return Some("The branch has diverged from its upstream".into());
+    }
+    if index.behind > 0 {
+        return Some(format!(
+            "Pull {} commit{} first",
+            index.behind,
+            plural(index.behind as usize)
+        ));
+    }
+    if files > 0 {
+        return Some(format!(
+            "Commit or stash {files} changed file{} first",
+            plural(files)
+        ));
+    }
+    if index.ahead_of_default == 0 {
+        return Some(format!("No commits ahead of {base}"));
+    }
+    None
+}
+
 /// generatePrContent, falling back to the commits, then `gh pr create`; the
 /// new pull request's URL. Blocking.
 pub(crate) fn create_pr_blocking(
     harness: Option<TextHarness>,
     cwd: &std::path::Path,
+    draft: bool,
 ) -> Result<String, String> {
     let range = scm::range_context(cwd)?;
     let parsed = harness.and_then(|harness| {
@@ -1897,7 +1982,7 @@ pub(crate) fn create_pr_blocking(
         .map(|(_, b)| b)
         .filter(|b| !b.is_empty())
         .unwrap_or_else(|| range.commit_summary.trim().to_owned());
-    scm::pr_create(cwd, &title, &body, &range.base, &range.head)
+    scm::pr_create(cwd, &title, &body, &range.base, &range.head, draft)
 }
 
 /// A read-only one-shot turn, as the React text harness runs: the final
@@ -2001,7 +2086,9 @@ impl Render for Changes {
                     .min_h_0(),
                 ),
             })
-            .child(self.pull_requests.clone())
+            .when(!self.pull_requests_tab, |d| {
+                d.child(self.pull_requests.clone())
+            })
             .children(menu)
             .into_any_element()
     }
@@ -2010,6 +2097,40 @@ impl Render for Changes {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_pull_request_waits_for_a_clean_pushed_branch_ahead_of_default() {
+        let index = |f: &dyn Fn(&mut DiffIndex)| {
+            let mut index = DiffIndex {
+                branch: Some("feat/x".into()),
+                default_branch: Some("dev".into()),
+                ahead_of_default: 2,
+                ..Default::default()
+            };
+            f(&mut index);
+            create_pr_blocker(&index)
+        };
+        assert_eq!(index(&|_| {}), None);
+        assert_eq!(
+            index(&|i| i.branch = Some("dev".into())).as_deref(),
+            Some("dev is the default branch")
+        );
+        assert_eq!(
+            index(&|i| i.behind = 1).as_deref(),
+            Some("Pull 1 commit first")
+        );
+        assert_eq!(
+            index(&|i| i.ahead_of_default = 0).as_deref(),
+            Some("No commits ahead of dev")
+        );
+        assert_eq!(
+            index(&|i| {
+                i.ahead = 1;
+                i.behind = 1
+            })
+            .as_deref(),
+            Some("The branch has diverged from its upstream")
+        );
+    }
     #[gpui::test]
     fn enabling_an_enabled_changes_panel_does_not_reload(cx: &mut gpui::TestAppContext) {
         let window = cx.update(|cx| {

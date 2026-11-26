@@ -63,6 +63,8 @@ pub(crate) enum RightTab {
     Files,
     Changes,
     Graph,
+    #[serde(rename = "pull-requests")]
+    PullRequests,
     /// The project's terminal, when it opens in the panel. Always last and
     /// never part of the saved order.
     Terminal,
@@ -73,6 +75,7 @@ impl RightTab {
             Self::Files => "Explorer",
             Self::Changes => "Changes",
             Self::Graph => "History",
+            Self::PullRequests => "Pull requests",
             Self::Terminal => "Terminal",
         }
     }
@@ -80,7 +83,10 @@ impl RightTab {
     /// Changes has no tab; the title bar's diff stat opens it.
     pub(crate) fn normalize(order: &[RightTab]) -> Vec<RightTab> {
         let mut out = Vec::new();
-        for tab in order.iter().chain(&[Self::Files, Self::Graph]) {
+        for tab in order
+            .iter()
+            .chain(&[Self::Files, Self::Graph, Self::PullRequests])
+        {
             if !matches!(tab, Self::Terminal | Self::Changes) && !out.contains(tab) {
                 out.push(*tab);
             }
@@ -251,6 +257,8 @@ pub(crate) struct RightPanel {
     pub explorer: Entity<Explorer>,
     pub changes: Entity<Changes>,
     pub history: Entity<History>,
+    pub pull_requests: Entity<crate::pull_requests::PullRequests>,
+    git: Entity<ProjectGit>,
     focus: FocusHandle,
     tab: RightTab,
     order: Vec<RightTab>,
@@ -286,9 +294,33 @@ impl RightPanel {
         let explorer = cx.new(|cx| Explorer::new(git.clone(), window, cx));
         let changes = cx.new(|cx| Changes::new(git.clone(), window, cx));
         let history = cx.new(|cx| History::new(git.clone(), window, cx));
+        let pull_requests = cx.new(crate::pull_requests::PullRequests::tab);
+        changes.update(cx, |c, cx| c.use_pull_requests_tab(cx));
         let subscriptions = vec![
-            cx.observe(&git, |_, _, cx| cx.notify()),
-            cx.subscribe(&git, |_, _, _: &GitChanged, cx| cx.notify()),
+            cx.observe(&git, |this, _, cx| {
+                this.sync_pull_requests(cx);
+                cx.notify()
+            }),
+            cx.subscribe(&git, |this, _, _: &GitChanged, cx| {
+                this.sync_pull_requests(cx);
+                cx.notify()
+            }),
+            // Changes reports pushing and creating through its busy state.
+            cx.observe(&changes, |this, _, cx| this.sync_pull_requests(cx)),
+            // The tab label carries the open count.
+            cx.observe(&pull_requests, |_, _, cx| cx.notify()),
+            cx.subscribe_in(
+                &pull_requests,
+                window,
+                |this, _, action: &crate::pull_requests::BranchAction, window, cx| {
+                    this.changes.update(cx, |changes, cx| match action {
+                        crate::pull_requests::BranchAction::Create { draft } => {
+                            changes.create_pr(*draft, window, cx)
+                        }
+                        crate::pull_requests::BranchAction::Push => changes.push_branch(window, cx),
+                    })
+                },
+            ),
         ];
         let panel = cx.entity();
         let tabs = cx.new(|cx| ProjectTabs {
@@ -301,6 +333,8 @@ impl RightPanel {
             explorer,
             changes,
             history,
+            pull_requests,
+            git,
             tab,
             order: RightTab::normalize(&order),
             shown: false,
@@ -311,8 +345,41 @@ impl RightPanel {
             drag: None,
             reveal: None,
             skip_click: false,
-            tab_bounds: (0..4).map(|_| Default::default()).collect(),
+            tab_bounds: (0..5).map(|_| Default::default()).collect(),
             _subscriptions: subscriptions,
+        }
+    }
+    /// The Pull requests tab follows the checkout: project, branch, and
+    /// what Changes would let a new pull request do.
+    fn sync_pull_requests(&mut self, cx: &mut Context<Self>) {
+        let git = self.git.read(cx);
+        let project = git.project().to_owned();
+        let index = git.index.clone();
+        let branch = index.as_ref().and_then(|i| i.branch.clone());
+        let state = crate::pull_requests::BranchState {
+            ahead: index
+                .as_ref()
+                .map_or(0, |i| if i.upstream.is_some() { i.ahead } else { 0 }),
+            on_default: index
+                .as_ref()
+                .is_some_and(|i| i.branch.is_some() && i.branch == i.default_branch),
+            default_branch: index.as_ref().and_then(|i| i.default_branch.clone()),
+            blocker: index.as_ref().map_or(
+                Some("Not a git repository".into()),
+                crate::changes::create_pr_blocker,
+            ),
+            busy: self.changes.read(cx).busy_with_branch(),
+        };
+        let enabled = self.pull_requests_shown();
+        self.pull_requests.update(cx, |prs, cx| {
+            prs.set_project(&project, branch, enabled, cx);
+            prs.set_branch_state(state, cx);
+        });
+    }
+    fn pull_requests_shown(&self) -> bool {
+        match self.sidebar_tab {
+            Some(tab) => tab == RightTab::PullRequests,
+            None => self.shown && self.tab == RightTab::PullRequests,
         }
     }
     pub(crate) fn tab(&self) -> RightTab {
@@ -398,6 +465,9 @@ impl RightPanel {
         self.history.update(cx, |h, cx| {
             h.set_enabled(shown && tab == RightTab::Graph, cx)
         });
+        let prs = shown && tab == RightTab::PullRequests;
+        self.pull_requests
+            .update(cx, |p, cx| p.set_enabled(prs, cx));
     }
     pub(crate) fn focus_pane(&self, window: &mut Window, cx: &mut App) {
         let focus = match (self.shown, self.tab) {
@@ -515,8 +585,13 @@ impl RightPanel {
                     RightTab::Files => ("right-panel-tab-Explorer", "file-script"),
                     RightTab::Changes => ("right-panel-tab-Changes", "git-branch"),
                     RightTab::Graph => ("right-panel-tab-History", "clock"),
+                    RightTab::PullRequests => ("right-panel-tab-PullRequests", "git-pull-request"),
                     RightTab::Terminal => ("right-panel-tab-Terminal", "terminal"),
                 };
+                let open_count = (tab == RightTab::PullRequests)
+                    .then(|| self.pull_requests.read(cx).open_count())
+                    .flatten()
+                    .unwrap_or(0);
                 let unfolded = match progress {
                     Some((_, p)) if active => p,
                     Some((closing, p)) if tab == closing => 1. - p,
@@ -535,7 +610,7 @@ impl RightPanel {
                     .child(
                         tab_button(
                             id,
-                            TabLabel::from(tab.label())
+                            TabLabel::from((tab.label(), open_count))
                                 .max_width(tab_label_width(self.tab_width, count)),
                             path,
                             active,
@@ -612,6 +687,11 @@ impl Render for RightPanel {
                 .clone()
                 .cached(StyleRefinement::default().flex_1().min_h_0().w_full())
                 .into_any_element(),
+            RightTab::PullRequests => self
+                .pull_requests
+                .clone()
+                .cached(StyleRefinement::default().flex_1().min_h_0().w_full())
+                .into_any_element(),
             // The shell paints the terminal over this pane.
             RightTab::Terminal => div().into_any_element(),
         };
@@ -644,11 +724,15 @@ mod tests {
     fn tab_order_keeps_known_tabs_once() {
         assert_eq!(
             RightTab::normalize(&[RightTab::Graph, RightTab::Graph]),
-            [RightTab::Graph, RightTab::Files]
+            [RightTab::Graph, RightTab::Files, RightTab::PullRequests]
         );
         assert_eq!(
             RightTab::normalize(&[RightTab::Changes, RightTab::Graph]),
-            [RightTab::Graph, RightTab::Files]
+            [RightTab::Graph, RightTab::Files, RightTab::PullRequests]
+        );
+        assert_eq!(
+            RightTab::normalize(&[RightTab::PullRequests, RightTab::Files]),
+            [RightTab::PullRequests, RightTab::Files, RightTab::Graph]
         );
         assert_eq!(format_integer(1234567), "1,234,567");
         assert_eq!(format_integer(12), "12");

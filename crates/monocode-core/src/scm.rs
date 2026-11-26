@@ -12,7 +12,10 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::files::remote as remote_workspace;
-pub use pull_requests::{checkout as pr_checkout, pull_requests, PullRequest, PullRequestList};
+pub use pull_requests::{
+    checkout as pr_checkout, delete_local_branch, mark_ready as pr_mark_ready, merge as pr_merge,
+    pull_requests, CheckCounts, PullRequest, PullRequestList,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -356,6 +359,50 @@ pub fn range_context(cwd: &Path) -> Result<RangeContext, String> {
     })
 }
 
+/// The commits a pull request from this branch would carry, newest first:
+/// short SHA and subject, after the default branch it would merge into.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BranchCommits {
+    pub base: String,
+    pub commits: Vec<(String, String)>,
+}
+
+pub fn branch_commits(cwd: &Path, limit: usize) -> Result<BranchCommits, String> {
+    if remote_workspace::is_remote(cwd) {
+        return Err("Branch commits are read in local projects only".into());
+    }
+    let root = expand_home(cwd);
+    let root = root.as_path();
+    let remote = git_remote_name(root);
+    let base = git_default_branch(root, remote.as_deref())
+        .ok_or_else(|| "Could not resolve the default branch".to_string())?;
+    let base_ref = match &remote {
+        Some(remote) if git_ref_exists(root, &format!("refs/remotes/{remote}/{base}")) => {
+            format!("{remote}/{base}")
+        }
+        _ => base.clone(),
+    };
+    let limit = format!("--max-count={}", limit.max(1));
+    let log = git_run(
+        root,
+        &[
+            "log",
+            &limit,
+            "--format=%h%x09%s",
+            &format!("{base_ref}..HEAD"),
+        ],
+    )
+    .unwrap_or_default();
+    Ok(BranchCommits {
+        base,
+        commits: log
+            .lines()
+            .filter_map(|line| line.split_once('\t'))
+            .map(|(sha, subject)| (sha.to_owned(), subject.to_owned()))
+            .collect(),
+    })
+}
+
 /// Latest pull request for the current branch, if `gh` can see one.
 pub fn pr_status(cwd: &Path) -> Result<Option<Pr>, String> {
     if remote_workspace::is_remote(cwd) {
@@ -379,11 +426,12 @@ pub fn pr_create(
     body: &str,
     base: &str,
     head: &str,
+    draft: bool,
 ) -> Result<String, String> {
     if remote_workspace::is_remote(cwd) {
         return remote_workspace::command(
             "git_pr_create",
-            json!({"cwd":cwd,"title":title,"body":body,"base":base,"head":head}),
+            json!({"cwd":cwd,"title":title,"body":body,"base":base,"head":head,"draft":draft}),
         );
     }
     let root = expand_home(cwd);
@@ -397,21 +445,23 @@ pub fn pr_create(
         .unwrap_or(0);
     let body_path = std::env::temp_dir().join(format!("monocode-pr-{stamp}.md"));
     std::fs::write(&body_path, body.trim()).map_err(|e| e.to_string())?;
-    let result = gh_run(
-        &root,
-        &[
-            "pr",
-            "create",
-            "--title",
-            title,
-            "--body-file",
-            &body_path.to_string_lossy(),
-            "--base",
-            base.trim(),
-            "--head",
-            head.trim(),
-        ],
-    );
+    let body_file = body_path.to_string_lossy();
+    let mut args = vec![
+        "pr",
+        "create",
+        "--title",
+        title,
+        "--body-file",
+        &body_file,
+        "--base",
+        base.trim(),
+        "--head",
+        head.trim(),
+    ];
+    if draft {
+        args.push("--draft");
+    }
+    let result = gh_run(&root, &args);
     let _ = std::fs::remove_file(&body_path);
     result.and_then(|output| {
         output
