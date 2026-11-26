@@ -12,6 +12,8 @@ use monocode_core::{provider::Kind, usage};
 use std::time::{Duration, Instant};
 
 mod resets;
+mod strip;
+pub(crate) use strip::UsageStrip;
 
 actions!(usage_footer, [DismissUsage, ToggleUsage, RefreshUsage]);
 pub(crate) fn bind(cx: &mut App) {
@@ -53,7 +55,6 @@ pub(crate) struct UsageFooter {
     cache: [CachedUsage; Kind::ALL.len()],
     anchor: AnchorSlot,
     trigger: FocusHandle,
-    refresh_focus: FocusHandle,
     details: FocusHandle,
     previous_focus: Option<FocusHandle>,
     open: bool,
@@ -146,7 +147,6 @@ impl UsageFooter {
             cache: Default::default(),
             anchor: AnchorSlot::default(),
             trigger: cx.focus_handle(),
-            refresh_focus: cx.focus_handle(),
             details: cx.focus_handle(),
             previous_focus: None,
             open: false,
@@ -193,7 +193,18 @@ impl UsageFooter {
             cx.notify();
         }
     }
-    fn refresh(&mut self, force: bool, cx: &mut Context<Self>) {
+    /// Something to show: windows, or Codex's banked resets.
+    pub(crate) fn has_usage(&self) -> bool {
+        self.cache[index(self.kind)]
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| !s.windows.is_empty())
+            || self.has_banked_resets()
+    }
+    pub(crate) fn fetching(&self) -> bool {
+        self.cache[index(self.kind)].fetching
+    }
+    pub(crate) fn refresh(&mut self, force: bool, cx: &mut Context<Self>) {
         if let Some(center) = crate::accounts::get(cx) {
             let key = self.key.clone();
             center.update(cx, |center, cx| center.refresh(key.clone(), force, cx));
@@ -240,7 +251,6 @@ impl UsageFooter {
         .detach();
         cx.notify();
     }
-    #[cfg(test)]
     pub(crate) fn kind(&self) -> Kind {
         self.kind
     }
@@ -853,7 +863,6 @@ impl Render for UsageFooter {
             })
             .or_else(|| state.error.as_ref().map(|e| e.message.clone()))
             .unwrap_or_else(|| "Loading usage".into());
-        let fetching = state.fetching;
         let tightest = state
             .snapshot
             .as_ref()
@@ -861,18 +870,9 @@ impl Render for UsageFooter {
         let weak = cx.weak_entity();
         let classic = self.classic;
         div()
-            .id("usage-footer")
-            .role(Role::Group)
-            .aria_label("Provider usage")
-            .h(px(if classic { 28. } else { 30. }))
-            .w_full()
             .flex_shrink_0()
-            .when(!classic, |d| d.pb(px(2.)))
             .flex()
             .items_center()
-            .gap(px(6.))
-            .text_size(px(11.))
-            .text_color(content(0.55))
             .child(
                 div()
                     .id("usage-provider-chip")
@@ -921,32 +921,6 @@ impl Render for UsageFooter {
                     .on_action(
                         cx.listener(|this, _: &ToggleUsage, window, cx| this.toggle(window, cx)),
                     ),
-            )
-            .child(
-                div()
-                    .id("refresh-usage")
-                    .role(Role::Button)
-                    .aria_label("Refresh usage")
-                    .track_focus(&self.refresh_focus)
-                    .tab_index(0)
-                    .key_context("UsageRefresh")
-                    .map(|d| {
-                        if classic {
-                            d.size(px(18.)).rounded_md()
-                        } else {
-                            d.size(px(20.)).ml(px(-4.)).rounded_full()
-                        }
-                    })
-                    .flex_shrink_0()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .cursor_pointer()
-                    .opacity(if fetching { 0.5 } else { 1. })
-                    .when(!fetching, |d| d.hover(|s| s.bg(content(0.1))))
-                    .child(icon("refresh", 12.))
-                    .on_click(cx.listener(|this, _, _, cx| this.refresh(true, cx)))
-                    .on_action(cx.listener(|this, _: &RefreshUsage, _, cx| this.refresh(true, cx))),
             )
             .when(self.open, |d| {
                 d.child(

@@ -80,7 +80,7 @@ use crate::{
     tab_tile::TAB_TILE,
     terminal::{Terminal, TerminalEvent},
     theme::*,
-    usage_footer::UsageFooter,
+    usage_footer::UsageStrip,
     workspace::{DockSide, TitleTab, VisitHistory, Workspace, project_name},
 };
 use gpui::{
@@ -635,7 +635,7 @@ pub(crate) struct Shell {
     continued_from: HashMap<i64, i64>,
     /// The sidebar rails under orchestrators and /operator threads.
     rails: rails::Rails,
-    usage_footer: Entity<UsageFooter>,
+    usage_footer: Entity<UsageStrip>,
     /// The footer's high-usage chip and its running-work dialog.
     resources: Entity<ResourceMonitor>,
     sidebar_frame: Entity<Chrome>,
@@ -1053,7 +1053,7 @@ impl Shell {
             started_by: sidebar_metadata.started_by,
             continued_from: sidebar_metadata.continued_from,
             rails: Default::default(),
-            usage_footer: cx.new(|cx| UsageFooter::new(active_kind, cx)),
+            usage_footer: cx.new(|cx| UsageStrip::new(active_kind, cx)),
             resources,
             sidebar_frame,
             projects_frame,
