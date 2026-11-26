@@ -886,7 +886,9 @@ impl Render for UsageFooter {
                     .h(px(20.))
                     .map(|d| {
                         if classic {
-                            d.mx(px(-4.)).px(px(4.)).rounded_md()
+                            // No negative margin: it leaves the strip
+                            // reserving no width, which hides the chip.
+                            d.px(px(4.)).rounded_md()
                         } else {
                             d.px(px(8.)).rounded_full()
                         }
