@@ -331,6 +331,12 @@ fn main() {
             .unwrap_or(std::path::Path::new("."))
             .join("checkpoints"),
     );
+    monocode_core::catalog::persist_in(
+        database
+            .parent()
+            .unwrap_or(std::path::Path::new("."))
+            .join("model-catalogs.json"),
+    );
     let saved = db.ui_state().unwrap_or_else(|e| {
         eprintln!("Cannot read workspace settings: {e}");
         None
