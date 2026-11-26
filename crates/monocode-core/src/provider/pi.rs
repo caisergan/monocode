@@ -34,6 +34,18 @@ pub(super) fn configure(command: &mut Command, request: &Request, probe: bool) {
         } else {
             "--no-context-files"
         });
+    } else if request.settings.master {
+        // Master reads and directs; its only other tool is MonoCode's.
+        match crate::master::pi_extension().filter(|_| request.kind == Kind::Pi) {
+            Some(extension) => {
+                command.args(["--no-mcp", "-e"]);
+                command.arg(extension);
+                command.args(["--tools", crate::master::PI_TOOLS]);
+            }
+            None => {
+                command.args(["--tools", "read,grep,find,ls"]);
+            }
+        }
     } else if request.settings.plan || request.settings.access == AccessMode::ReadOnly {
         command.args([
             "--tools",

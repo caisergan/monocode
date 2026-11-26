@@ -18,6 +18,7 @@ mod image_lightbox_tests;
 mod layout;
 mod linked_panel;
 pub(crate) mod live_agents;
+mod master;
 mod mobile_host;
 mod mono_panes;
 pub(crate) mod monos;
@@ -627,6 +628,8 @@ pub(crate) struct Shell {
     app_results: HashMap<(i64, String), (String, Result<serde_json::Value, String>)>,
     app_pending: HashSet<(i64, String)>,
     orchestrations: orchestration::Orchestrations,
+    /// Master: its configuration, tasks and the sessions it drives.
+    master: master::Master,
     /// Each lead's last orchestration, whose agents hang under it in the sidebar.
     orchestration_summaries: HashMap<i64, monocode_core::orchestration::Summary>,
     /// Sessions an /operator thread started, by the session that started them.
@@ -1036,7 +1039,9 @@ impl Shell {
             .get(&workspace.project)
             .map(|id| classic_sidebar::ClassicSidebarTab::from_id(id))
             .unwrap_or_default();
+        let master = master::Master::load(&store);
         let mut this = Self {
+            master,
             monos: None,
             quick_open: None,
             image_lightbox: None,
@@ -1454,6 +1459,7 @@ impl Shell {
             // the indexed working directory so those events cannot erase it.
             view.restore_worktree(worktree, None, cx);
             view.draft_hint = self.draft_sessions.contains(&id);
+            view.master = self.is_master_session(id);
             // Agents get no app access, so they cannot start agents of their own.
             if let Some(bridge) = &self.app_bridge
                 && !self.orchestration_worker(id)
@@ -1492,6 +1498,7 @@ impl Shell {
                 }
                 this.sync_search_session(id, cx);
                 this.orchestration_session_changed(id, cx);
+                this.master_session_changed(id, cx);
                 this.automation_session_changed(id, cx);
                 this.sync_review_locks(cx);
                 this.refresh_session_mark(id, cx);

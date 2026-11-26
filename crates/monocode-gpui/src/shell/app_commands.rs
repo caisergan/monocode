@@ -134,6 +134,16 @@ impl Shell {
         .detach();
     }
     fn authorize_app_call(&self, call: &Call, cx: &App) -> Result<(), String> {
+        // Master reaches sessions only through its own actions, which keep it
+        // inside the user's plan; nothing else may use them.
+        if call.action.starts_with("master.") {
+            return self.authorize_master_call(call);
+        }
+        if self.is_master_session(call.session) {
+            return Err(
+                "Master reaches sessions through master.* actions only; run master.help".into(),
+            );
+        }
         let agents = call.action.starts_with("agents.");
         if agents {
             monocode_core::orchestration::validate(&call.action, &call.input)?;
@@ -286,6 +296,7 @@ impl Shell {
         if manage
             && (id == caller
                 || self.orchestration_worker(id)
+                || self.is_master_session(id)
                 || self
                     .monos
                     .as_ref()
@@ -347,6 +358,10 @@ impl Shell {
             self.finish_app_call(call, Err(error), cx);
             return;
         }
+        if call.action.starts_with("master.") {
+            self.dispatch_master_call(call, cx);
+            return;
+        }
         if call.action.starts_with("agents.") {
             self.dispatch_agents_call(call, window, cx);
             return;
@@ -361,7 +376,7 @@ impl Shell {
             "sessions.list" => Ok(
                 json!({"cwd":project,"sessions":self.order.iter().filter_map(|id|{
                 let metadata=self.session_metadata(*id,cx);
-                if metadata.summary.cwd!=project || self.monos.as_ref().is_some_and(|m|m.read(cx).hidden_session(*id)) || self.orchestration_worker(*id){return None;}
+                if metadata.summary.cwd!=project || self.monos.as_ref().is_some_and(|m|m.read(cx).hidden_session(*id)) || self.orchestration_worker(*id) || self.is_master_session(*id){return None;}
                 let live=self.sessions.get(id).map(|v|v.read(cx));
                 Some(json!({"id":id,"sessionId":id,"title":metadata.summary.title,"harness":metadata.summary.provider,"model":live.and_then(|v|v.settings.model.clone()).or_else(||self.session_details.get(id).and_then(|m|m.model.clone())),"busy":metadata.busy,"hasDraft":live.is_some_and(|v|v.has_saved_draft() || !v.input.read(cx).content.is_empty()) || self.draft_sessions.contains(id),"archived":metadata.summary.archived}))
             }).collect::<Vec<_>>()}),
@@ -643,6 +658,7 @@ impl Shell {
 }
 fn mutating(action: &str) -> bool {
     !monocode_core::orchestration::reads(action)
+        && !monocode_core::master::reads(action)
         && !matches!(
             action,
             "models.list"

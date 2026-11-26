@@ -571,7 +571,11 @@ fn run_turn_using(
                 }
             }
         }
-        if !raw_native_command && settings.orchestrator_enabled {
+        if !raw_native_command && settings.master {
+            // Its first turn carries the instructions; later ones a reminder.
+            let first = !transcript.rows[..turn_start].iter().any(|r| r.is_prompt());
+            prompt = format!("{}\n\n{prompt}", monocode_core::master::context(first));
+        } else if !raw_native_command && settings.orchestrator_enabled {
             let cli = std::env::current_exe().map_err(|e| e.to_string())?;
             prompt = format!(
                 "{}\n\n{prompt}",
@@ -587,7 +591,11 @@ fn run_turn_using(
                 monocode_core::orchestration::delegation_hint(&shlex_quote(&cli.to_string_lossy()))
             );
         }
-        if !raw_native_command && settings.operator_enabled && !settings.orchestrator_enabled {
+        if !raw_native_command
+            && settings.operator_enabled
+            && !settings.orchestrator_enabled
+            && !settings.master
+        {
             let cli = std::env::current_exe().map_err(|e| e.to_string())?;
             prompt = format!(
                 "You have MonoCode app access for this project. Use the CLI: {} app ACTION --json JSON. Supported actions: models.list {{}}, sessions.list {{}}, sessions.read {{sessionId}}, sessions.start {{prompt,harness?,model?,title?,draft?,reveal?}}, sessions.send/draft {{sessionId,prompt}}, sessions.stop {{sessionId}}, folders.list {{}}, folders.move {{sessionId,folderId?,newFolderName?}}, notes.list {{}}, notes.read {{id}}, notes.write {{id?,title,body}}, worktrees.list {{}}. Scope is this thread's project. App credentials are in the environment; never print them. Respect the user’s request and selected access policy.\n\n{prompt}",
@@ -1226,6 +1234,7 @@ fn shlex_quote(text: &str) -> String {
 /// user asks, if this turn may change things and the thread has app access.
 fn offers_delegation(settings: &monocode_core::agent::Settings, cwd: &str) -> bool {
     settings.mono.is_none()
+        && !settings.master
         && !settings.text_only
         && !settings.plan
         && settings.access != monocode_core::agent::AccessMode::ReadOnly

@@ -111,6 +111,17 @@ pub struct Settings {
     pub mono: Option<MonoContext>,
     #[serde(skip)]
     pub mono_message_id: Option<String>,
+    /// Master's own chat: its turns get Master's context and tool, and no
+    /// shell or edit tool. Never saved; the shell marks that one session.
+    #[serde(skip)]
+    pub master: bool,
+    /// The sender of the queued message this turn starts with. Never saved.
+    #[serde(skip)]
+    pub message_sender: Option<String>,
+    /// The access the queued message's turn runs with. Never saved: the
+    /// session keeps its own setting for the user's turns.
+    #[serde(skip)]
+    pub message_access: Option<AccessMode>,
     #[serde(skip)]
     pub mono_sent_at: Option<u64>,
     #[serde(skip)]
@@ -175,6 +186,9 @@ pub struct TurnInfo {
     /// An accepted steer belongs to the provider run that opened this receipt.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub joined_turn: Option<usize>,
+    /// Who sent the message that started this turn, when not the user.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender: Option<String>,
     pub provider_turn_id: Option<String>,
     pub provider: String,
     pub model: String,

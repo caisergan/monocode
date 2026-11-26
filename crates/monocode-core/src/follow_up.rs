@@ -22,6 +22,13 @@ pub struct Message {
     /// Epoch milliseconds this message waits for before it joins the queue.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub send_at: Option<u64>,
+    /// Who sent it when not the user: Master's `master:<task>:<step>`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender: Option<String>,
+    /// The access its turn runs with instead of the session's own, for a
+    /// sender whose plan sets one. The user's own turns never carry it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access: Option<crate::agent::AccessMode>,
 }
 impl Message {
     pub fn label(&self) -> String {

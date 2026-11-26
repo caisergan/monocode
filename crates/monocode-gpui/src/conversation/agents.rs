@@ -163,6 +163,18 @@ impl Conversation {
         steer: bool,
         cx: &mut Context<Self>,
     ) -> Result<Delivery, String> {
+        self.driven_message(prompt, steer, None, None, cx)
+    }
+    /// `agent_message` for another sender (Master), whose message records
+    /// who sent it and may carry the access its turn runs with.
+    pub(crate) fn driven_message(
+        &mut self,
+        prompt: String,
+        steer: bool,
+        sender: Option<String>,
+        access: Option<AccessMode>,
+        cx: &mut Context<Self>,
+    ) -> Result<Delivery, String> {
         if self.needs_approval() {
             return Err("The agent is waiting on an approval or a question; decide it first with agents.approve or agents.answer.".into());
         }
@@ -182,7 +194,7 @@ impl Conversation {
             // now would replace it. Deliver once its history is back.
             self.defer_history_action(
                 move |this, cx| {
-                    let _ = this.agent_message(prompt, steer, cx);
+                    let _ = this.driven_message(prompt, steer, sender, access, cx);
                 },
                 cx,
             );
@@ -190,6 +202,8 @@ impl Conversation {
             return Ok(Delivery::Turn);
         }
         let mut message = self.message(prompt, Vec::new(), None, cx);
+        message.sender = sender;
+        message.access = access;
         let delivery = if !running {
             // Held messages after a stop stay held; this one runs now.
             self.follow_ups.requested = Some(message.id.clone());

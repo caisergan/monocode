@@ -4,7 +4,7 @@ use super::*;
 pub(super) struct Metadata<'a> {
     pub summary: &'a Session,
     pub busy: bool,
-    live: Option<&'a Conversation>,
+    pub(super) live: Option<&'a Conversation>,
     draft: bool,
     remote_waiting: bool,
 }

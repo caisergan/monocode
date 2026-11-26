@@ -1503,6 +1503,13 @@ fn run_operation(
             );
         }
     }
+    // Elsewhere Master would get a shell and edit tools.
+    if request.settings.master && !crate::master::supported_harness(request.kind.id()) {
+        return Err(format!(
+            "Master runs on Pi or Claude Code, not {}",
+            request.kind.label()
+        ));
+    }
     let mut command = Command::new(&request.binary);
     crate::scm::shell::apply_gui_env(&mut command);
     command.envs(&request.settings.environment);
@@ -1540,7 +1547,12 @@ fn run_operation(
                 "stdio",
             ]);
             let settings = &request.settings;
-            let mode = if settings.plan {
+            let master = settings.master && !settings.text_only;
+            // Master has only read tools and its own, all allowed below, so
+            // it needs no access mode of its own and never bypasses checks.
+            let mode = if master {
+                AccessMode::Supervised.claude()
+            } else if settings.plan {
                 "plan"
             } else {
                 settings.access.claude()
@@ -1562,13 +1574,23 @@ fn run_operation(
                 .then(|| crate::visual_bridge::mcp_server(&settings.environment))
                 .flatten();
             let mut allowed = Vec::new();
-            if !settings.text_only && settings.access == AccessMode::ReadOnly {
+            if master {
+                command.args(["--tools", crate::master::CLAUDE_TOOLS]);
+                allowed.push(crate::master::CLAUDE_TOOLS);
+            } else if !settings.text_only && settings.access == AccessMode::ReadOnly {
                 command.args(["--tools", "Read,Glob,Grep,Bash"]);
                 allowed.push("Read,Glob,Grep,Bash(git status *),Bash(git diff *),Bash(git log *),Bash(git show *),Bash(pwd),Bash(ls *),Bash(rg *)");
             }
             let app_server = (!settings.text_only)
                 .then(|| {
-                    crate::mono::bridge::mcp_server(settings.mono.as_ref(), &settings.environment)
+                    if master {
+                        crate::mono::bridge::master_mcp_server(&settings.environment)
+                    } else {
+                        crate::mono::bridge::mcp_server(
+                            settings.mono.as_ref(),
+                            &settings.environment,
+                        )
+                    }
                 })
                 .flatten();
             let mut servers = serde_json::Map::new();
@@ -1595,6 +1617,10 @@ fn run_operation(
             if !servers.is_empty() {
                 command.args(["--mcp-config", &json!({"mcpServers":servers}).to_string()]);
                 cap_claude_mcp_wait(&mut command);
+            }
+            // None of the user's own MCP servers: some of them edit files.
+            if master {
+                command.arg("--strict-mcp-config");
             }
             if !allowed.is_empty() {
                 command.args(["--allowedTools", &allowed.join(",")]);
@@ -2656,6 +2682,65 @@ mod process_tests {
         assert_eq!(
             std::fs::read_to_string(out).unwrap().trim(),
             std::fs::canonicalize(home).unwrap().to_string_lossy()
+        );
+    }
+    /// The arguments a stand-in provider was launched with.
+    fn launch_args(mut request: Request) -> Result<Vec<String>, String> {
+        let out = request.cwd.join("args");
+        request
+            .settings
+            .environment
+            .insert("MC_TEST_ARGS".into(), out.to_string_lossy().into_owned());
+        // The stand-in exits at once, so the run itself always fails.
+        let result = run(request, Arc::new(AtomicBool::new(false)), |_| Ok(()));
+        match std::fs::read_to_string(&out) {
+            Ok(text) => Ok(text.lines().map(str::to_owned).collect()),
+            Err(_) => Err(result
+                .err()
+                .unwrap_or_else(|| "The provider never started".into())),
+        }
+    }
+    #[test]
+    fn master_on_claude_gets_read_tools_and_its_own_tool_only() {
+        let (_tmp, mut request) = fixture("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$MC_TEST_ARGS\"\n");
+        request.kind = Kind::Claude;
+        request.settings.master = true;
+        // Master's own access setting never widens what it can do.
+        request.settings.access = AccessMode::FullAccess;
+        let (server, _calls) = crate::mono::bridge::Server::start().unwrap();
+        request.settings.environment.extend(server.environment(7));
+        let args = launch_args(request).unwrap_or_else(|e| panic!("{e}"));
+        let after = |flag: &str| {
+            args.iter()
+                .position(|a| a == flag)
+                .and_then(|ix| args.get(ix + 1))
+                .cloned()
+                .unwrap_or_default()
+        };
+        assert_eq!(after("--tools"), "Read,Glob,Grep");
+        assert_eq!(after("--permission-mode"), "default");
+        assert!(args.iter().any(|a| a == "--strict-mcp-config"));
+        assert!(!args
+            .iter()
+            .any(|a| a == "--allow-dangerously-skip-permissions"));
+        let allowed = after("--allowedTools");
+        assert!(allowed.contains("Read,Glob,Grep"), "{allowed}");
+        assert!(allowed.contains("mcp__monocode_app"), "{allowed}");
+        assert!(!allowed.contains("Bash"), "{allowed}");
+        let config: Value = serde_json::from_str(&after("--mcp-config")).unwrap();
+        assert_eq!(
+            config["mcpServers"]["monocode_app"]["args"],
+            json!(["app-mcp", "master"])
+        );
+    }
+    #[test]
+    fn master_is_refused_where_it_would_get_a_shell() {
+        let (_tmp, mut request) = fixture("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$MC_TEST_ARGS\"\n");
+        request.settings.master = true;
+        let error = launch_args(request).unwrap_err();
+        assert!(
+            error.contains("Master runs on Pi or Claude Code"),
+            "{error}"
         );
     }
     #[test]

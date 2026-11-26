@@ -196,7 +196,8 @@ fn main() {
         return;
     }
     if cli_args.first().is_some_and(|a| a == "app-mcp") {
-        if let Err(error) = monocode_core::mono::bridge::mcp_stdio() {
+        let master = cli_args.get(1).is_some_and(|a| a == "master");
+        if let Err(error) = monocode_core::mono::bridge::mcp_stdio(master) {
             eprintln!("{error}");
             std::process::exit(1);
         }
