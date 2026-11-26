@@ -20,6 +20,9 @@ pub(crate) struct UsageStrip {
     project: String,
     session: Option<i64>,
     chips: Vec<(Kind, Entity<UsageFooter>)>,
+    /// A chip hidden for want of usage is not drawn, so its own notify
+    /// cannot redraw the strip when usage arrives; these do.
+    _chip_observers: Vec<gpui::Subscription>,
     /// Installed providers that report usage; `None` until discovery ends.
     installed: Option<Vec<Kind>>,
     prefs: Preferences,
@@ -38,6 +41,7 @@ impl UsageStrip {
             project: String::new(),
             session: None,
             chips: Vec::new(),
+            _chip_observers: Vec::new(),
             installed: None,
             prefs: cx.try_global::<Preferences>().cloned().unwrap_or_default(),
             classic: false,
@@ -174,6 +178,11 @@ impl UsageStrip {
             });
             self.chips.push((kind, chip));
         }
+        self._chip_observers = self
+            .chips
+            .iter()
+            .map(|(_, chip)| cx.observe(chip, |_, _, cx| cx.notify()))
+            .collect();
         cx.notify();
     }
     /// The chips worth showing: the open tab's provider when it can report
@@ -220,7 +229,7 @@ impl Render for UsageStrip {
             .when(!classic, |d| d.pb(px(2.)))
             .flex()
             .items_center()
-            .gap(px(6.))
+            .gap(px(2.))
             .text_size(px(11.))
             .text_color(content(0.55))
             .child(
@@ -229,11 +238,11 @@ impl Render for UsageStrip {
                     .overflow_hidden()
                     .flex()
                     .items_center()
-                    // Classic chips pull 4 px into their neighbours' gap.
-                    .gap(px(if classic { 14. } else { 2. }))
+                    .gap(px(if classic { 6. } else { 2. }))
                     .children(visible.into_iter().map(|(kind, chip)| {
                         div()
                             .id(("usage-chip", index(kind)))
+                            .debug_selector(move || format!("usage-chip-{}", kind.id()))
                             .flex_shrink_0()
                             .child(chip)
                     })),
@@ -250,7 +259,7 @@ impl Render for UsageStrip {
                         if classic {
                             d.size(px(18.)).rounded_md()
                         } else {
-                            d.size(px(20.)).ml(px(-4.)).rounded_full()
+                            d.size(px(20.)).rounded_full()
                         }
                     })
                     .flex_shrink_0()
@@ -270,6 +279,90 @@ impl Render for UsageStrip {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn snapshot(used: f64) -> Result<Snapshot, FetchError> {
+        Ok(Snapshot {
+            windows: vec![usage::Window {
+                used_percent: used,
+                minutes: 300,
+                resets_at: Some(usage::now_ms() + 5_400_000),
+            }],
+            updated_at: usage::now_ms(),
+            ..Default::default()
+        })
+    }
+
+    /// The footer row: the strip as a cached view beside fixed controls.
+    struct Footer(Entity<UsageStrip>);
+    impl Render for Footer {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .w_full()
+                .h(px(30.))
+                .flex()
+                .items_center()
+                .child(
+                    self.0.clone().cached(
+                        gpui::StyleRefinement::default()
+                            .flex_1()
+                            .min_w_0()
+                            .h(px(30.)),
+                    ),
+                )
+                .child(div().flex_shrink_0().w(px(200.)).h(px(20.)))
+        }
+    }
+
+    #[gpui::test]
+    fn chips_keep_their_width_and_appear_when_usage_arrives(cx: &mut gpui::TestAppContext) {
+        for classic in [false, true] {
+            let mut strip = None;
+            let window = cx.update(|cx| {
+                cx.open_window(Default::default(), |_, cx| {
+                    let s = cx.new(|cx| UsageStrip::new(Kind::Claude, cx));
+                    strip = Some(s.clone());
+                    cx.new(|_| Footer(s))
+                })
+                .unwrap()
+            });
+            let strip = strip.unwrap();
+            let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+            strip.update(visual, |strip, cx| {
+                strip.set_classic(classic, cx);
+                strip.installed = Some(vec![Kind::Claude, Kind::Codex]);
+                strip.sync(cx);
+            });
+            visual.run_until_parked();
+            visual.refresh().unwrap();
+            let width = |visual: &mut gpui::VisualTestContext, kind: &str| {
+                visual
+                    .debug_bounds(Box::leak(format!("usage-chip-{kind}").into_boxed_str()))
+                    .map(|b| b.size.width)
+            };
+            let loading = width(visual, "claude").unwrap();
+            assert!(loading > px(40.), "classic {classic}: {loading:?}");
+            assert_eq!(width(visual, "codex"), None);
+            // Each chip's own notify, as a finished fetch sends, and a normal
+            // frame rather than a full refresh.
+            for (at, kind) in [(0, Kind::Claude), (1, Kind::Codex)] {
+                let chip = strip.read_with(visual, |s, _| s.chips[at].1.clone());
+                chip.update(visual, |chip, cx| {
+                    chip.cache[index(kind)].complete(snapshot(24.));
+                    cx.notify();
+                });
+            }
+            visual.run_until_parked();
+            visual.update(|window, cx| window.draw(cx).clear(cx));
+            assert!(
+                width(visual, "claude").unwrap() > loading,
+                "classic {classic}"
+            );
+            assert!(
+                width(visual, "codex").unwrap() > px(40.),
+                "classic {classic}"
+            );
+        }
+    }
 
     #[gpui::test]
     fn enabled_providers_get_chips_beside_the_open_tabs(cx: &mut gpui::TestAppContext) {

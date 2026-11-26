@@ -465,7 +465,9 @@ impl Shell {
                     .children(footer.map(|footer| {
                         footer
                             .h(px(28.))
-                            .px_3()
+                            // Usage chips pad their own 4 px.
+                            .pl(px(8.))
+                            .pr_3()
                             .border_t_1()
                             .border_color(crate::right_panel::stroke())
                     })),
