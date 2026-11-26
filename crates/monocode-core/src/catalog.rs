@@ -31,8 +31,8 @@ fn remote_cache() -> &'static Mutex<std::collections::HashMap<String, RemoteCata
         OnceLock::new();
     CACHE.get_or_init(Default::default)
 }
-/// The project's last catalog from its host, for immediate display while a
-/// refresh runs. The host decides how fresh a catalog is, so this never expires.
+/// The project's last catalog from its host. It never expires: the picker
+/// asks the host again only when the person refreshes it.
 pub fn cached_remote_catalog(cwd: &str) -> Option<RemoteCatalog> {
     remote_cache()
         .lock()
@@ -45,6 +45,7 @@ pub fn remember_remote_catalog(cwd: &str, catalog: &RemoteCatalog) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(cwd.into(), catalog.clone());
+    save();
 }
 
 pub fn remote_catalog(cwd: &str) -> Result<RemoteCatalog, String> {
@@ -227,45 +228,149 @@ pub struct ModelControl {
 }
 #[derive(Default)]
 struct CatalogCache {
-    entries: Vec<(Kind, crate::accounts::Profile, Vec<Model>, Instant)>,
+    entries: Vec<(Kind, crate::accounts::Profile, Vec<Model>)>,
     generation: std::collections::HashMap<(Kind, crate::accounts::Profile), u64>,
 }
 fn cache() -> &'static Mutex<CatalogCache> {
     static CACHE: OnceLock<Mutex<CatalogCache>> = OnceLock::new();
     CACHE.get_or_init(Default::default)
 }
-/// Each Claude probe is a cold CLI start that may refresh the account's OAuth
-/// token, so its catalog is kept until a CLI update or sign-in invalidates it.
-fn fresh_for(kind: Kind) -> Duration {
-    if kind == Kind::Claude {
-        Duration::from_secs(6 * 60 * 60)
-    } else {
-        Duration::from_secs(300)
+
+/// Catalogs are kept on disk so a restart doesn't query every CLI again.
+/// Only a refresh, a CLI update or a sign-in replaces one.
+static SAVED: OnceLock<std::path::PathBuf> = OnceLock::new();
+#[derive(Serialize, Deserialize, Default)]
+struct SavedCatalogs {
+    #[serde(default)]
+    local: Vec<SavedLocal>,
+    #[serde(default)]
+    remote: Vec<SavedRemote>,
+}
+#[derive(Serialize, Deserialize)]
+struct SavedLocal {
+    provider: String,
+    account: crate::accounts::Profile,
+    models: Vec<Model>,
+}
+#[derive(Serialize, Deserialize)]
+struct SavedRemote {
+    project: String,
+    providers: Vec<String>,
+    models: std::collections::BTreeMap<String, Vec<Model>>,
+}
+/// Load the catalogs saved at `path` and keep saving there. Catalogs already
+/// fetched in this run win over saved ones.
+pub fn persist_in(path: std::path::PathBuf) {
+    let saved: SavedCatalogs = std::fs::read(&path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .unwrap_or_default();
+    if SAVED.set(path).is_err() {
+        return;
+    }
+    {
+        let mut cache = cache().lock().unwrap_or_else(|e| e.into_inner());
+        for entry in saved.local {
+            let Some(kind) = Kind::parse(&entry.provider) else {
+                continue;
+            };
+            if entry.models.is_empty()
+                || cache
+                    .entries
+                    .iter()
+                    .any(|(k, profile, _)| *k == kind && *profile == entry.account)
+            {
+                continue;
+            }
+            cache.entries.push((kind, entry.account, entry.models));
+        }
+    }
+    let mut remote = remote_cache().lock().unwrap_or_else(|e| e.into_inner());
+    for entry in saved.remote {
+        remote
+            .entry(entry.project)
+            .or_insert_with(|| RemoteCatalog {
+                providers: entry
+                    .providers
+                    .iter()
+                    .filter_map(|id| Kind::parse(id))
+                    .collect(),
+                models: entry
+                    .models
+                    .into_iter()
+                    .filter_map(|(id, models)| Some((Kind::parse(&id)?, models)))
+                    .collect(),
+                errors: Default::default(),
+            });
+    }
+}
+fn save() {
+    let Some(path) = SAVED.get() else {
+        return;
+    };
+    let local = cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .entries
+        .iter()
+        .map(|(kind, account, models)| SavedLocal {
+            provider: kind.id().into(),
+            account: account.clone(),
+            models: models.clone(),
+        })
+        .collect();
+    let remote = remote_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .map(|(project, catalog)| SavedRemote {
+            project: project.clone(),
+            providers: catalog.providers.iter().map(|k| k.id().into()).collect(),
+            models: catalog
+                .models
+                .iter()
+                .map(|(kind, models)| (kind.id().into(), models.clone()))
+                .collect(),
+        })
+        .collect();
+    let Ok(bytes) = serde_json::to_vec(&SavedCatalogs { local, remote }) else {
+        return;
+    };
+    // Written beside and renamed, so a crash never leaves half a file.
+    static WRITE: Mutex<()> = Mutex::new(());
+    let _gate = WRITE.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = path.with_extension("json.tmp");
+    if std::fs::write(&temp, bytes).is_ok() {
+        let _ = std::fs::rename(&temp, path);
     }
 }
 /// A CLI update changes every account's catalog for that provider.
 pub fn invalidate_all(kind: Kind) {
-    let mut cache = cache().lock().unwrap_or_else(|e| e.into_inner());
-    // Bump fetches still in flight too, so none stores a pre-update catalog.
-    let accounts: Vec<_> = cache
-        .entries
-        .iter()
-        .map(|(k, profile, ..)| (*k, profile))
-        .chain(cache.generation.keys().map(|(k, profile)| (*k, profile)))
-        .filter(|(k, _)| *k == kind)
-        .map(|(_, profile)| profile.clone())
-        .collect();
-    for account in accounts {
-        *cache.generation.entry((kind, account)).or_default() += 1;
+    {
+        let mut cache = cache().lock().unwrap_or_else(|e| e.into_inner());
+        // Bump fetches still in flight too, so none stores a pre-update catalog.
+        let accounts: Vec<_> = cache
+            .entries
+            .iter()
+            .map(|(k, profile, ..)| (*k, profile))
+            .chain(cache.generation.keys().map(|(k, profile)| (*k, profile)))
+            .filter(|(k, _)| *k == kind)
+            .map(|(_, profile)| profile.clone())
+            .collect();
+        for account in accounts {
+            *cache.generation.entry((kind, account)).or_default() += 1;
+        }
+        cache.entries.retain(|(k, ..)| *k != kind);
     }
-    cache.entries.retain(|(k, ..)| *k != kind);
+    save();
 }
 pub fn invalidate(kind: Kind, account: &crate::accounts::Profile) {
-    let mut cache = cache().lock().unwrap_or_else(|e| e.into_inner());
-    *cache.generation.entry((kind, account.clone())).or_default() += 1;
-    cache
-        .entries
-        .retain(|(k, p, _, _)| *k != kind || p != account);
+    {
+        let mut cache = cache().lock().unwrap_or_else(|e| e.into_inner());
+        *cache.generation.entry((kind, account.clone())).or_default() += 1;
+        cache.entries.retain(|(k, p, _)| *k != kind || p != account);
+    }
+    save();
 }
 /// A model's catalog name from any account's cached catalog, without querying.
 pub fn cached_name(kind: Kind, id: &str) -> Option<String> {
@@ -274,17 +379,17 @@ pub fn cached_name(kind: Kind, id: &str) -> Option<String> {
         .entries
         .iter()
         .filter(|(k, ..)| *k == kind)
-        .find_map(|(_, _, rows, _)| rows.iter().find(|m| m.id == id).map(|m| m.name.clone()))
+        .find_map(|(_, _, rows)| rows.iter().find(|m| m.id == id).map(|m| m.name.clone()))
 }
-/// Account-scoped catalog for immediate display while a refresh runs.
+/// The account's saved catalog, without querying.
 pub fn cached_models_for(kind: Kind, account: &crate::accounts::Profile) -> Option<Vec<Model>> {
     cache()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .entries
         .iter()
-        .find(|(k, profile, _, _)| *k == kind && profile == account)
-        .map(|(_, _, models, _)| models.clone())
+        .find(|(k, profile, _)| *k == kind && profile == account)
+        .map(|(_, _, models)| models.clone())
 }
 /// Seed an account's cached catalog, as a finished catalog query would.
 #[cfg(test)]
@@ -294,30 +399,32 @@ pub(crate) fn remember_for_tests(
     models: Vec<Model>,
 ) {
     let mut cache = cache().lock().unwrap_or_else(|e| e.into_inner());
-    cache
-        .entries
-        .retain(|(k, p, _, _)| *k != kind || p != account);
-    cache
-        .entries
-        .push((kind, account.clone(), models, Instant::now()));
+    cache.entries.retain(|(k, p, _)| *k != kind || p != account);
+    cache.entries.push((kind, account.clone(), models));
 }
 pub fn models(kind: Kind) -> Result<Vec<Model>, String> {
     models_for(kind, &crate::accounts::Profile::default())
 }
+/// The account's catalog: the saved one if there is one, else a fresh query.
 pub fn models_for(kind: Kind, account: &crate::accounts::Profile) -> Result<Vec<Model>, String> {
-    let cache = cache();
-    let guard = cache.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((_, _, rows, _)) = guard.entries.iter().find(|(k, profile, _, at)| {
-        *k == kind && profile == account && at.elapsed() < fresh_for(kind)
-    }) {
-        return Ok(rows.clone());
+    if let Some(models) = cached_models_for(kind, account) {
+        return Ok(models);
     }
-    let generation = guard
+    refresh_models_for(kind, account)
+}
+/// Query the CLI again. A failed refresh leaves the saved catalog in place.
+pub fn refresh_models_for(
+    kind: Kind,
+    account: &crate::accounts::Profile,
+) -> Result<Vec<Model>, String> {
+    let cache = cache();
+    let generation = cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
         .generation
         .get(&(kind, account.clone()))
         .copied()
         .unwrap_or(0);
-    drop(guard);
     let value = if kind == Kind::Fx {
         cli_json(kind, &["models", "--json"])?
     } else if kind.is_acp() || kind.is_pi() {
@@ -423,21 +530,23 @@ pub fn models_for(kind: Kind, account: &crate::accounts::Profile) -> Result<Vec<
     if models.is_empty() {
         return Err(format!("{} returned an empty model catalog", kind.label()));
     }
-    let mut cache = cache.lock().unwrap();
-    if cache
-        .generation
-        .get(&(kind, account.clone()))
-        .copied()
-        .unwrap_or(0)
-        == generation
     {
+        let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if cache
+            .generation
+            .get(&(kind, account.clone()))
+            .copied()
+            .unwrap_or(0)
+            != generation
+        {
+            return Ok(models);
+        }
         cache
             .entries
-            .retain(|(k, profile, _, _)| *k != kind || profile != account);
-        cache
-            .entries
-            .push((kind, account.clone(), models.clone(), Instant::now()));
+            .retain(|(k, profile, _)| *k != kind || profile != account);
+        cache.entries.push((kind, account.clone(), models.clone()));
     }
+    save();
     Ok(models)
 }
 
@@ -951,7 +1060,6 @@ mod tests {
             Kind::Claude,
             account.clone(),
             vec![model("opus", "Opus test")],
-            Instant::now() - Duration::from_secs(301),
         ));
         assert_eq!(
             cached_models_for(Kind::Claude, &account).unwrap()[0].id,
@@ -961,6 +1069,52 @@ mod tests {
         assert!(cached_models_for(Kind::Codex, &account).is_none());
         invalidate(Kind::Claude, &account);
         assert!(cached_models_for(Kind::Claude, &account).is_none());
+    }
+
+    #[test]
+    fn saved_catalogs_survive_a_restart_until_invalidated() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("model-catalogs.json");
+        let account = crate::accounts::Profile {
+            id: "catalog-saved-test".into(),
+            root: None,
+        };
+        std::fs::write(
+            &path,
+            serde_json::to_vec(&SavedCatalogs {
+                local: vec![SavedLocal {
+                    provider: "pi".into(),
+                    account: account.clone(),
+                    models: vec![model("explabs/kept", "Kept")],
+                }],
+                remote: vec![SavedRemote {
+                    project: "remote://saved-test/work".into(),
+                    providers: vec!["codex".into()],
+                    models: [("codex".into(), vec![model("gpt-host", "Host")])].into(),
+                }],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        persist_in(path.clone());
+        // Saved catalogs answer without asking the CLI, however old they are.
+        assert_eq!(
+            models_for(Kind::Pi, &account).unwrap()[0].id,
+            "explabs/kept"
+        );
+        let remote = cached_remote_catalog("remote://saved-test/work").unwrap();
+        assert_eq!(remote.providers, [Kind::Codex]);
+        assert_eq!(remote.models[&Kind::Codex][0].id, "gpt-host");
+        invalidate(Kind::Pi, &account);
+        let saved: SavedCatalogs = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(!saved
+            .local
+            .iter()
+            .any(|entry| entry.account == account && entry.provider == "pi"));
+        assert!(saved
+            .remote
+            .iter()
+            .any(|entry| entry.project == "remote://saved-test/work"));
     }
 
     #[test]

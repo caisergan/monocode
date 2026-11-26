@@ -85,6 +85,13 @@ fn same_model(kind: Kind, a: &str, b: &str) -> bool {
     use monocode_core::store::native_model;
     a == b || native_model(a, kind.id()).is_some_and(|a| Some(a) == native_model(b, kind.id()))
 }
+/// Whether a local catalog still offers a saved model ID, by its own ID or
+/// the concrete model behind one of its aliases.
+fn listed(models: &[Model], id: &str) -> bool {
+    models
+        .iter()
+        .any(|model| model.id == id || model.alias_target.as_deref() == Some(id))
+}
 /// The row of a host's catalog that a saved model ID means, if it has one.
 pub(crate) fn hosted_model<'a>(models: &'a [Model], kind: Kind, id: &str) -> Option<&'a Model> {
     models
@@ -366,6 +373,107 @@ mod model_label_tests {
                     .favorite(Kind::Claude, Some("claude:sonnet"), cx)
             );
         });
+    }
+
+    fn choice(provider: &str, model: &str) -> crate::settings::ModelChoice {
+        crate::settings::ModelChoice {
+            provider: provider.into(),
+            model: Some(model.into()),
+        }
+    }
+
+    #[gpui::test]
+    fn a_recent_the_catalog_stopped_listing_is_hidden_then_forgotten(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Preferences {
+                recent_models: vec![
+                    choice("pi", "explabs/gone"),
+                    choice("pi", "explabs/kept"),
+                    choice("claude", "opus"),
+                ],
+                ..Default::default()
+            })
+        });
+        let (window, _picks, _events) =
+            rendered_picker(cx, Kind::Pi, "/work", &["explabs/kept", "explabs/new"]);
+        window
+            .update(cx, |list, _, cx| {
+                list.tab = ModelTab::Harness(Kind::Pi);
+                let ids: Vec<_> = list.entries(cx).into_iter().map(|e| e.id).collect();
+                assert_eq!(
+                    ids,
+                    [
+                        None,
+                        Some("explabs/kept".into()),
+                        Some("explabs/new".into())
+                    ]
+                );
+                list.forget_unlisted_recents(Kind::Pi, cx);
+            })
+            .unwrap();
+        cx.update(|cx| {
+            let recents = &cx.global::<crate::settings::Preferences>().recent_models;
+            // Other providers' recents are not this catalog's to judge.
+            assert_eq!(
+                *recents,
+                [choice("pi", "explabs/kept"), choice("claude", "opus")]
+            );
+        });
+    }
+
+    #[gpui::test]
+    fn a_recent_named_by_an_aliass_concrete_model_stays(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Preferences {
+                recent_models: vec![choice("claude", "claude-opus-5-5")],
+                ..Default::default()
+            })
+        });
+        let (window, _picks, _events) = rendered_picker(cx, Kind::Claude, "/work", &["opus"]);
+        window
+            .update(cx, |list, _, cx| {
+                list.catalogs[0].1[0].alias_target = Some("claude-opus-5-5".into());
+                list.forget_unlisted_recents(Kind::Claude, cx);
+            })
+            .unwrap();
+        cx.update(|cx| {
+            assert_eq!(
+                cx.global::<crate::settings::Preferences>().recent_models,
+                [choice("claude", "claude-opus-5-5")]
+            )
+        });
+    }
+
+    #[gpui::test]
+    fn the_rail_refreshes_the_open_provider_or_every_favorites(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(crate::settings::Preferences {
+                favorite_models: vec![
+                    choice("codex", "gpt-saved"),
+                    choice("claude", "opus"),
+                    choice("codex", "gpt-other"),
+                ],
+                ..Default::default()
+            })
+        });
+        let (window, picks, _events) = rendered_picker(cx, Kind::Pi, "/work", &["explabs/kept"]);
+        let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
+        visual.refresh().unwrap();
+        let button = visual
+            .debug_bounds("refresh-models")
+            .expect("the rail ends in a refresh button");
+        visual.simulate_click(button.center(), Default::default());
+        assert!(picks.borrow().is_empty(), "refreshing never picks a model");
+        window
+            .update(visual, |list, _, cx| {
+                list.tab = ModelTab::Harness(Kind::Pi);
+                assert_eq!(list.refresh_targets(cx), [Kind::Pi]);
+                list.tab = ModelTab::Favorites;
+                assert_eq!(list.refresh_targets(cx), [Kind::Claude, Kind::Codex]);
+            })
+            .unwrap();
     }
 
     #[test]
@@ -1210,16 +1318,26 @@ impl ModelList {
             .and_then(catalog::cached_remote_catalog)
         {
             list.apply_remote_catalog(catalog);
+        } else if list.remote_project.is_none() {
+            // Saved catalogs open the list ready. Only the refresh button, a
+            // CLI update or a sign-in asks a CLI again.
+            for kind in Kind::ALL {
+                let profile = list.profiles.get(&kind).cloned().unwrap_or_default();
+                if let Some(models) = catalog::cached_models_for(kind, &profile) {
+                    list.catalogs.push((kind, models));
+                    list.forget_unlisted_recents(kind, cx);
+                }
+            }
         }
         list.highlighted = list.current_index(cx);
         list.probe_installed(cx);
-        list.discover(
-            match list.tab {
-                ModelTab::Harness(kind) => kind,
-                ModelTab::Favorites => provider,
-            },
-            cx,
-        );
+        let first = match list.tab {
+            ModelTab::Harness(kind) => kind,
+            ModelTab::Favorites => provider,
+        };
+        if !list.has_catalog(first) {
+            list.discover(first, cx);
+        }
         list
     }
     pub(crate) fn hide_providers(mut self, hidden: Vec<String>) -> Self {
@@ -1444,7 +1562,76 @@ impl ModelList {
             self.tab = ModelTab::Harness(self.provider);
         }
     }
+    /// Whether the picker has a catalog to list for `kind`.
+    fn has_catalog(&self, kind: Kind) -> bool {
+        if self.remote_project.is_some() {
+            self.remote_providers.is_some()
+        } else {
+            self.catalogs.iter().any(|(k, _)| *k == kind)
+        }
+    }
+    /// A recent the provider's catalog no longer lists is gone for good: it
+    /// would otherwise show as a raw ID and could start new chats.
+    fn forget_unlisted_recents(&self, kind: Kind, cx: &mut gpui::App) {
+        if self.remote_project.is_some() || !cx.has_global::<crate::settings::Preferences>() {
+            return;
+        }
+        let Some((_, models)) = self.catalogs.iter().find(|(k, _)| *k == kind) else {
+            return;
+        };
+        let listed = |id: &str| listed(models, id);
+        let stale = cx
+            .global::<crate::settings::Preferences>()
+            .recent_models
+            .iter()
+            .any(|c| c.provider == kind.id() && c.model.as_deref().is_some_and(|id| !listed(id)));
+        if stale {
+            cx.update_global::<crate::settings::Preferences, _>(|prefs, _| {
+                prefs.recent_models.retain(|c| {
+                    c.provider != kind.id() || c.model.as_deref().is_none_or(|id| listed(id))
+                });
+            });
+        }
+    }
+    /// The providers the refresh button asks again: the open one, or every
+    /// provider with a favorite.
+    fn refresh_targets(&self, cx: &gpui::App) -> Vec<Kind> {
+        match self.tab {
+            ModelTab::Harness(kind) => vec![kind],
+            ModelTab::Favorites => {
+                let mut kinds: Vec<Kind> = cx
+                    .try_global::<crate::settings::Preferences>()
+                    .into_iter()
+                    .flat_map(|prefs| &prefs.favorite_models)
+                    .filter_map(|choice| Kind::parse(&choice.provider))
+                    .filter(|kind| !self.missing.contains(kind))
+                    .collect();
+                kinds.sort_by_key(|kind| kind.id());
+                kinds.dedup();
+                kinds
+            }
+        }
+    }
+    fn refreshing(&self, cx: &gpui::App) -> bool {
+        self.refresh_targets(cx)
+            .iter()
+            .any(|kind| self.loading.contains(kind))
+    }
+    /// Ask the providers' CLIs (or the host) for their catalogs again.
+    fn refresh(&mut self, cx: &mut Context<Self>) {
+        if self.remote_project.is_some() {
+            self.fetch(self.provider, true, cx);
+        } else {
+            for kind in self.refresh_targets(cx) {
+                self.fetch(kind, true, cx);
+            }
+        }
+        cx.notify();
+    }
     fn discover(&mut self, kind: Kind, cx: &mut Context<Self>) {
+        self.fetch(kind, false, cx);
+    }
+    fn fetch(&mut self, kind: Kind, force: bool, cx: &mut Context<Self>) {
         if cfg!(test) || self.loading.contains(&kind) {
             return;
         }
@@ -1491,7 +1678,11 @@ impl ModelList {
         let work = cx.background_executor().spawn({
             let profile = self.profiles.get(&kind).cloned().unwrap_or_default();
             async move {
-                let result = catalog::models_for(kind, &profile);
+                let result = if force {
+                    catalog::refresh_models_for(kind, &profile)
+                } else {
+                    catalog::models_for(kind, &profile)
+                };
                 // Missing is a fact about the binary, not about the message it
                 // produced. Resolve on the worker so the UI never probes paths.
                 let missing = result.is_err() && provider::resolve(kind).is_none();
@@ -1506,6 +1697,7 @@ impl ModelList {
                     Ok(models) => {
                         this.catalogs.retain(|(k, _)| *k != kind);
                         this.catalogs.push((kind, models));
+                        this.forget_unlisted_recents(kind, cx);
                     }
                     Err(error) => this.errors.push((kind, error)),
                 }
@@ -1651,10 +1843,18 @@ impl ModelList {
             name: "Default".into(),
             enabled,
         }];
+        let local_catalog = self
+            .remote_project
+            .is_none()
+            .then(|| self.catalogs.iter().find(|(k, _)| *k == kind))
+            .flatten()
+            .map(|(_, models)| models);
         if let Some(prefs) = cx.try_global::<crate::settings::Preferences>() {
             for choice in &prefs.recent_models {
                 if choice.provider == kind.id()
-                    && choice.model.is_some()
+                    && let Some(model) = choice.model.as_deref()
+                    // Nor is one the provider's catalog has stopped listing.
+                    && local_catalog.is_none_or(|models| listed(models, model))
                     // A recent the host doesn't offer, or can't yet be matched
                     // to what it offers, is not a choice on this machine.
                     && let Some((id, true)) = self.saved_choice(kind, choice.model.as_deref())
@@ -1775,7 +1975,7 @@ impl ModelList {
             });
         }
         if let ModelTab::Harness(kind) = tab
-            && !self.catalogs.iter().any(|(k, _)| *k == kind)
+            && !self.has_catalog(kind)
             && !self.errors.iter().any(|(k, _)| *k == kind)
         {
             self.discover(kind, cx);
@@ -1879,6 +2079,44 @@ impl ModelList {
                 )
                 .into_any_element(),
         )
+    }
+    /// The foot of the rail: asks again for the catalogs on show.
+    fn refresh_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let refreshing = self.refreshing(cx);
+        let label: SharedString = match self.tab {
+            ModelTab::Harness(kind) if self.remote_project.is_none() => {
+                format!("Refresh {} models", kind.label()).into()
+            }
+            _ => "Refresh models".into(),
+        };
+        div()
+            .id("refresh-models")
+            .debug_selector(|| "refresh-models".into())
+            .role(Role::Button)
+            .aria_label(if refreshing {
+                "Refreshing models".into()
+            } else {
+                label
+            })
+            .group("refresh-models")
+            .flex_shrink_0()
+            .size(px(32.))
+            .rounded(px(6.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_color(content(0.45))
+            .when(!refreshing, |d| {
+                d.cursor_pointer()
+                    .hover(|s| s.bg(content(0.08)).text_color(content(1.)))
+                    .on_click(cx.listener(|this, _, _, cx| this.refresh(cx)))
+            })
+            .child(if refreshing {
+                crate::right_panel::spinner("refresh-models-spin", "refresh-cw", 14.)
+            } else {
+                icon("refresh-cw", 14.).into_any_element()
+            })
+            .into_any()
     }
     fn tab(&self, tab: ModelTab, cx: &mut Context<Self>) -> AnyElement {
         let selected = self.tab == tab;
@@ -2128,7 +2366,9 @@ impl Render for ModelList {
                                 }
                             })
                             .map(|kind| self.tab(ModelTab::Harness(kind), cx)),
-                    ),
+                    )
+                    .child(div().flex_1().min_h(px(4.)))
+                    .child(self.refresh_button(cx)),
             )
             .child(
                 div()
