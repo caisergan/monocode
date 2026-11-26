@@ -42,6 +42,7 @@ mod image_memory;
 mod inbox;
 mod ink_field;
 mod input;
+mod keep_awake;
 mod markdown;
 mod markdown_model;
 #[cfg(target_os = "macos")]
@@ -455,6 +456,7 @@ fn main() {
             shell::bind_keys(cx);
             app_menu::bind(cx);
             usage_footer::bind(cx);
+            keep_awake::bind(cx);
             cx.on_window_closed(|cx, _| {
                 if cx.windows().is_empty() {
                     quit(cx)

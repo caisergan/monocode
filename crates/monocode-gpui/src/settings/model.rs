@@ -295,6 +295,30 @@ pub(crate) const INDEX: &[(&str, Section, &str, &str)] = &[
         "motion open close resize transition",
     ),
     (
+        "keep-awake-footer",
+        Section::General,
+        "Keep awake",
+        "keep awake sleep prevent caffeinate amphetamine footer chip mac awake",
+    ),
+    (
+        "keep-awake-mode",
+        Section::General,
+        "Default keep awake mode",
+        "keep awake sleep agents working hours always timer start shortcut",
+    ),
+    (
+        "keep-awake-display",
+        Section::General,
+        "Keep display open",
+        "keep awake display screen sleep turn off monitor",
+    ),
+    (
+        "keep-awake-battery",
+        Section::General,
+        "Stop on low battery",
+        "keep awake battery percent unplugged power",
+    ),
+    (
         "theme",
         Section::Appearance,
         "Theme",

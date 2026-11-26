@@ -201,6 +201,8 @@ impl Shell {
             .update(cx, |footer, cx| footer.set_classic(classic, cx));
         self.resources
             .update(cx, |monitor, cx| monitor.set_classic(classic, cx));
+        self.keep_awake
+            .update(cx, |keep_awake, cx| keep_awake.set_classic(classic, cx));
         self.invalidate_chrome(cx);
         self.drop_peek();
         if !self.workspace.classic_layout && !self.query.is_empty() {
@@ -227,6 +229,8 @@ impl Shell {
             .update(cx, |footer, cx| footer.set_classic(classic, cx));
         self.resources
             .update(cx, |monitor, cx| monitor.set_classic(classic, cx));
+        self.keep_awake
+            .update(cx, |keep_awake, cx| keep_awake.set_classic(classic, cx));
         if classic {
             return vec![self.classic_body(
                 sidebar_width,
@@ -833,10 +837,12 @@ impl Shell {
                     .cached(StyleRefinement::default().flex_1().min_w_0().h(px(height))),
             )
             .map(|d| {
+                let keep_awake = self.keep_awake_chip(cx);
                 let pressure = self.pressure_chip(cx);
                 let terminal = self.terminal_footer(cx);
                 let between = pressure.is_some() && terminal.is_some();
-                d.children(pressure)
+                d.children(keep_awake)
+                    .children(pressure)
                     .when(between, |d| {
                         d.child(
                             super::terminal_dock::footer_separator()

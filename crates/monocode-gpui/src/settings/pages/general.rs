@@ -252,11 +252,84 @@ impl SettingsView {
                 ],
             ),
         ];
-        vec![
+        let shortcut = super::keybindings::command_shortcut(&p, crate::keep_awake::COMMAND)
+            .map(|keys| format!("Start and {keys} begin this."))
+            .unwrap_or_else(|| "What Start begins.".into());
+        let keep_awake = vec![
+            self.row(
+                Some("keep-awake-footer"),
+                true,
+                "Show in footer",
+                Some("Adds the keep-awake chip beside Build and Terminal.".into()),
+                vec![self.toggle(
+                    "keep-awake-footer",
+                    "Show keep awake in footer",
+                    p.keep_awake_footer,
+                    false,
+                    cx,
+                    |this, on, cx| this.update(cx, |p| p.keep_awake_footer = on),
+                )],
+            ),
+            self.row(
+                Some("keep-awake-mode"),
+                false,
+                "Default mode",
+                Some(shortcut.into()),
+                vec![self.segmented(
+                    "keep-awake-mode",
+                    "Default keep awake mode",
+                    &p.keep_awake_mode,
+                    &[
+                        ("agents", "Agents"),
+                        ("1h", "1 h"),
+                        ("2h", "2 h"),
+                        ("4h", "4 h"),
+                        ("always", "Always"),
+                    ],
+                    cx,
+                    |this, v, cx| this.update(cx, |p| p.keep_awake_mode = v.into()),
+                )],
+            ),
+            self.row(
+                Some("keep-awake-display"),
+                false,
+                "Keep display open",
+                Some("Also stop the screen from turning off while awake.".into()),
+                vec![self.toggle(
+                    "keep-awake-display",
+                    "Keep display open",
+                    p.keep_awake_display,
+                    false,
+                    cx,
+                    |this, on, cx| this.update(cx, |p| p.keep_awake_display = on),
+                )],
+            ),
+            self.row(
+                Some("keep-awake-battery"),
+                false,
+                "Stop on low battery",
+                Some("Ends a session below this level when unplugged.".into()),
+                vec![self.segmented(
+                    "keep-awake-battery",
+                    "Stop on low battery",
+                    &p.keep_awake_battery.to_string(),
+                    &[("0", "Never"), ("20", "20%"), ("10", "10%"), ("5", "5%")],
+                    cx,
+                    |this, v, cx| {
+                        this.update(cx, |p| p.keep_awake_battery = v.parse().unwrap_or(0))
+                    },
+                )],
+            ),
+        ];
+        let mut groups = vec![
             self.group(None, true, "Alerts", None, None, alerts),
             self.group(None, false, "Workspace", None, None, workspace),
-            self.group(None, false, "About", None, None, about),
-        ]
+        ];
+        if cfg!(target_os = "macos") {
+            groups.push(self.group(None, false, "Keep awake", None, None, keep_awake));
+        }
+        groups.push(self.group(None, false, "About", None, None, about));
+        groups
     }
 }
 impl SettingsView {

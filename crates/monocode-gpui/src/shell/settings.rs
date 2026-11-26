@@ -381,6 +381,9 @@ impl Shell {
             monos.update(cx, |m, cx| m.set_preferences(prefs, cx));
         }
         crate::settings::apply_keybindings(&self.workspace.preferences, cx);
+        let prefs = self.workspace.preferences.clone();
+        self.keep_awake
+            .update(cx, |keep_awake, cx| keep_awake.set_preferences(&prefs, cx));
         // After the keymap, so the menu shows rebound shortcuts.
         crate::app_menu::install(&self.workspace.preferences, cx);
         cx.set_global(self.workspace.preferences.clone());

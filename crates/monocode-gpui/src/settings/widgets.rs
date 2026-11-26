@@ -252,6 +252,8 @@ impl SettingsView {
                 "sounds"
                     | "notifications"
                     | "tab-animations"
+                    | "keep-awake-footer"
+                    | "keep-awake-display"
                     | "notes"
                     | "quick-composer"
                     | "working-agents"

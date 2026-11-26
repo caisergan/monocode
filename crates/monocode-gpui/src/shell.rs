@@ -15,6 +15,7 @@ mod github_star;
 mod idle_agents;
 #[cfg(test)]
 mod image_lightbox_tests;
+mod keep_awake;
 mod layout;
 mod linked_panel;
 pub(crate) mod live_agents;
@@ -128,6 +129,7 @@ actions!(
         PreviousProject,
         NextProject,
         ShowChats,
+        ToggleKeepAwake,
         MoveProjectBack,
         MoveProjectForward,
         SwitchModel,
@@ -234,6 +236,7 @@ pub(crate) fn bind_keys(cx: &mut App) {
         KeyBinding::new(&format!("{modifier}-]"), VisitForward, context),
         KeyBinding::new("escape", DismissMenu, context),
         KeyBinding::new(&format!("{modifier}-b"), ToggleSidebar, context),
+        KeyBinding::new(&format!("{modifier}-alt-a"), ToggleKeepAwake, context),
         KeyBinding::new(&format!("{modifier}-k"), FocusSearch, context),
         KeyBinding::new(&format!("{modifier}-shift-f"), SearchFiles, context),
         KeyBinding::new(&format!("{modifier}-alt-t"), CloseOtherTabs, context),
@@ -641,6 +644,10 @@ pub(crate) struct Shell {
     usage_footer: Entity<UsageStrip>,
     /// The footer's high-usage chip and its running-work dialog.
     resources: Entity<ResourceMonitor>,
+    /// The footer's keep-awake chip and the power assertions behind it.
+    keep_awake: Entity<crate::keep_awake::KeepAwake>,
+    keep_awake_bound: bool,
+    keep_awake_visible: bool,
     sidebar_frame: Entity<Chrome>,
     projects_frame: Entity<Chrome>,
     project_rail_list: project_rail::ProjectRailList,
@@ -1020,6 +1027,8 @@ impl Shell {
             }
         });
         let resources = cx.new(ResourceMonitor::new);
+        let keep_awake = cx.new(|cx| crate::keep_awake::KeepAwake::new(&workspace.preferences, cx));
+        let keep_awake_visible = keep_awake.read(cx).visible();
         let resource_observation = cx.observe(&resources, |_, _, cx| cx.notify());
         let resource_stops = cx.subscribe(&resources, |this, _, StopSession(id), cx| {
             if let Some(session) = this.sessions.get(id) {
@@ -1060,6 +1069,9 @@ impl Shell {
             rails: Default::default(),
             usage_footer: cx.new(|cx| UsageStrip::new(active_kind, cx)),
             resources,
+            keep_awake,
+            keep_awake_bound: false,
+            keep_awake_visible,
             sidebar_frame,
             projects_frame,
             project_rail_list: project_rail::ProjectRailList::new(cx),
@@ -1622,6 +1634,7 @@ impl Shell {
         let provider = session.summary.provider.clone();
         self.session_marks[&id].update(cx, |mark, cx| mark.set(&provider, state, cx));
         self.tab_marks[&id].update(cx, |mark, cx| mark.set(&provider, tab_state, cx));
+        self.sync_keep_awake(cx);
         if finished {
             self.save_state(cx);
         }
@@ -8562,6 +8575,7 @@ impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.keep_visible_idle_agents(cx);
         self.sync_ui_scale(window, cx);
+        self.bind_keep_awake(window, cx);
         if self.mono_panes_unsettled(cx) {
             let this = cx.entity();
             window.defer(cx, move |window, cx| {
@@ -9146,6 +9160,10 @@ impl Render for Shell {
                 this.pane_sash = None;
                 this.invalidate_chrome(cx);
                 cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &ToggleKeepAwake, _, cx| {
+                this.keep_awake
+                    .update(cx, |keep_awake, cx| keep_awake.toggle_session(cx));
             }))
             .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| {
                 this.toggle_primary_sidebar(window, cx)

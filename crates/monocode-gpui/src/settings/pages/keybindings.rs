@@ -73,6 +73,12 @@ pub(crate) const BINDINGS: &[Binding] = &[
         fixed: false,
     },
     Binding {
+        command: "App: Toggle Keep Awake",
+        keys: "⌥⌘A",
+        when: "Always",
+        fixed: false,
+    },
+    Binding {
         command: "App: Switch Model",
         keys: "⌘.",
         when: "Always",
