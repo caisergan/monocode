@@ -579,7 +579,6 @@ impl Shell {
                 .mailbox
                 .retain(|e| e.session != id || matches!(e.kind, EventKind::Blocked(_)));
         }
-        let max_chars = input["maxChars"].as_u64().map(|n| n as usize);
         let chat = view.as_ref().map(|view| view.read(cx));
         let observation = chat
             .map(|chat| chat.agent_observation(cx))
@@ -616,8 +615,30 @@ impl Shell {
         if let Some(error) = &observation.error {
             head["error"] = json!(monocode_core::response::limit(error, 2_000));
         }
+        let work = self.read_session_work(id, live, input, head, (busy, draft), cx);
+        cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let _ = this.update(cx, |this, cx| this.finish_app_call(call, result, cx));
+        })
+        .detach();
+    }
+    /// The read behind agents.read and master.read, off the main thread.
+    /// `head` holds the caller's fields, its `view` the mode (activity, last
+    /// or history); `live` the loaded chat's steers and rows, if any;
+    /// `history` whether the session is busy and has a saved draft.
+    pub(super) fn read_session_work(
+        &self,
+        id: i64,
+        live: Option<(Vec<usize>, Vec<monocode_core::transcript::Row>)>,
+        input: Value,
+        head: Value,
+        (busy, draft): (bool, bool),
+        cx: &App,
+    ) -> gpui::Task<Result<Value, String>> {
+        let max_chars = input["maxChars"].as_u64().map(|n| n as usize);
+        let mode = head["view"].as_str().unwrap_or("last").to_owned();
         let store = self.store.clone();
-        let work = cx.background_executor().spawn(async move {
+        cx.background_executor().spawn(async move {
             if mode == "history" {
                 let mut page = json!({});
                 for key in ["before", "limit", "maxChars"] {
@@ -654,12 +675,7 @@ impl Shell {
                 }
             }
             Ok(value)
-        });
-        cx.spawn(async move |this, cx| {
-            let result = work.await;
-            let _ = this.update(cx, |this, cx| this.finish_app_call(call, result, cx));
         })
-        .detach();
     }
 
     fn wait_for_agents(&mut self, call: Call, cx: &mut Context<Self>) {

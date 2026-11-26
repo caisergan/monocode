@@ -439,7 +439,11 @@ impl Conversation {
         self.settings.attachments = message.attachments;
         let previous_prepared = self.settings.prepared_prompt.take();
         self.settings.prepared_prompt = message.prepared_prompt;
+        self.settings.message_sender = message.sender;
+        self.settings.message_access = message.access;
         self.launch_prompt(message.text, cx);
+        self.settings.message_sender = None;
+        self.settings.message_access = None;
         self.settings.prepared_prompt = previous_prepared;
         self.attachments = composer_attachments;
         self.settings.attachments.clear();

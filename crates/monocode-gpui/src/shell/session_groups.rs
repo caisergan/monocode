@@ -923,6 +923,7 @@ impl Shell {
             self.preview_close = None;
         }
         self.orchestration_session_forgotten(id, cx);
+        self.master_session_forgotten(id, cx);
         self.sessions.remove(&id);
         self.session_summaries.remove(&id);
         self.draft_sessions.remove(&id);

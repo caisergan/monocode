@@ -190,6 +190,11 @@ pub(crate) struct Conversation {
     pending_search: Option<(usize, String)>,
     loading: bool,
     pub(crate) busy: bool,
+    /// Who sent the message the latest turn started with, when not the user
+    /// (Master's `master:<task>:<step>`); Master steers only its own turns.
+    pub(crate) turn_sender: Option<String>,
+    /// Master's own chat (see `Settings::master`); the shell sets it.
+    pub(crate) master: bool,
     /// The UI is idle; serialize the next launch behind the worker's last save.
     stopping: bool,
     notification_cancelled: bool,
@@ -662,6 +667,8 @@ impl Conversation {
             pending_search: None,
             loading: false,
             busy: false,
+            turn_sender: None,
+            master: false,
             stopping: false,
             notification_cancelled: false,
             draft_hint: false,
@@ -1195,6 +1202,13 @@ impl Conversation {
         self.settings.operator_enabled |= self.settings.orchestrator_enabled;
         self.app_read_only = self.settings.plan || self.settings.access == AccessMode::ReadOnly;
         let mut settings = self.settings.clone();
+        // A sender's plan may set this one turn's access; the session keeps
+        // its own setting for the user's turns.
+        if let Some(access) = settings.message_access {
+            settings.access = access;
+        }
+        self.turn_sender = settings.message_sender.clone();
+        settings.master = self.master;
         if let Some(model) = self.model_info() {
             for control in &model.controls {
                 settings
@@ -1211,6 +1225,7 @@ impl Conversation {
                 .map(|model| model.id.clone())
                 .or(self.model.clone()),
             started_at: Some(monocode_core::time::now_ms()),
+            sender: settings.message_sender.clone(),
             ..Default::default()
         });
         if !self.is_remote() && settings.prepared_prompt.is_none() {
