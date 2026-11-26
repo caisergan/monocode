@@ -1,4 +1,6 @@
 //! Generated HTML lives in an opaque sandbox with no app bridge or network.
+//! A local HTML file's preview instead opens the file itself, as a browser
+//! would, so its stylesheets, scripts and images load from beside it.
 #[cfg(not(target_os = "macos"))]
 use gpui::div;
 use gpui::{Context, Window, canvas, prelude::*};
@@ -10,18 +12,36 @@ use objc2::{
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{NSView, NSWindowOrderingMode};
 #[cfg(target_os = "macos")]
+use objc2_foundation::{NSError, NSPoint, NSRect, NSSize, NSString, NSURL};
+#[cfg(target_os = "macos")]
 use objc2_foundation::{NSObject, NSObjectProtocol};
 #[cfg(target_os = "macos")]
-use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
-#[cfg(target_os = "macos")]
 use objc2_web_kit::{
-    WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate, WKNavigationType,
-    WKWebView, WKWebViewConfiguration, WKWebsiteDataStore,
+    WKNavigation, WKNavigationAction, WKNavigationActionPolicy, WKNavigationDelegate,
+    WKNavigationType, WKWebView, WKWebViewConfiguration, WKWebsiteDataStore,
 };
 #[cfg(target_os = "macos")]
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 #[cfg(target_os = "macos")]
 use std::{cell::RefCell, rc::Rc, sync::Arc};
+#[cfg(target_os = "macos")]
+struct GuardState {
+    app: gpui::AsyncApp,
+    /// A file preview's folder of readable files, as a `file://` URL prefix.
+    root: Option<String>,
+    /// Unsaved text that replaces the file once its first load has granted
+    /// read access to the folder; a load started at once would race it.
+    pending: RefCell<Option<(Retained<NSString>, Retained<NSURL>)>>,
+}
+#[cfg(target_os = "macos")]
+impl GuardState {
+    fn load_pending(&self, web: &WKWebView) {
+        let pending = self.pending.borrow_mut().take();
+        if let Some((text, base)) = pending {
+            unsafe { web.loadHTMLString_baseURL(&text, Some(&base)) };
+        }
+    }
+}
 #[cfg(target_os = "macos")]
 define_class!(
     #[unsafe(super(NSView))]
@@ -49,7 +69,7 @@ define_class!(
     #[unsafe(super(NSObject))]
     #[name = "MonocodeArtifactNavigation"]
     #[thread_kind=MainThreadOnly]
-    #[ivars=gpui::AsyncApp]
+    #[ivars=GuardState]
     struct NavigationGuard;
     unsafe impl NSObjectProtocol for NavigationGuard {}
     unsafe impl WKNavigationDelegate for NavigationGuard {
@@ -60,24 +80,44 @@ define_class!(
             action: &WKNavigationAction,
             reply: &block2::DynBlock<dyn Fn(WKNavigationActionPolicy)>,
         ) {
-            let url = unsafe { action.request().URL() }.and_then(|url| url.absoluteString());
-            if unsafe { action.navigationType() } == WKNavigationType::LinkActivated
+            let url = unsafe { action.request().URL() }
+                .and_then(|url| url.absoluteString())
+                .map(|url| url.to_string());
+            let web = url
+                .as_ref()
+                .is_some_and(|url| url.starts_with("https://") || url.starts_with("http://"));
+            let link = unsafe { action.navigationType() } == WKNavigationType::LinkActivated;
+            if link
+                && web
                 && let Some(url) = url.as_ref()
-                && (url.to_string().starts_with("https://")
-                    || url.to_string().starts_with("http://"))
             {
-                let url = url.to_string();
-                self.ivars().clone().update(|cx| cx.open_url(&url));
+                self.ivars().app.clone().update(|cx| cx.open_url(url));
             }
+            let state = self.ivars();
+            let main = unsafe { action.targetFrame() }.is_none_or(|f| unsafe { f.isMainFrame() });
             let allowed = url.is_none_or(|url| {
-                let s = url.to_string();
-                s.starts_with("about:blank") || s.starts_with("about:srcdoc")
+                url.starts_with("about:blank")
+                    || url.starts_with("about:srcdoc")
+                    || state.root.as_ref().is_some_and(|root| {
+                        // A file page keeps to its folder, and embeds web
+                        // frames as a browser would; web links open outside.
+                        url.starts_with(root.as_str())
+                            || (!main && !link && (web || url.starts_with("data:")))
+                    })
             });
             reply.call((if allowed {
                 WKNavigationActionPolicy::Allow
             } else {
                 WKNavigationActionPolicy::Cancel
             },));
+        }
+        #[unsafe(method(webView:didFinishNavigation:))]
+        unsafe fn finished(&self, web: &WKWebView, _: Option<&WKNavigation>) {
+            self.ivars().load_pending(web);
+        }
+        #[unsafe(method(webView:didFailProvisionalNavigation:withError:))]
+        unsafe fn failed(&self, web: &WKWebView, _: Option<&WKNavigation>, _: &NSError) {
+            self.ivars().load_pending(web);
         }
     }
 );
@@ -94,8 +134,18 @@ struct Markup {
     accent: gpui::Hsla,
     html: Arc<str>,
 }
+/// A local HTML file to preview: its path, the folder its page may read
+/// from, and whether `body` holds edits not yet on disk.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) struct LocalFile {
+    pub path: std::path::PathBuf,
+    pub root: std::path::PathBuf,
+    pub unsaved: bool,
+}
 pub(crate) struct Html {
     body: String,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    file: Option<LocalFile>,
     interactive: bool,
     #[cfg(target_os = "macos")]
     markup: Option<Markup>,
@@ -143,6 +193,7 @@ impl Html {
         LIVE.with(|live| live.borrow_mut().push(Rc::downgrade(&view)));
         Self {
             body,
+            file: None,
             interactive: true,
             #[cfg(target_os = "macos")]
             markup: None,
@@ -150,8 +201,29 @@ impl Html {
             view,
         }
     }
+    /// A file's preview: the page as written, without the generated
+    /// documents' theme or sandbox.
+    pub(crate) fn file(body: String, file: LocalFile) -> Self {
+        let mut html = Self::new(body);
+        html.file = Some(file);
+        html
+    }
+    #[cfg(test)]
+    pub(crate) fn local_file(&self) -> Option<&LocalFile> {
+        self.file.as_ref()
+    }
     #[cfg(target_os = "macos")]
     fn markup(&mut self) -> Arc<str> {
+        if self.file.is_some() {
+            if self.markup.is_none() {
+                self.markup = Some(Markup {
+                    ink: gpui::Hsla::default(),
+                    accent: gpui::Hsla::default(),
+                    html: self.body.as_str().into(),
+                });
+            }
+            return self.markup.as_ref().unwrap().html.clone();
+        }
         let ink = crate::theme::content(1.);
         let accent = crate::theme::accent_color();
         if self
@@ -209,6 +281,13 @@ impl gpui::Render for Html {
         {
             let view = self.view.clone();
             let html = self.markup();
+            let file = self.file.as_ref().map(|file| {
+                (
+                    file.path.to_string_lossy().into_owned(),
+                    file.root.to_string_lossy().into_owned(),
+                    file.unsaved,
+                )
+            });
             let app = cx.to_async();
             let interactive = self.interactive;
             canvas(
@@ -283,10 +362,35 @@ impl gpui::Render for Html {
                                 web_rect,
                                 &config,
                             );
-                            let guard = NavigationGuard::alloc(mtm).set_ivars(app.clone());
+                            let urls = file.as_ref().map(|(path, root, unsaved)| {
+                                let path = NSURL::fileURLWithPath_isDirectory(
+                                    &NSString::from_str(path),
+                                    false,
+                                );
+                                let root = NSURL::fileURLWithPath_isDirectory(
+                                    &NSString::from_str(root),
+                                    true,
+                                );
+                                (path, root, *unsaved)
+                            });
+                            let guard = NavigationGuard::alloc(mtm).set_ivars(GuardState {
+                                app: app.clone(),
+                                root: urls.as_ref().and_then(|(_, root, _)| {
+                                    root.absoluteString().map(|root| root.to_string())
+                                }),
+                                pending: RefCell::new(urls.as_ref().and_then(
+                                    |(path, _, unsaved)| {
+                                        unsaved.then(|| (NSString::from_str(&html), path.clone()))
+                                    },
+                                )),
+                            });
                             let guard: Retained<NavigationGuard> = msg_send![super(guard), init];
                             web.setNavigationDelegate(Some(ProtocolObject::from_ref(&*guard)));
-                            web.loadHTMLString_baseURL(&NSString::from_str(&html), None);
+                            if let Some((path, root, _)) = &urls {
+                                web.loadFileURL_allowingReadAccessToURL(path, root);
+                            } else {
+                                web.loadHTMLString_baseURL(&NSString::from_str(&html), None);
+                            }
                             clip.addSubview(&web);
                             Hosted {
                                 clip,
@@ -347,5 +451,19 @@ mod tests {
         assert!(!html.contains("allow-same-origin"));
         assert!(html.contains("connect-src 'none'"));
         assert!(html.contains("&lt;script&gt;"));
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn file_previews_show_the_page_as_written() {
+        let body = "<!doctype html><link rel=stylesheet href=style.css><h1>Page</h1>";
+        let mut html = Html::file(
+            body.into(),
+            LocalFile {
+                path: "/project/site/index.html".into(),
+                root: "/project".into(),
+                unsaved: false,
+            },
+        );
+        assert_eq!(&*html.markup(), body);
     }
 }

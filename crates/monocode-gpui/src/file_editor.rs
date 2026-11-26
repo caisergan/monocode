@@ -161,8 +161,7 @@ pub(crate) struct FileEditor {
     media_events: Option<Subscription>,
     /// Each edit renders a fresh sprite; the one it replaces is given back.
     svg_preview: Option<Arc<RenderImage>>,
-    /// An HTML file's Preview: its text in the sandboxed document view, and
-    /// the text it was made from.
+    /// An HTML file's Preview: its page view, and the text it was made from.
     html_preview: Option<(SharedString, Entity<crate::monos::html::Html>)>,
     svg_failed: bool,
     svg_render: Option<Task<()>>,
@@ -815,6 +814,10 @@ impl FileEditor {
             .and_then(|s| s.to_str())
             .is_some_and(|s| matches!(s.to_ascii_lowercase().as_str(), "html" | "htm" | "xhtml"))
     }
+    /// Whether the pane shows an HTML file's native page preview.
+    pub(crate) fn shows_html_preview(&self) -> bool {
+        self.preview && self.is_html() && self.html_preview.is_some()
+    }
     fn is_svg(&self) -> bool {
         PathBuf::from(&self.path)
             .extension()
@@ -841,15 +844,33 @@ impl FileEditor {
             }));
         }
         if self.preview && self.is_html() {
-            // The page runs in an opaque sandbox with no file access, so it
-            // can't read the project; relative assets don't load.
             let text = self.input.read(cx).content.clone();
             if self
                 .html_preview
                 .as_ref()
                 .is_none_or(|(source, _)| *source != text)
             {
-                let view = cx.new(|_| crate::monos::html::Html::new(text.to_string()));
+                let path = PathBuf::from(&self.path);
+                let view = if monocode_core::files::remote::is_remote(&path) {
+                    // The host sends only the text, so the page runs in the
+                    // generated documents' opaque sandbox.
+                    cx.new(|_| crate::monos::html::Html::new(text.to_string()))
+                } else {
+                    // Opened as a browser would, reading relative assets
+                    // from the project, or the file's folder outside it.
+                    let cwd = PathBuf::from(&self.cwd);
+                    let root = if !self.cwd.is_empty() && path.starts_with(&cwd) {
+                        cwd
+                    } else {
+                        path.parent().map(PathBuf::from).unwrap_or_default()
+                    };
+                    let file = crate::monos::html::LocalFile {
+                        path,
+                        root,
+                        unsaved: self.dirty,
+                    };
+                    cx.new(|_| crate::monos::html::Html::file(text.to_string(), file))
+                };
                 self.html_preview = Some((text, view));
             }
         }
@@ -1409,7 +1430,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn html_files_preview_their_text_in_the_sandboxed_document_view(cx: &mut TestAppContext) {
+    fn html_files_preview_as_a_page_read_from_their_folder(cx: &mut TestAppContext) {
         let path =
             std::env::temp_dir().join(format!("monocode-html-preview-{}.html", std::process::id()));
         std::fs::write(&path, "<h1>Report</h1>").unwrap();
@@ -1436,7 +1457,15 @@ mod tests {
                     e.html_preview.as_ref().unwrap().0.as_ref(),
                     "<h1>Report</h1>"
                 );
+                assert!(e.shows_html_preview());
+                // Outside the project, the page reads from the file's folder.
+                let view = e.html_preview.as_ref().unwrap().1.read(cx);
+                let local = view.local_file().unwrap();
+                assert_eq!(local.path, path);
+                assert_eq!(local.root.as_path(), path.parent().unwrap());
+                assert!(!local.unsaved);
                 e.toggle_preview(w, cx);
+                assert!(!e.shows_html_preview());
                 assert!(!e.preview);
             })
             .unwrap();
