@@ -391,7 +391,7 @@ impl Shell {
             });
         }
         self.usage_footer.update(cx, |footer, cx| {
-            footer.set_remaining(self.workspace.preferences.show_remaining_usage, cx)
+            footer.set_preferences(&self.workspace.preferences, cx)
         });
     }
     fn choose_chat_background(&mut self, cx: &mut Context<Self>) {
