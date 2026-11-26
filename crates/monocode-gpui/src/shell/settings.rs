@@ -37,8 +37,8 @@ impl Shell {
                 (
                     kind,
                     crate::accounts::get(cx)
-                        .map(|center| center.read(cx).selected(kind, &self.workspace.project).id)
-                        .unwrap_or_else(|| monocode_core::accounts::DEFAULT.into()),
+                        .map(|center| center.read(cx).selected(kind, &self.workspace.project))
+                        .unwrap_or_default(),
                 )
             })
             .collect();
@@ -46,12 +46,14 @@ impl Shell {
             let v = active.read(cx);
             profiles.insert(
                 Kind::from_id(&v.summary.provider),
-                v.settings.account.id.clone(),
+                v.settings.account.clone(),
             );
         }
         for session in active.iter().chain(self.sessions.values()) {
             let session = session.read(cx);
-            if profiles.get(&Kind::from_id(&session.summary.provider))
+            if profiles
+                .get(&Kind::from_id(&session.summary.provider))
+                .map(|profile| &profile.id)
                 != Some(&session.settings.account.id)
             {
                 continue;
@@ -63,6 +65,15 @@ impl Shell {
             if !models.is_empty() {
                 catalogs.insert(session.summary.provider.clone(), models);
             }
+        }
+        // Providers with no open session show the catalog the model picker
+        // saved for the selected account, so the count matches the picker.
+        if monocode_core::remote::parse_remote_path(&self.workspace.project).is_none() {
+            fill_saved_catalogs(
+                &mut catalogs,
+                &profiles,
+                monocode_core::catalog::cached_models_for,
+            );
         }
         SettingsContext {
             remote: Some(self.remote.clone()),
@@ -535,12 +546,96 @@ fn this_update(this: &mut Shell, cx: &mut Context<Shell>) {
     this.update_chat_visibility(cx);
     cx.notify();
 }
+/// Give each provider without a live list the catalog saved for its account.
+fn fill_saved_catalogs(
+    catalogs: &mut HashMap<String, Vec<(String, String)>>,
+    profiles: &HashMap<Kind, monocode_core::accounts::Profile>,
+    saved: impl Fn(
+        Kind,
+        &monocode_core::accounts::Profile,
+    ) -> Option<Vec<monocode_core::catalog::Model>>,
+) {
+    for (&kind, profile) in profiles {
+        if catalogs.contains_key(kind.id()) {
+            continue;
+        }
+        let models = saved(kind, profile).unwrap_or_default();
+        if models.is_empty() {
+            continue;
+        }
+        catalogs.insert(
+            kind.id().to_owned(),
+            models
+                .into_iter()
+                .map(|model| {
+                    let name = crate::pickers::model_display_name(kind, &model.id, &model.name);
+                    (model.id, name.to_string())
+                })
+                .collect(),
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::shell::tests::window;
     use gpui::TestAppContext;
+
+    #[test]
+    fn providers_without_a_session_show_their_saved_catalog() {
+        let model = |id: &str, name: &str| monocode_core::catalog::Model {
+            id: id.into(),
+            name: name.into(),
+            alias_target: None,
+            efforts: Vec::new(),
+            default_effort: None,
+            fast: false,
+            thinking: false,
+            default: false,
+            tiers: Vec::new(),
+            controls: Vec::new(),
+        };
+        let other = monocode_core::accounts::Profile {
+            id: "work".into(),
+            root: None,
+        };
+        let profiles = HashMap::from([
+            (Kind::Claude, Default::default()),
+            (Kind::Pi, Default::default()),
+            (Kind::Codex, other.clone()),
+            (Kind::OpenCode, Default::default()),
+        ]);
+        let mut catalogs = HashMap::from([(
+            "claude".to_owned(),
+            vec![("claude-opus-5-5".to_owned(), "Opus 5.5".to_owned())],
+        )]);
+        fill_saved_catalogs(&mut catalogs, &profiles, |kind, profile| match kind {
+            // A live session's list wins over the saved one.
+            Kind::Claude => Some(vec![model("stale", "Stale")]),
+            Kind::Pi => Some(vec![
+                model("explabs/deepseek-v4.1-flash", "DeepSeek V4.1 Flash"),
+                model("explabs/unnamed", ""),
+            ]),
+            Kind::Codex => (profile == &other).then(|| vec![model("gpt-5", "GPT-5")]),
+            _ => Some(Vec::new()),
+        });
+        assert_eq!(
+            catalogs["claude"],
+            [("claude-opus-5-5".into(), "Opus 5.5".into())]
+        );
+        assert_eq!(catalogs["pi"].len(), 2);
+        assert_eq!(
+            catalogs["pi"][0],
+            (
+                "explabs/deepseek-v4.1-flash".into(),
+                "DeepSeek V4.1 Flash".into()
+            )
+        );
+        assert!(!catalogs["pi"][1].1.is_empty());
+        assert_eq!(catalogs["codex"], [("gpt-5".into(), "GPT-5".into())]);
+        assert!(!catalogs.contains_key("opencode"));
+    }
 
     #[gpui::test]
     fn pairing_dialog_is_a_window_overlay_and_updates_from_settings_notifications(
