@@ -89,15 +89,16 @@ impl Shell {
             return None;
         }
         let classic = self.workspace.boxy_layout();
+        // Last in the footer (no terminal controls), it takes the inset margin.
+        let alone = self.app_view_open() || self.workspace.project.is_empty();
         Some(
             div()
                 .flex_shrink_0()
-                .map(|d| {
-                    if classic {
-                        d.mr(px(super::terminal_dock::FOOTER_GAP))
-                    } else {
-                        d.mr(px(super::terminal_dock::FOOTER_GAP)).pb(px(2.))
-                    }
+                .map(|d| match (classic, alone) {
+                    (true, true) => d,
+                    (true, false) => d.mr(px(super::terminal_dock::FOOTER_GAP)),
+                    (false, true) => d.mr(px(6.)).pb(px(2.)),
+                    (false, false) => d.mr(px(super::terminal_dock::FOOTER_GAP)).pb(px(2.)),
                 })
                 .child(self.keep_awake.clone())
                 .into_any_element(),

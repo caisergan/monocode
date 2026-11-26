@@ -110,7 +110,7 @@ pub(super) fn cup(side: f32, color: Hsla, steam: Option<f32>) -> impl IntoElemen
                     move |bounds, _, window, _| {
                         // Phase zero, which reduced motion draws, shows one
                         // wisp fully risen and the other just appearing.
-                        for (x, offset) in [(8., 0.35), (12., 0.85)] {
+                        for (x, offset) in [(7.5, 0.35), (12., 0.85)] {
                             paint_wisp(window, bounds, side, x, (phase + offset) % 1., color);
                         }
                     },
@@ -137,10 +137,11 @@ fn paint_wisp(window: &mut Window, bounds: Bounds<Pixels>, side: f32, x: f32, t:
         return;
     }
     let unit = side / 24.;
-    let lift = 2.2 - 4.6 * t;
+    // The cup's rim sits at 7.5 on the 24-unit grid.
+    let lift = 1.6 - 3.6 * t;
     let stretch = 0.75 + 0.3 * t;
-    let (bottom, height) = (8.6 + lift, 6.2 * stretch);
-    let mut path = PathBuilder::stroke(px(1.6 * unit));
+    let (bottom, height) = (6. + lift, 4.8 * stretch);
+    let mut path = PathBuilder::stroke(px(1.75 * unit));
     let steps = 14;
     for step in 0..=steps {
         let f = step as f32 / steps as f32;

@@ -506,6 +506,8 @@ impl KeepAwake {
             .session
             .and_then(|s| s.ends.map(|ends| (s.started, ends)));
         let (count, time) = self.chip_text(now);
+        // Off, it names itself the way Build and Terminal do.
+        let time = time.or_else(|| self.session.is_none().then(|| "Keep awake".to_owned()));
         let color = if hold {
             accent
         } else if self.session.is_some() {
@@ -533,6 +535,7 @@ impl KeepAwake {
         };
         let label = match (&count, &time) {
             (Some(count), Some(time)) => format!("Keep awake: {count}, {time}"),
+            (None, Some(_)) if self.session.is_none() => "Keep Mac awake".into(),
             (None, Some(time)) => format!("Keep awake: {time}"),
             _ => "Keep Mac awake".into(),
         };
@@ -558,13 +561,16 @@ impl KeepAwake {
             .flex_shrink_0()
             .flex()
             .items_center()
-            .gap(px(5.))
+            .gap(px(6.))
             .whitespace_nowrap()
             .text_size(px(11.))
             .text_color(color)
             .cursor_pointer()
             .when(self.open, |d| d.bg(content(0.1)))
-            .hover(|s| s.bg(content(0.1)))
+            .hover(move |s| {
+                let s = s.bg(content(0.1));
+                if hold { s } else { s.text_color(content(1.)) }
+            })
             .child(self.anchor.probe())
             .child(mark)
             .when_some(count.clone(), |d, count| d.child(count))

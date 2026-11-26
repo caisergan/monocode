@@ -18,6 +18,7 @@ impl AssetSource for Assets {
    "test-tube"=>include_bytes!("../assets/hugeicons/test-tube.svg"),
    "hammer"=>include_bytes!("../assets/hugeicons/hammer.svg"),
    "rocket"=>include_bytes!("../assets/hugeicons/rocket.svg"),
+   "keep-awake-cup"=>include_bytes!("../assets/hugeicons/keep-awake-cup.svg"),
    "bug"=>include_bytes!("../assets/hugeicons/bug.svg"),
    "package"=>include_bytes!("../assets/hugeicons/package.svg"),
    "smile"=>include_bytes!("../assets/hugeicons/smile.svg"),
@@ -235,12 +236,9 @@ fn icon_body(path: &str) -> Option<&'static str> {
         "circle-dashed" => {
             "<path d='M12 3a9 9 0 0 1 4.5 1.2m3.3 3.3A9 9 0 0 1 21 12m-1.2 4.5a9 9 0 0 1-3.3 3.3M12 21a9 9 0 0 1-4.5-1.2m-3.3-3.3A9 9 0 0 1 3 12m1.2-4.5a9 9 0 0 1 3.3-3.3'/>"
         }
-        // Keep awake: the cup (its steam is painted live), the timed modes'
+        // Keep awake: the timed modes'
         // clock faces with the session's share of the hour marked, and the
         // popover's display and idle marks.
-        "keep-awake-cup" => {
-            "<path d='M4.5 10.5h11v4.25a5.25 5.25 0 0 1-5.25 5.25h-.5A5.25 5.25 0 0 1 4.5 14.75Z'/><path d='M15.5 12h1.25a2.25 2.25 0 0 1 0 4.5H15'/>"
-        }
         "keep-awake-1h" => {
             "<circle cx='12' cy='12' r='8.5'/><path d='M12 3.5a8.5 8.5 0 0 1 4.25 1.14' stroke-width='3'/><path d='M12 7.5V12'/>"
         }
