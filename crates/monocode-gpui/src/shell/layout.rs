@@ -841,7 +841,16 @@ impl Shell {
                 let pressure = self.pressure_chip(cx);
                 let terminal = self.terminal_footer(cx);
                 let between = pressure.is_some() && terminal.is_some();
+                let after_keep_awake =
+                    keep_awake.is_some() && (pressure.is_some() || terminal.is_some());
                 d.children(keep_awake)
+                    .when(after_keep_awake, |d| {
+                        d.child(
+                            super::terminal_dock::footer_separator()
+                                .mr(px(super::terminal_dock::FOOTER_GAP + 3.))
+                                .when(!self.workspace.boxy_layout(), |d| d.mb(px(2.))),
+                        )
+                    })
                     .children(pressure)
                     .when(between, |d| {
                         d.child(
