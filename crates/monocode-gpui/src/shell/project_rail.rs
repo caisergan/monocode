@@ -143,7 +143,26 @@ impl Render for ProjectTooltip {
             .child(self.0.clone())
     }
 }
+/// `projects` reordered by when each last had a conversation, newest first;
+/// projects never worked in keep their order at the end.
+fn by_last_worked(mut projects: Vec<String>, last: &HashMap<String, u64>) -> Vec<String> {
+    projects.sort_by_key(|path| std::cmp::Reverse(last.get(path).copied()));
+    projects
+}
 impl Shell {
+    /// `projects` ordered for a project switcher: the most recently worked
+    /// in first, by each project's newest conversation.
+    pub(super) fn projects_by_last_worked(&self, projects: Vec<String>, cx: &App) -> Vec<String> {
+        let mut last: HashMap<String, u64> = HashMap::new();
+        for id in self.session_summaries.keys() {
+            let s = self.session_metadata(*id, cx).summary;
+            if s.has_messages && !s.archived && !self.deleting.contains(id) {
+                let at = last.entry(s.cwd.clone()).or_insert(s.updated_at);
+                *at = (*at).max(s.updated_at);
+            }
+        }
+        by_last_worked(projects, &last)
+    }
     pub(super) fn project_rail_drawn_width(&self) -> f32 {
         if !self.workspace.classic_layout {
             0.
@@ -1793,6 +1812,16 @@ impl Shell {
 mod tests {
     use super::*;
     use gpui::{EntityInputHandler, TestAppContext, VisualTestContext, size};
+
+    #[test]
+    fn switcher_lists_recently_worked_projects_first() {
+        let projects = ["/a", "~", "/b", "/c", "/d"].map(String::from).to_vec();
+        let last = HashMap::from([("/b".into(), 30), ("~".into(), 10), ("/d".into(), 20)]);
+        assert_eq!(
+            by_last_worked(projects, &last),
+            ["/b", "/d", "~", "/a", "/c"].map(String::from)
+        );
+    }
 
     #[gpui::test]
     fn original_layout_keeps_project_icons_when_sessions_are_hidden(cx: &mut TestAppContext) {
