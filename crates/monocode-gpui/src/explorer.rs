@@ -20,6 +20,7 @@ use gpui::{
 use monocode_core::files::{self, DirEntry, NameIssueKind, Severity};
 use std::{
     collections::{HashMap, HashSet},
+    ops::Range,
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -156,7 +157,7 @@ enum NameMode {
         is_dir: bool,
     },
 }
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 enum Line {
     Note {
         depth: usize,
@@ -512,9 +513,11 @@ impl Explorer {
         if self.available() && self.expanded.contains(&self.cwd) {
             self.push_children(&self.cwd.clone(), 0, &mut lines, cx);
         }
-        let old = self.lines.len();
+        // Splice only the rows that changed. Replacing the whole range makes
+        // ListState reset its scroll top to row 0 on every toggle/refresh.
+        let (start, old_end, new_end) = changed_range(&self.lines, &lines);
         self.lines = lines;
-        replace_rows(&self.list, old, self.lines.len());
+        replace_rows(&self.list, start..old_end, new_end - start);
         cx.notify();
     }
     fn push_children(&self, parent: &str, depth: usize, lines: &mut Vec<Line>, cx: &App) {
@@ -1938,13 +1941,20 @@ fn edge_scroll_step(y: f32, top: f32, bottom: f32) -> f32 {
     (depth / edge).clamp(-1., 1.) * DRAG_SCROLL_STEP
 }
 
-/// Swaps every row of `list` for `count` new ones without moving the scroll
-/// position. A splice over the scroll anchor sends GPUI back to the top, and
-/// the tree rebuilds on every click, toggle and context menu.
-fn replace_rows(list: &ListState, old: usize, count: usize) {
+/// Swaps the rows `old` of `list` for `count` new ones without moving what is
+/// in view. GPUI shifts the scroll anchor past a change above it, but sends it
+/// to the change's start when the change covers it, and the tree rebuilds on
+/// every click, toggle and context menu.
+fn replace_rows(list: &ListState, old: Range<usize>, count: usize) {
+    if old.is_empty() && count == 0 {
+        return;
+    }
     let scroll_top = list.logical_scroll_top();
-    list.splice(0..old, count);
-    list.scroll_to(scroll_top);
+    let covered = old.contains(&scroll_top.item_ix);
+    list.splice(old, count);
+    if covered {
+        list.scroll_to(scroll_top);
+    }
 }
 
 #[cfg(test)]
@@ -1964,9 +1974,22 @@ mod tests {
     #[test]
     fn replacing_rows_keeps_the_scroll_position() {
         let list = scrolled(60, 30);
-        replace_rows(&list, 60, 64);
+        replace_rows(&list, 0..60, 64);
         let top = list.logical_scroll_top();
         assert_eq!((top.item_ix, top.offset_in_item), (30, px(7.)));
+        assert_eq!(list.item_count(), 64);
+    }
+
+    #[test]
+    fn rows_changed_above_the_view_keep_what_is_in_it() {
+        // A folder above opens: the rows in view move down with their content.
+        let list = scrolled(60, 30);
+        replace_rows(&list, 2..2, 4);
+        let top = list.logical_scroll_top();
+        assert_eq!((top.item_ix, top.offset_in_item), (34, px(7.)));
+        // Nothing changed: nothing moves.
+        replace_rows(&list, 64..64, 0);
+        assert_eq!(list.logical_scroll_top().item_ix, 34);
         assert_eq!(list.item_count(), 64);
     }
 
@@ -2007,7 +2030,41 @@ mod tests {
     #[test]
     fn replacing_rows_with_fewer_clamps_to_the_end() {
         let list = scrolled(60, 50);
-        replace_rows(&list, 60, 20);
+        replace_rows(&list, 0..60, 20);
         assert_eq!(list.logical_scroll_top().item_ix, 20);
+    }
+}
+
+/// Smallest `old[start..old_end]` -> `new[start..new_end]` replacement that
+/// turns `old` into `new` (common prefix and suffix are left untouched).
+fn changed_range<T: PartialEq>(old: &[T], new: &[T]) -> (usize, usize, usize) {
+    let start = old.iter().zip(new).take_while(|(a, b)| a == b).count();
+    let suffix = old[start..]
+        .iter()
+        .rev()
+        .zip(new[start..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    (start, old.len() - suffix, new.len() - suffix)
+}
+
+#[cfg(test)]
+mod changed_range_tests {
+    use super::changed_range;
+
+    #[test]
+    fn expanding_a_folder_only_touches_the_inserted_rows() {
+        let old = [1, 2, 3, 4];
+        let new = [1, 2, 9, 9, 3, 4];
+        assert_eq!(changed_range(&old, &new), (2, 2, 4));
+    }
+
+    #[test]
+    fn collapsing_and_flipping_a_row() {
+        let old = [1, 2, 5, 6, 3];
+        let new = [1, 7, 3];
+        assert_eq!(changed_range(&old, &new), (1, 4, 2));
+        assert_eq!(changed_range(&old, &old), (5, 5, 5));
+        assert_eq!(changed_range::<i32>(&[], &[1]), (0, 0, 1));
     }
 }

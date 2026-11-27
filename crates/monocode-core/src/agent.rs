@@ -203,6 +203,10 @@ pub struct TurnInfo {
     /// tool calls and waits are left out, unlike output over `duration_ms`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_rate: Option<f64>,
+    /// The user or a Mono stopped this turn. Native stops leave no transcript
+    /// row, so completion reports read this after a reload or restart.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub stopped: bool,
 }
 impl TurnInfo {
     pub fn has_duration(&self) -> bool {
