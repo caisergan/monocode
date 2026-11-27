@@ -5,6 +5,7 @@
 use super::*;
 use std::collections::VecDeque;
 
+mod dsh;
 mod hermes;
 pub(super) use hermes::steer as hermes_steer;
 
@@ -75,6 +76,8 @@ pub(super) struct State {
     /// The prompt Stop cancelled, by its request id, until its answer comes:
     /// what the session sends before that is the cancelled turn's tail.
     unsettled: Option<Value>,
+    /// Where in its log the DSH turn last reported started.
+    dsh_turn: Option<u64>,
     hermes: hermes::State,
 }
 
@@ -1306,8 +1309,25 @@ impl Protocol {
                         result["stopReason"].as_str().unwrap_or("")
                     ));
                 }
+                // DSH reports only the context size over ACP; the turn's tokens
+                // are in its session log, saved before the prompt settles.
+                if self.request.kind == Kind::Dsh {
+                    if let Some((at, metrics)) = dsh::turn_metrics(&self.acp.session)
+                        .filter(|(at, _)| self.acp.dsh_turn != Some(*at))
+                    {
+                        self.acp.dsh_turn = Some(at);
+                        events.push(Event::Metrics(metrics));
+                    }
+                }
                 if self.request.kind == Kind::Hermes {
                     if let Some(metrics) = self.hermes_turn_metrics(result) {
+                        events.push(Event::Metrics(metrics));
+                    }
+                }
+                // agy reports the turn's tokens, cache reads included, only on
+                // the prompt result; its usage_update carries the context size.
+                if self.request.kind == Kind::Antigravity {
+                    if let Some(metrics) = usage_metrics(&result["usage"], &Value::Null) {
                         events.push(Event::Metrics(metrics));
                     }
                 }
@@ -1955,10 +1975,6 @@ fn usage_events(update: &Value, events: &mut Vec<Event>) {
     let output = meta["cognition.ai/outputTokens"]
         .as_u64()
         .or_else(|| number(&["outputTokens", "output_tokens"]));
-    let read = meta["cognition.ai/cachedReadTokens"]
-        .as_u64()
-        .or_else(|| number(&["cacheReadTokens", "cache_read_input_tokens"]));
-    let write = number(&["cacheWriteTokens", "cache_creation_input_tokens"]);
     let used = number(&["totalTokens", "used", "usedTokens", "used_tokens"])
         .or_else(|| input.zip(output).map(|(i, o)| i + o));
     let window = number(&[
@@ -1972,19 +1988,48 @@ fn usage_events(update: &Value, events: &mut Vec<Event>) {
     if used.is_some() || window.is_some() {
         events.push(Event::Context { used, window });
     }
-    if input.is_some() || output.is_some() || read.is_some() || write.is_some() {
-        let total = input.unwrap_or(0) + read.unwrap_or(0) + write.unwrap_or(0);
-        events.push(Event::Metrics(TurnMetrics {
-            input_tokens: input.unwrap_or(0),
-            output_tokens: output.unwrap_or(0),
-            cache_read_tokens: read.unwrap_or(0),
-            cache_write_tokens: write.unwrap_or(0),
-            cache_hit_percent: ((read.is_some() || write.is_some()) && total > 0)
-                .then(|| read.unwrap_or(0) as f64 / total as f64 * 100.),
-            cache_ttl_seconds: None,
-            ..Default::default()
-        }));
+    if let Some(metrics) = usage_metrics(usage, meta) {
+        events.push(Event::Metrics(metrics));
     }
+}
+
+/// A turn's token split from an ACP usage object. The spec's names are
+/// `cachedReadTokens`/`cachedWriteTokens` (agy's prompt result); Devin puts
+/// its counts in namespaced metadata.
+fn usage_metrics(usage: &Value, meta: &Value) -> Option<TurnMetrics> {
+    let number = |keys: &[&str]| keys.iter().find_map(|key| usage[*key].as_u64());
+    let input = meta["cognition.ai/inputTokens"]
+        .as_u64()
+        .or_else(|| number(&["inputTokens", "input_tokens"]));
+    let output = meta["cognition.ai/outputTokens"]
+        .as_u64()
+        .or_else(|| number(&["outputTokens", "output_tokens"]));
+    let read = meta["cognition.ai/cachedReadTokens"].as_u64().or_else(|| {
+        number(&[
+            "cachedReadTokens",
+            "cacheReadTokens",
+            "cache_read_input_tokens",
+        ])
+    });
+    let write = number(&[
+        "cachedWriteTokens",
+        "cacheWriteTokens",
+        "cache_creation_input_tokens",
+    ]);
+    if input.is_none() && output.is_none() && read.is_none() && write.is_none() {
+        return None;
+    }
+    let total = input.unwrap_or(0) + read.unwrap_or(0) + write.unwrap_or(0);
+    Some(TurnMetrics {
+        input_tokens: input.unwrap_or(0),
+        output_tokens: output.unwrap_or(0),
+        cache_read_tokens: read.unwrap_or(0),
+        cache_write_tokens: write.unwrap_or(0),
+        cache_hit_percent: ((read.is_some() || write.is_some()) && total > 0)
+            .then(|| read.unwrap_or(0) as f64 / total as f64 * 100.),
+        cache_ttl_seconds: None,
+        ..Default::default()
+    })
 }
 
 pub(super) fn content_text(value: &Value) -> String {
@@ -2114,6 +2159,43 @@ mod tests {
                     .unwrap();
             }
             assert!(p.done);
+        }
+    }
+    #[test]
+    fn antigravity_reads_cache_reads_from_the_prompt_result() {
+        let mut p = protocol(Kind::Antigravity);
+        let mut out = Vec::new();
+        p.acp_session(&mut out).unwrap();
+        let new = last(&mut out);
+        p.frame(json!({"id":new["id"],"result":{"sessionId":"s","models":{"currentModelId":"gemini-4-neon"}}}),&mut out).unwrap();
+        loop {
+            let request = last(&mut out);
+            if request["method"] == "session/prompt" {
+                // What agy acp 1.5.18 returns; inputTokens leaves out the cached part.
+                let events = p.frame(json!({"id":request["id"],"result":{"stopReason":"end_turn","usage":{
+                    "inputTokens":2086,"outputTokens":21,"cachedReadTokens":15018,"cachedWriteTokens":0,
+                    "thoughtTokens":19,"totalTokens":17125}}}),&mut out).unwrap();
+                let metrics = events
+                    .iter()
+                    .find_map(|e| match e {
+                        Event::Metrics(m) => Some(*m),
+                        _ => None,
+                    })
+                    .expect("turn metrics");
+                assert_eq!(
+                    (
+                        metrics.input_tokens,
+                        metrics.output_tokens,
+                        metrics.cache_read_tokens
+                    ),
+                    (2086, 21, 15018)
+                );
+                assert_eq!(metrics.cache_hit_percent.map(|hit| hit.round()), Some(88.));
+                assert_eq!(events.last(), Some(&Event::Done));
+                break;
+            }
+            p.frame(json!({"id":request["id"],"result":{}}), &mut out)
+                .unwrap();
         }
     }
     #[test]

@@ -1198,7 +1198,7 @@ fn text_content(value: &Value) -> String {
 
 /// Where DSH keeps its session logs. It is `~/.dsh/sessions`, honouring a
 /// `DSH_HOME` override of the data root if one is set.
-fn dsh_sessions_root() -> Option<std::path::PathBuf> {
+pub(super) fn dsh_sessions_root() -> Option<std::path::PathBuf> {
     let home = std::env::var_os("DSH_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".dsh")))?;

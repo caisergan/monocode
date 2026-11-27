@@ -72,6 +72,44 @@ impl TokenTotals {
     }
 }
 
+/// contextCacheHit: how much of the prompt the provider read from its
+/// cache, on the latest turn that said and over every turn that did.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CacheHit {
+    pub latest: f64,
+    /// Only once a second turn has reported, when it can differ from `latest`.
+    pub session: Option<f64>,
+}
+impl CacheHit {
+    pub fn from_turns(
+        turns: &std::collections::HashMap<usize, crate::agent::TurnInfo>,
+    ) -> Option<Self> {
+        let mut reported: Vec<_> = turns
+            .iter()
+            .filter_map(|(turn, info)| Some((*turn, info.metrics?)))
+            .filter(|(_, metrics)| metrics.cache_hit_percent.is_some())
+            .collect();
+        reported.sort_by_key(|(turn, _)| *turn);
+        let latest = reported.last()?.1.cache_hit_percent?;
+        // Providers count the prompt differently (Codex's input already holds
+        // its cached reads), so each turn's prompt size comes back from its
+        // own rate. A turn that read nothing prompted its input and writes.
+        let (read, prompt) = reported.iter().fold((0., 0.), |(read, prompt), (_, m)| {
+            let hit = m.cache_hit_percent.unwrap_or(0.);
+            let size = if hit > 0. {
+                m.cache_read_tokens as f64 * 100. / hit
+            } else {
+                (m.input_tokens + m.cache_write_tokens) as f64
+            };
+            (read + m.cache_read_tokens as f64, prompt + size)
+        });
+        Some(Self {
+            latest,
+            session: (reported.len() > 1 && prompt > 0.).then(|| read / prompt * 100.),
+        })
+    }
+}
+
 pub fn format_tokens(count: u64) -> String {
     let (value, suffix) = if count >= 1_000_000 {
         (count as f64 / 1_000_000., "M")
@@ -95,6 +133,41 @@ pub fn format_tokens(count: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_hit_reads_the_latest_turn_and_weighs_the_session_by_prompt() {
+        use crate::agent::{TurnInfo, TurnMetrics};
+        use std::collections::HashMap;
+        let turn = |input, read, write, hit| TurnInfo {
+            metrics: Some(TurnMetrics {
+                input_tokens: input,
+                cache_read_tokens: read,
+                cache_write_tokens: write,
+                cache_hit_percent: hit,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(CacheHit::from_turns(&HashMap::new()), None);
+        // A first turn writes the cache; later ones read it.
+        let mut turns = HashMap::from([(1, turn(1_000, 0, 9_000, Some(0.)))]);
+        let first = CacheHit::from_turns(&turns).unwrap();
+        assert_eq!((first.latest, first.session), (0., None));
+        turns.insert(4, turn(500, 9_500, 0, Some(95.)));
+        // A turn that did not report the cache does not count.
+        turns.insert(9, turn(80, 0, 0, None));
+        let hit = CacheHit::from_turns(&turns).unwrap();
+        assert_eq!(hit.latest, 95.);
+        // 9,500 of 20,000 prompt tokens over both turns.
+        assert_eq!(hit.session.map(|rate| rate.round()), Some(48.));
+        // Codex's input holds its cached reads: 90% of an 8,000 prompt.
+        let codex = HashMap::from([
+            (1, turn(2_000, 0, 0, Some(0.))),
+            (2, turn(8_000, 7_200, 0, Some(90.))),
+        ]);
+        let codex = CacheHit::from_turns(&codex).unwrap();
+        assert_eq!(codex.session.map(|rate| rate.round()), Some(72.));
+    }
 
     #[test]
     fn session_token_totals_count_uncached_input_and_output() {

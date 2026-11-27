@@ -4,6 +4,7 @@ mod approvals;
 mod attachment_drop;
 mod background_tasks;
 mod btw;
+mod cache_hit;
 mod changes_shelf;
 mod commands;
 pub(crate) mod composer_features;
@@ -3348,6 +3349,7 @@ impl Conversation {
                 monocode_core::context::format_tokens(usage.window.unwrap_or(0))
             )
         });
+        let cache = self.context_cache_status(cx);
         // A lead keeps Orchestrator after its first message; show it as long
         // as the mode is selected or the thread leads agents.
         let lead = self.settings.orchestrator_enabled;
@@ -3526,10 +3528,14 @@ impl Conversation {
                                 .id("context-meter")
                                 .role(Role::Image)
                                 .aria_label(format!(
-                                    "{headline}{}",
+                                    "{headline}{}{}",
                                     detail
                                         .as_ref()
                                         .map(|s| format!(", {s}"))
+                                        .unwrap_or_default(),
+                                    cache
+                                        .as_ref()
+                                        .map(|c| format!(". {}", c.aria()))
                                         .unwrap_or_default()
                                 ))
                                 .child(self.context_anchor.probe())
@@ -3563,7 +3569,8 @@ impl Conversation {
                                                             .text_color(content(0.5))
                                                             .child(detail),
                                                     )
-                                                }),
+                                                })
+                                                .children(cache.map(|c| c.render())),
                                         ),
                                     )
                                 }),
