@@ -29,6 +29,10 @@ pub struct Message {
     /// sender whose plan sets one. The user's own turns never carry it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub access: Option<crate::agent::AccessMode>,
+    /// An internal coordinator turn (an orchestration update queued behind a
+    /// running turn): its prompt is a `mono-system` row, not a user message.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub internal: bool,
 }
 impl Message {
     pub fn label(&self) -> String {

@@ -33,8 +33,12 @@ pub(super) struct Orchestrations {
 struct Lead {
     /// Events the lead has not seen yet, oldest first.
     mailbox: Vec<Event>,
-    /// Automatic wake-ups since the user last wrote to the lead.
+    /// Automatic wake-ups since the lead last made progress (ran a turn) or
+    /// the user wrote to it. Caps a lead that is woken but never responds.
     wakeups: u32,
+    /// The lead's own turn count at the last wake-up, so a lead that keeps
+    /// responding to updates resets the cap instead of going deaf mid-run.
+    seen_turns: usize,
     retrying: bool,
     waits: Vec<Wait>,
 }
@@ -324,9 +328,10 @@ impl Shell {
         if !chat.settings.orchestrator_enabled || chat.summary.archived {
             return;
         }
+        let rows = chat.agent_rows(cx);
         // The user writing to the lead resets its automatic wake-up budget.
-        let user_spoke_last = chat
-            .agent_rows(cx)
+        let user_spoke_last = rows
+            .as_ref()
             .and_then(|rows| {
                 rows.iter()
                     .rev()
@@ -334,17 +339,26 @@ impl Shell {
                     .map(|r| r.role == "user")
             })
             .unwrap_or(false);
-        // send_coordinator_report restores an evicted history before sending.
-        let ready = chat.available_for_managed_run(cx)
+        // The lead's own completed turns: growth means it answered the last
+        // update, so it is making progress rather than looping unanswered.
+        let turns = rows
+            .as_ref()
+            .map(|rows| rows.iter().filter(|r| r.first && r.role == "assistant").count())
+            .unwrap_or(0);
+        // A running turn takes the update through its queue; an idle, pristine
+        // lead gets it as a turn now. send_coordinator_report restores an
+        // evicted history before sending.
+        let ready = (chat.available_for_managed_run(cx) || chat.wants_queued_update(cx))
             && chat.settings.usage_limit.is_none()
             && entry.waits.is_empty();
         let entry = self.orchestrations.leads.get_mut(&lead).unwrap();
-        if user_spoke_last {
+        if user_spoke_last || turns > entry.seen_turns {
             entry.wakeups = 0;
         }
+        entry.seen_turns = turns;
         if !ready || entry.wakeups >= MAX_WAKEUPS {
-            // The lead is busy, the user is typing, or it is loading. Session
-            // changes retry; a timer covers a composer cleared without one.
+            // The lead is loading, the user is typing, or an update is already
+            // queued. Session changes retry; a timer covers a cleared composer.
             if !entry.retrying && entry.wakeups < MAX_WAKEUPS {
                 entry.retrying = true;
                 cx.spawn(async move |this, cx| {

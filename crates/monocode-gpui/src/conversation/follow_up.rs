@@ -161,6 +161,31 @@ impl Conversation {
         self.follow_ups.state.messages.push(message);
         self.save_follow_ups(cx);
     }
+    /// Queue an orchestration update behind the running turn. It never steers,
+    /// so it lands as its own internal turn once the turn ends: a lead that is
+    /// polling or working still hears from its agents without waiting to idle.
+    /// It takes no composer attachments and leaves the user's draft untouched.
+    pub(crate) fn enqueue_coordinator_report(&mut self, prompt: String, cx: &mut Context<Self>) {
+        let mut message = self.message(prompt, Vec::new(), Some("orchestrator".into()), cx);
+        message.internal = true;
+        message.steer = false;
+        self.follow_ups.motion.insert(
+            &message.id,
+            self.follow_ups.state.messages.is_empty(),
+            !cx.reduce_motion(),
+        );
+        self.follow_ups.state.messages.push(message);
+        self.save_follow_ups(cx);
+    }
+    /// Whether an orchestration update is already queued and unsent, so a new
+    /// one would stack instead of waiting its turn.
+    pub(crate) fn has_pending_coordinator_report(&self) -> bool {
+        self.follow_ups
+            .state
+            .messages
+            .iter()
+            .any(|m| m.internal && m.sent_at.is_none())
+    }
     pub(super) fn save_message_draft(&mut self, cx: &mut Context<Self>) {
         if self.is_remote() {
             self.remote_save_draft(cx);
@@ -441,7 +466,10 @@ impl Conversation {
         self.settings.prepared_prompt = message.prepared_prompt;
         self.settings.message_sender = message.sender;
         self.settings.message_access = message.access;
+        let previous_internal = self.settings.internal_message;
+        self.settings.internal_message = message.internal;
         self.launch_prompt(message.text, cx);
+        self.settings.internal_message = previous_internal;
         self.settings.message_sender = None;
         self.settings.message_access = None;
         self.settings.prepared_prompt = previous_prepared;

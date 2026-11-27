@@ -1028,3 +1028,58 @@ fn plain_request_ids_decide_and_user_decisions_are_not_news(cx: &mut TestAppCont
     assert!(updates[0].contains("docs finished"));
     assert!(!updates[0].contains("needs input"), "{}", updates[0]);
 }
+
+#[gpui::test]
+fn a_busy_lead_queues_its_agents_updates_for_the_next_turn(cx: &mut TestAppContext) {
+    let (window, worker, lead) = lead(cx);
+    window
+        .update(cx, |shell, _, cx| {
+            shell.save_summary(
+                lead,
+                Summary {
+                    tasks: vec![SummaryTask {
+                        session: Some(worker),
+                        name: "docs".into(),
+                        title: "docs: README".into(),
+                        provider: "fixture".into(),
+                        model: None,
+                        status: "running".into(),
+                        outcome: None,
+                    }],
+                    live: true,
+                },
+                cx,
+            );
+            // The agent runs, then the lead starts its own turn (polling or
+            // working): its composer is empty, so only the turn blocks delivery.
+            shell.sessions[&worker].update(cx, |v, cx| v.test_begin_turn(cx));
+            shell.sessions[&lead].update(cx, |v, cx| v.test_begin_turn(cx));
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    // The agent finishes while the lead is mid-turn.
+    window
+        .update(cx, |shell, _, cx| {
+            shell.sessions[&worker].update(cx, |v, cx| v.test_end_turn(cx));
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    // Nothing is sent into the running turn, but the update is queued behind it
+    // instead of being lost while the lead never reaches idle.
+    assert!(
+        wake_ups(window, lead, cx).is_empty(),
+        "no update turn starts while the lead is busy"
+    );
+    window
+        .update(cx, |shell, _, cx| {
+            assert!(
+                shell.sessions[&lead]
+                    .read(cx)
+                    .has_pending_coordinator_report(),
+                "the finished-agent update waits in the lead's queue"
+            );
+        })
+        .unwrap();
+}

@@ -466,9 +466,37 @@ impl Conversation {
             && self.follow_ups.state.draft.is_none()
             && !self.settings.worktree_removed
     }
+    /// Like `available_for_managed_run`, but a running turn is fine: the update
+    /// queues behind it and lands when it ends. The user-interactive blocks
+    /// (composer text, a draft, an edit, a transient launch) still hold, and
+    /// an already-queued user message is no bar — the update goes after it.
+    pub(crate) fn can_queue_managed_run(&self, cx: &gpui::App) -> bool {
+        !self.stopping
+            && !self.preparing_worktree
+            && !self.attaching
+            && !self.account_switching
+            && !self.editing_last_turn.pending()
+            && !self.mono_external_pending()
+            && self.input.read(cx).content.is_empty()
+            && self.attachments.is_empty()
+            && self.follow_ups.state.draft.is_none()
+            && !self.settings.worktree_removed
+    }
+    /// A running turn can take a queued update now: it is busy, nothing
+    /// user-interactive blocks it, and no update is already waiting its turn.
+    pub(crate) fn wants_queued_update(&self, cx: &gpui::App) -> bool {
+        self.busy && self.can_queue_managed_run(cx) && !self.has_pending_coordinator_report()
+    }
     pub(crate) fn send_coordinator_report(&mut self, prompt: String, cx: &mut Context<Self>) {
         if !self.history_ready() || self.stopping {
             self.defer_history_action(move |this, cx| this.send_coordinator_report(prompt, cx), cx);
+            return;
+        }
+        if self.busy {
+            // The lead is mid-turn (polling or working): queue the update so it
+            // lands as its own turn when the turn ends, rather than being lost
+            // because the lead never reaches a pristine idle state.
+            self.enqueue_coordinator_report(prompt, cx);
             return;
         }
         let internal = self.settings.internal_message;
