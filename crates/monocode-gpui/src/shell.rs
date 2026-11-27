@@ -57,6 +57,7 @@ mod subagent_tree;
 mod terminal_dock;
 mod terminal_panes;
 use close_confirm::CloseBy;
+pub(crate) use terminal_dock::footer_separator;
 use terminal_panes::terminal_drag_ghost;
 mod title_tabs;
 #[cfg(any(target_os = "linux", target_os = "windows"))]

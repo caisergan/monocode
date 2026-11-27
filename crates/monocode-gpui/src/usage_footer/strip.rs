@@ -265,13 +265,24 @@ impl Render for UsageStrip {
                     .flex()
                     .items_center()
                     .gap(px(if classic { 6. } else { 2. }))
-                    .children(visible.into_iter().map(|(kind, chip)| {
-                        div()
-                            .id(("usage-chip", index(kind)))
-                            .debug_selector(move || format!("usage-chip-{}", kind.id()))
-                            .flex_shrink_0()
-                            .child(chip)
-                    })),
+                    .children(
+                        visible
+                            .into_iter()
+                            .enumerate()
+                            .flat_map(|(at, (kind, chip))| {
+                                // A hairline between providers, as between the
+                                // footer's right-hand controls.
+                                let separator = (at > 0)
+                                    .then(|| crate::shell::footer_separator().into_any_element());
+                                let chip = div()
+                                    .id(("usage-chip", index(kind)))
+                                    .debug_selector(move || format!("usage-chip-{}", kind.id()))
+                                    .flex_shrink_0()
+                                    .child(chip)
+                                    .into_any_element();
+                                separator.into_iter().chain([chip])
+                            }),
+                    ),
             )
             .child(
                 div()
