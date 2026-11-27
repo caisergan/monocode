@@ -52,6 +52,18 @@ pub struct Snapshot {
     pub extra_usage_balance: Option<f64>,
     #[serde(default)]
     pub identity: Option<crate::accounts::Identity>,
+    /// Quota groups with limits of their own (Antigravity's Gemini and
+    /// Claude/GPT models), for the details popover; `windows` is the first.
+    #[serde(default)]
+    pub groups: Vec<WindowGroup>,
+}
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct WindowGroup {
+    pub name: String,
+    /// The models that share these limits, as the provider lists them.
+    #[serde(default)]
+    pub models: Option<String>,
+    pub windows: Vec<Window>,
 }
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct ResetCredits {
@@ -130,7 +142,16 @@ impl FetchError {
 pub fn fetch(kind: Kind) -> Result<Snapshot, FetchError> {
     fetch_for(kind, &Default::default(), None)
 }
+/// Every provider's windows in one order, shortest first: 5-hour, then
+/// daily, weekly and monthly.
 pub fn fetch_for(
+    kind: Kind,
+    profile: &crate::accounts::Profile,
+    model: Option<&str>,
+) -> Result<Snapshot, FetchError> {
+    fetch_unordered(kind, profile, model).map(Snapshot::ordered)
+}
+fn fetch_unordered(
     kind: Kind,
     profile: &crate::accounts::Profile,
     model: Option<&str>,
@@ -345,6 +366,13 @@ pub fn consume_reset(
     }
 }
 impl Snapshot {
+    pub fn ordered(mut self) -> Self {
+        self.windows.sort_by_key(|w| w.minutes);
+        for group in &mut self.groups {
+            group.windows.sort_by_key(|w| w.minutes);
+        }
+        self
+    }
     pub fn headroom(&self, now: i64) -> Option<f64> {
         self.windows
             .iter()
@@ -629,6 +657,26 @@ mod tests {
         assert!(parse_codex(&json!({"primary": {"usedPercent": "bad"}}))
             .windows
             .is_empty());
+    }
+    #[test]
+    fn every_provider_lists_the_shortest_window_first() {
+        let window = |minutes| Window {
+            used_percent: 0.,
+            minutes,
+            resets_at: None,
+        };
+        let snapshot = Snapshot {
+            windows: vec![window(10_080), window(43_200), window(300)],
+            groups: vec![WindowGroup {
+                windows: vec![window(10_080), window(300)],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+        .ordered();
+        let minutes = |windows: &[Window]| windows.iter().map(|w| w.minutes).collect::<Vec<_>>();
+        assert_eq!(minutes(&snapshot.windows), [300, 10_080, 43_200]);
+        assert_eq!(minutes(&snapshot.groups[0].windows), [300, 10_080]);
     }
     #[test]
     fn claude_parses_iso_resets_and_rejects_empty_responses() {
