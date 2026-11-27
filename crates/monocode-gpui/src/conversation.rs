@@ -2212,7 +2212,7 @@ impl Conversation {
     fn effort_setting_label(&self) -> &'static str {
         if matches!(
             Kind::from_id(&self.summary.provider),
-            Kind::Codex | Kind::Hermes
+            Kind::Codex | Kind::Hermes | Kind::Dsh
         ) {
             "Reasoning"
         } else {
@@ -3817,6 +3817,7 @@ pub(crate) fn effort_name(value: &str) -> String {
     match value {
         "default" => "Default",
         "none" => "None",
+        "off" => "Off",
         "minimal" => "Minimal",
         "low" => "Low",
         "medium" => "Medium",

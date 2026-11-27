@@ -211,6 +211,16 @@ pub fn resolve_auto(kind: Kind) -> Option<PathBuf> {
     ] {
         candidates.push(Path::new(dir).join(kind.binary_name()));
     }
+    // The DeepSeek Harness app keeps its CLI inside the bundle and links it
+    // onto PATH only when asked to.
+    #[cfg(target_os = "macos")]
+    if kind == Kind::Dsh {
+        let bundled = "DeepSeek Harness.app/Contents/Resources/runtime/cli/bin/dsh";
+        candidates.push(Path::new("/Applications").join(bundled));
+        if let Some(home) = std::env::var_os("HOME") {
+            candidates.push(PathBuf::from(home).join("Applications").join(bundled));
+        }
+    }
     if matches!(kind, Kind::Cursor | Kind::Pi) {
         let alias = if kind == Kind::Cursor {
             "agent"
@@ -1687,6 +1697,12 @@ fn run_operation(
     let cached = eligible
         .then(|| parked::take(&parked::key(&request)))
         .flatten();
+    // DSH lets one process at a time hold a session. A warm child of this
+    // chat under other settings (another access mode, model) still holds it:
+    // let it go, and the resume waits the moment it takes to exit.
+    if cached.is_none() && request.kind == Kind::Dsh && request.provider_id.is_some() {
+        parked::discard_session(&request);
+    }
     let (mut wire, mut protocol, warm) = if let Some(cached) = cached {
         let mut protocol = Protocol::new(request);
         protocol.acp = cached.protocol.acp;

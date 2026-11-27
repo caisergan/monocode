@@ -573,6 +573,10 @@ fn leaves<'a>(values: &'a Value, out: &mut Vec<&'a Value>) {
         }
     }
 }
+#[cfg(test)]
+pub(crate) fn acp_models_for_tests(value: &Value) -> Vec<Model> {
+    acp_models(value)
+}
 fn acp_models(value: &Value) -> Vec<Model> {
     let configs: Vec<_> = value["configOptions"]
         .as_array()
