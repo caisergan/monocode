@@ -1148,8 +1148,9 @@ impl Shell {
 /// Actions, and Terminal or the running-terminals chip.
 pub(super) const FOOTER_GAP: f32 = 4.;
 
-/// A short hairline between footer controls: High usage, actions, Terminal.
-pub(super) fn footer_separator() -> gpui::Div {
+/// A short hairline between footer controls: High usage, actions, Terminal,
+/// and between the usage strip's providers.
+pub(crate) fn footer_separator() -> gpui::Div {
     div()
         .debug_selector(|| "footer-separator".into())
         .flex_shrink_0()
