@@ -14,6 +14,7 @@ import {
 
 import { Icon, type IconName } from "@/ui/Icon";
 
+import { useLinkNoun } from "@/features/connection/ConnectionProvider";
 import type { GitAction, GitStatus } from "@/features/connection/useProjectGit";
 import { withAlpha, themedStyles, useColors, useScheme } from "@/ui/theme";
 
@@ -66,6 +67,7 @@ export function CommitSheet({
   const scheme = useScheme();
   const colors = useColors();
   const styles = useStyles();
+  const noun = useLinkNoun();
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState<Busy | null>(null);
   // What the sheet keeps of its height for itself (its bottom inset), measured
@@ -277,7 +279,7 @@ export function CommitSheet({
             <View style={styles.loading}>
               {error ? null : <ActivityIndicator color={colors.muted} />}
               <Text style={styles.summary}>
-                {error ? updateHint(error) : "Reading the branch from desktop…"}
+                {error ? updateHint(error) : `Reading the branch from ${noun}…`}
               </Text>
             </View>
           ) : (

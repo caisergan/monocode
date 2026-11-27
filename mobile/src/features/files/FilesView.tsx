@@ -34,6 +34,7 @@ import { router } from "expo-router";
 import { Fragment, useState, type ReactNode } from "react";
 import { StyleSheet, View } from "react-native";
 
+import { useLinkNoun } from "@/features/connection/ConnectionProvider";
 import { useFileSearch, type FileMatch } from "@/features/connection/useFileSearch";
 import { useFileTree, type TreeRow } from "@/features/connection/useFileTree";
 import { useSessionLayout } from "@/features/sessions/SessionScreen";
@@ -80,6 +81,7 @@ export function FilesView({
   // Room for the search bar where the composer rests, and the blur under it.
   const bottom = dockBottom + SEARCH_BAR + 16;
   const tree = useFileTree(projectId, active, worktreePath);
+  const noun = useLinkNoun();
   const [query, setQuery] = useState("");
   const search = useFileSearch(projectId, query, worktreePath);
   const searching = query.trim().length > 0;
@@ -128,7 +130,7 @@ export function FilesView({
               <Row row={row} onPress={() => press(row)} />
             </Fragment>
           ))
-        : note(tree.error ?? (tree.ready ? "This folder is empty." : "Reading from desktop…"));
+        : note(tree.error ?? (tree.ready ? "This folder is empty." : `Reading from ${noun}…`));
 
   return (
     <>

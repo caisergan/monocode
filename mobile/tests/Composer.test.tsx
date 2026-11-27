@@ -13,6 +13,7 @@ import { Composer } from "@/features/sessions/Composer";
 const runtime = vi.hoisted(() => ({
   os: "android",
   offline: false,
+  noun: "desktop" as "desktop" | "machine",
   values: [] as { get: () => unknown; set: (value: unknown) => void }[],
   photos: vi.fn(async () => []),
   files: vi.fn(async () => []),
@@ -180,6 +181,9 @@ vi.mock("@/features/connection/ConnectionNotice", () => ({
   useOffline: () => runtime.offline,
   PulsingDot: () => <i data-testid="pulsing-dot" />,
 }));
+vi.mock("@/features/connection/ConnectionProvider", () => ({
+  useLinkNoun: () => runtime.noun,
+}));
 vi.mock("@/features/files/FileTypeIcon", () => ({ FileTypeIcon: () => null }));
 vi.mock("@/features/sessions/SessionScreen", () => ({
   COMPOSER_INPUT_ID: "composer",
@@ -264,6 +268,7 @@ beforeEach(() => {
   ).IS_REACT_ACT_ENVIRONMENT = true;
   runtime.os = "android";
   runtime.offline = false;
+  runtime.noun = "desktop";
   runtime.values = [];
   vi.clearAllMocks();
   container = document.createElement("div");
@@ -393,6 +398,13 @@ it("keeps the field open while the desktop is away and holds the message until i
   expect(container.querySelector('[data-testid="pulsing-dot"]')).toBeNull();
   await act(async () => button("Send").click());
   expect(send).toHaveBeenCalledWith("Written on the train", []);
+});
+
+it("names the machine it waits for on a machine connection", () => {
+  runtime.offline = true;
+  runtime.noun = "machine";
+  render();
+  expect(container.querySelector("textarea")!.placeholder).toBe("Reconnecting to machine…");
 });
 
 it("can't stop a turn while the desktop is away, but dictation still works", () => {
