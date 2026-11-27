@@ -200,6 +200,7 @@ pub(super) fn project_turns(
                         output_rate: None,
                         // Nor a record of who sent a turn's message.
                         sender: None,
+                        stopped: block["nativeStopped"] == true,
                     },
                 );
             }
@@ -903,6 +904,11 @@ impl Store {
             }
             if let Some(id) = &info.provider_turn_id {
                 fields.push(("providerTurnId", json!(id)));
+            }
+            // Native stops leave no transcript block, unlike Tauri's "Stopped"
+            // notice, so the receipt carries them for completion reports.
+            if info.stopped {
+                fields.push(("nativeStopped", json!(true)));
             }
             if let Some(at) = info.started_at {
                 // A native root prompt is written with its send time before
