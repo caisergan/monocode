@@ -1,12 +1,13 @@
-//! The footer's usage row: a chip for every provider turned on in Settings,
-//! whatever harness the open tab runs, plus the open tab's own provider.
+//! The footer's usage row: a chip for each provider picked in Settings
+//! (by default every one turned on in the picker), whatever harness the open
+//! tab runs, plus, when opted in, the open tab's own provider.
 use super::*;
 use crate::settings::Preferences;
 use gpui::{Entity, Task};
 use monocode_core::accounts::Profile;
 
 /// Providers the footer can read usage for.
-pub(super) fn reports_usage(kind: Kind) -> bool {
+pub(crate) fn reports_usage(kind: Kind) -> bool {
     kind.subscription_usage()
         || matches!(kind, Kind::Devin | Kind::OpenCode | Kind::Pi | Kind::Hermes)
 }
@@ -121,15 +122,26 @@ impl UsageStrip {
     pub(crate) fn kinds(&self) -> Vec<Kind> {
         self.chips.iter().map(|(k, _)| *k).collect()
     }
-    /// Turned on in Settings (globally and for this project) and installed.
+    /// Picked for the footer in Settings, or with no pick yet turned on in
+    /// the picker (globally and for this project); installed either way.
     fn enabled(&self, kind: Kind) -> bool {
-        let hidden = self.prefs.hidden_for(&self.project);
         reports_usage(kind)
             && self
                 .installed
                 .as_ref()
                 .is_some_and(|installed| installed.contains(&kind))
-            && !hidden.iter().any(|id| id == kind.id())
+            && match &self.prefs.footer_usage_providers {
+                Some(picked) => picked.iter().any(|id| id == kind.id()),
+                None => !self
+                    .prefs
+                    .hidden_for(&self.project)
+                    .iter()
+                    .any(|id| id == kind.id()),
+            }
+    }
+    /// The open tab's provider gets a chip, and its chip that tab's context.
+    fn follows(&self, kind: Kind) -> bool {
+        self.prefs.usage_follows_tab && kind == self.active
     }
     fn default_model(&self, kind: Kind) -> Option<String> {
         self.prefs
@@ -139,11 +151,12 @@ impl UsageStrip {
             .or_else(|| self.prefs.default_models.get(kind.id()))
             .cloned()
     }
-    /// One chip per enabled provider, in Settings order, plus the open tab's.
+    /// One chip per enabled provider, in Settings order, plus the open tab's
+    /// when the footer follows it.
     fn sync(&mut self, cx: &mut Context<Self>) {
         let wanted: Vec<Kind> = Kind::ALL
             .into_iter()
-            .filter(|k| *k == self.active || self.enabled(*k))
+            .filter(|k| self.follows(*k) || self.enabled(*k))
             .collect();
         let mut old = std::mem::take(&mut self.chips);
         let center = crate::accounts::get(cx);
@@ -160,7 +173,7 @@ impl UsageStrip {
                     })
                 }
             };
-            let (profile, model, session) = if kind == self.active {
+            let (profile, model, session) = if self.follows(kind) {
                 (self.profile.clone(), self.model.clone(), self.session)
             } else {
                 (
@@ -185,23 +198,30 @@ impl UsageStrip {
             .collect();
         cx.notify();
     }
-    /// The chips worth showing: the open tab's provider when it can report
-    /// usage, and every other one once it has some. A tab whose harness has
-    /// no usage keeps its chip only when nothing else would show.
+    /// The chips worth showing: providers picked in Settings always, the
+    /// open tab's (when followed) if it can report usage, and the rest once
+    /// they have some. A followed tab whose harness has no usage keeps its
+    /// chip only when nothing else would show.
     fn visible(&self, cx: &App) -> Vec<(Kind, Entity<UsageFooter>)> {
-        let others: Vec<_> = self
+        let picked = |kind: Kind| {
+            self.prefs
+                .footer_usage_providers
+                .as_ref()
+                .is_some_and(|ids| ids.iter().any(|id| id == kind.id()))
+        };
+        let shown =
+            |kind: Kind, chip: &Entity<UsageFooter>| picked(kind) || chip.read(cx).has_usage();
+        let others = self
             .chips
             .iter()
-            .filter(|(k, chip)| *k != self.active && chip.read(cx).has_usage())
-            .cloned()
-            .collect();
+            .any(|(k, chip)| !self.follows(*k) && shown(*k, chip));
         self.chips
             .iter()
             .filter(|(k, chip)| {
-                if *k == self.active {
-                    reports_usage(*k) || others.is_empty()
+                if self.follows(*k) {
+                    reports_usage(*k) || picked(*k) || !others
                 } else {
-                    chip.read(cx).has_usage()
+                    shown(*k, chip)
                 }
             })
             .cloned()
@@ -219,6 +239,9 @@ impl Render for UsageStrip {
         let classic = self.classic;
         let visible = self.visible(cx);
         let fetching = visible.iter().any(|(_, chip)| chip.read(cx).fetching());
+        if visible.is_empty() {
+            return div().id("usage-footer").into_any_element();
+        }
         div()
             .id("usage-footer")
             .role(Role::Group)
@@ -273,6 +296,7 @@ impl Render for UsageStrip {
                     .on_click(cx.listener(|this, _, _, cx| this.refresh_all(cx)))
                     .on_action(cx.listener(|this, _: &RefreshUsage, _, cx| this.refresh_all(cx))),
             )
+            .into_any_element()
     }
 }
 
@@ -330,6 +354,7 @@ mod tests {
             strip.update(visual, |strip, cx| {
                 strip.set_classic(classic, cx);
                 strip.installed = Some(vec![Kind::Claude, Kind::Codex]);
+                strip.prefs.usage_follows_tab = true;
                 strip.sync(cx);
             });
             visual.run_until_parked();
@@ -374,10 +399,12 @@ mod tests {
         });
         window
             .update(cx, |strip, _, cx| {
-                assert_eq!(strip.kinds(), [Kind::Cursor]);
+                // The open tab's chip is opt-in.
+                assert_eq!(strip.kinds(), []);
                 strip.installed = Some(vec![Kind::Claude, Kind::Codex, Kind::Pi]);
                 let prefs = Preferences {
                     hidden_providers: vec!["pi".into()],
+                    usage_follows_tab: true,
                     ..Default::default()
                 };
                 strip.set_preferences(&prefs, cx);
@@ -427,6 +454,64 @@ mod tests {
                     .hidden = vec!["claude".into()];
                 strip.set_preferences(&prefs, cx);
                 assert_eq!(strip.kinds(), [Kind::Codex]);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn picked_providers_always_show_and_ignore_the_open_tab(cx: &mut gpui::TestAppContext) {
+        let window = cx.update(|cx| {
+            cx.open_window(Default::default(), |_, cx| {
+                cx.new(|cx| UsageStrip::new(Kind::Claude, cx))
+            })
+            .unwrap()
+        });
+        window
+            .update(cx, |strip, _, cx| {
+                strip.installed = Some(vec![Kind::Claude, Kind::Codex, Kind::Pi]);
+                // Picked in Settings, even one hidden from the picker.
+                let prefs = Preferences {
+                    hidden_providers: vec!["pi".into()],
+                    footer_usage_providers: Some(vec!["codex".into(), "pi".into()]),
+                    ..Default::default()
+                };
+                strip.set_preferences(&prefs, cx);
+                assert_eq!(strip.kinds(), [Kind::Codex, Kind::Pi]);
+                let visible = |strip: &UsageStrip, cx: &App| {
+                    strip
+                        .visible(cx)
+                        .into_iter()
+                        .map(|(k, _)| k)
+                        .collect::<Vec<_>>()
+                };
+                // Shown before any usage arrives.
+                assert_eq!(visible(strip, cx), [Kind::Codex, Kind::Pi]);
+                // Switching tabs changes nothing.
+                strip.context(
+                    Kind::Claude,
+                    Default::default(),
+                    Some("opus"),
+                    "/p".into(),
+                    Some(1),
+                    cx,
+                );
+                assert_eq!(strip.kinds(), [Kind::Codex, Kind::Pi]);
+                assert_eq!(visible(strip, cx), [Kind::Codex, Kind::Pi]);
+                // Opting in adds the open tab's provider.
+                let prefs = Preferences {
+                    usage_follows_tab: true,
+                    ..prefs
+                };
+                strip.set_preferences(&prefs, cx);
+                assert_eq!(strip.kinds(), [Kind::Claude, Kind::Codex, Kind::Pi]);
+                assert_eq!(visible(strip, cx), [Kind::Claude, Kind::Codex, Kind::Pi]);
+                // Picking nothing leaves only the followed tab.
+                let prefs = Preferences {
+                    footer_usage_providers: Some(Vec::new()),
+                    ..prefs
+                };
+                strip.set_preferences(&prefs, cx);
+                assert_eq!(strip.kinds(), [Kind::Claude]);
             })
             .unwrap();
     }

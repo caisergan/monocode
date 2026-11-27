@@ -272,6 +272,7 @@ impl SettingsView {
                     | "composer-mascot"
                     | "empty-session-games"
                     | "show-remaining-usage"
+                    | "usage-follows-tab"
                     | "mask-emails"
                     | "claude-hooks"
                     | "claude-entrypoint"
