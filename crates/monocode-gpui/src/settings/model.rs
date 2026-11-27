@@ -313,6 +313,12 @@ pub(crate) const INDEX: &[(&str, Section, &str, &str)] = &[
         "keep awake display screen sleep turn off monitor",
     ),
     (
+        "keep-awake-lid",
+        Section::General,
+        "Run with lid closed",
+        "keep awake lid closed clamshell laptop sleep disablesleep pmset amphetamine",
+    ),
+    (
         "keep-awake-battery",
         Section::General,
         "Stop on low battery",

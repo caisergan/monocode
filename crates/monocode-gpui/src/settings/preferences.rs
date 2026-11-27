@@ -32,11 +32,12 @@ pub(crate) struct Preferences {
     /// to `terminal_in_panel`.
     pub terminal_placement: String,
     /// Keep awake: show its footer chip, the mode Start begins ("agents",
-    /// "1h", "2h", "4h" or "always"), keep the display on too, and the
-    /// battery percent that ends a session on battery power (0 never does).
+    /// "1h", "2h", "4h" or "always"), keep the display on too, keep running
+    /// with the lid closed (pmset disablesleep), and the battery percent that ends a session on battery power (0 never does).
     pub keep_awake_footer: bool,
     pub keep_awake_mode: String,
     pub keep_awake_display: bool,
+    pub keep_awake_lid: bool,
     pub keep_awake_battery: u32,
     // Appearance
     pub theme: String,
@@ -144,6 +145,7 @@ impl Default for Preferences {
             keep_awake_footer: false,
             keep_awake_mode: "agents".into(),
             keep_awake_display: false,
+            keep_awake_lid: false,
             keep_awake_battery: 20,
             theme: "dark".into(),
             wayland_window_decorations: true,
