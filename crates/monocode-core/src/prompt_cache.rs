@@ -2,6 +2,9 @@
 //! request reads the cached prefix and resets its timer, so the cache lives
 //! until one TTL after the last turn that used it. Past that point the next
 //! message re-sends the whole context uncached.
+//!
+//! Gemini on Antigravity caches implicitly with no fixed lifetime, so its
+//! window is an estimate and the warning says the cache may be gone.
 use crate::agent::TurnInfo;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -12,6 +15,16 @@ pub const EXPIRY_MARGIN_MS: u64 = 30_000;
 /// Below this much context a re-read costs little. A fresh Claude Code
 /// session starts around 20K.
 pub const MIN_CONTEXT: u64 = 30_000;
+/// When an idle Antigravity chat's cache may be gone. Google keeps Gemini 4's
+/// implicit cache while capacity allows, with no fixed lifetime; measured
+/// with agy acp 1.5.18, a 132K-token chat still read it after 65 minutes
+/// idle, and others report misses after a few minutes.
+pub const GEMINI_IDLE_SECONDS: u64 = 3600;
+
+/// The lifetime to assume for a provider whose turns report none.
+fn assumed_ttl(provider: &str) -> Option<u64> {
+    (provider == "antigravity").then_some(GEMINI_IDLE_SECONDS)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct State {
@@ -19,6 +32,9 @@ pub struct State {
     /// Epoch ms the last turn that used the cache finished.
     pub last_used_at: u64,
     pub expires_at: u64,
+    /// The provider names no lifetime, so `ttl_ms` is a measured guess and
+    /// the cache may outlive it or lapse sooner.
+    pub estimated: bool,
 }
 
 /// cacheTtlFromUsage: the lifetime of the cache a Claude turn wrote, from
@@ -37,10 +53,10 @@ pub fn claude_ttl(usage: &Value) -> Option<u64> {
     }
 }
 
-/// promptCacheState: the cache window from the session's turns. Only
-/// providers that report the cache tier set a TTL, so the rest return None
-/// rather than guess a lifetime.
-pub fn state(turns: &HashMap<usize, TurnInfo>) -> Option<State> {
+/// promptCacheState: the cache window from the session's turns. Providers
+/// that report the cache tier set a TTL; Antigravity gets an estimate; the
+/// rest return None rather than guess a lifetime.
+pub fn state(turns: &HashMap<usize, TurnInfo>, provider: &str) -> Option<State> {
     let mut ordered: Vec<_> = turns.iter().collect();
     ordered.sort_by_key(|(turn, _)| **turn);
     let mut ttl = None;
@@ -63,12 +79,14 @@ pub fn state(turns: &HashMap<usize, TurnInfo>) -> Option<State> {
             }
         }
     }
-    let ttl_ms = ttl? * 1000;
+    let estimated = ttl.is_none();
+    let ttl_ms = ttl.or_else(|| assumed_ttl(provider))? * 1000;
     let last_used_at = last_used_at?;
     Some(State {
         ttl_ms,
         last_used_at,
         expires_at: last_used_at + ttl_ms,
+        estimated,
     })
 }
 
@@ -102,6 +120,17 @@ impl State {
             ),
             None => "the whole context".to_owned(),
         };
+        if self.estimated {
+            return (
+                "Prompt cache may have expired".into(),
+                format!(
+                    "Idle for {idle}. Gemini keeps a session's cache for no fixed time, so after about {ttl} idle it may be gone."
+                ),
+                format!(
+                    "If it is, your next message re-sends {resend} uncached, so it uses more of your limits and takes longer to start."
+                ),
+            );
+        }
         (
             "Prompt cache expired".into(),
             format!(
@@ -145,13 +174,34 @@ mod tests {
             // A turn that read nothing from the cache does not refresh it.
             (5, turn(20_000, 0, None)),
         ]);
-        let state = state(&turns).unwrap();
+        let state = state(&turns, "claude").unwrap();
+        assert!(!state.estimated);
         assert_eq!(state.last_used_at, 9_000);
         assert_eq!(state.expires_at, 9_000 + 3_600_000);
         assert!(!state.expired(state.expires_at - 31_000));
         assert!(state.expired(state.expires_at - 30_000));
         // No reported tier, no guess.
-        assert_eq!(super::state(&HashMap::from([(1, turn(1, 5, None))])), None);
+        assert_eq!(
+            super::state(&HashMap::from([(1, turn(1, 5, None))]), "claude"),
+            None
+        );
+    }
+
+    #[test]
+    fn antigravity_gets_an_estimated_window_that_the_tooltip_hedges() {
+        let turns = HashMap::from([(1, turn(1_000, 900, None)), (3, turn(5_000, 0, None))]);
+        let state = state(&turns, "antigravity").unwrap();
+        assert!(state.estimated);
+        assert_eq!(state.last_used_at, 1_000);
+        assert_eq!(state.expires_at, 1_000 + GEMINI_IDLE_SECONDS * 1000);
+        let (headline, detail, consequence) = state.tooltip(1_000 + 3_600_000, Some(130_000));
+        assert_eq!(headline, "Prompt cache may have expired");
+        assert!(
+            detail.starts_with("Idle for 1h. Gemini keeps a session's cache for no fixed time")
+        );
+        assert!(consequence.starts_with("If it is, your next message re-sends about 130K tokens"));
+        // Other providers that name no lifetime still get no guess.
+        assert_eq!(super::state(&turns, "cursor"), None);
     }
 
     #[test]
@@ -175,6 +225,7 @@ mod tests {
             ttl_ms: 300_000,
             last_used_at: 0,
             expires_at: 300_000,
+            estimated: false,
         };
         let (headline, detail, consequence) = state.tooltip(3_900_000, Some(84_000));
         assert_eq!(headline, "Prompt cache expired");

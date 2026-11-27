@@ -1,5 +1,7 @@
-//! PromptCacheWarning: once a Claude chat's prompt cache lapses, an amber mark
-//! beside Send explains what the next message costs, and sending asks first.
+//! PromptCacheWarning: once a chat's prompt cache lapses, an amber mark beside
+//! Send explains what the next message costs, and sending asks first. Where
+//! the lapse is only estimated (Antigravity), the mark hedges and Send does
+//! not ask.
 use super::*;
 use monocode_core::prompt_cache;
 
@@ -24,10 +26,10 @@ pub(super) struct PromptCacheWarning {
 impl Conversation {
     /// The lapsed cache the next message would re-read, if it is worth saying.
     fn expired_prompt_cache(&self, cx: &gpui::App) -> Option<prompt_cache::State> {
-        if self.summary.provider != "claude" || self.busy || self.stopping {
+        if self.busy || self.stopping {
             return None;
         }
-        let state = prompt_cache::state(&self.transcript.read(cx).turns)?;
+        let state = prompt_cache::state(&self.transcript.read(cx).turns, &self.summary.provider)?;
         (state.expired(monocode_core::time::now_ms())
             && prompt_cache::worth_warning(self.context.map(|usage| usage.used)))
         .then_some(state)
@@ -43,7 +45,9 @@ impl Conversation {
                 .is_none_or(|prefs| prefs.confirm_expired_cache_send)
             && (self.input.read(cx).has_message_text() || !self.attachments.is_empty())
             && !self.draft_active(cx)
-            && self.expired_prompt_cache(cx).is_some()
+            && self
+                .expired_prompt_cache(cx)
+                .is_some_and(|state| !state.estimated)
     }
     /// Answers the open question; the checkbox only counts for a send.
     pub(super) fn answer_cache_confirm(&mut self, send: bool, cx: &mut Context<Self>) {
@@ -60,10 +64,9 @@ impl Conversation {
     }
     /// Repaint when the cache lapses, so the mark appears without input.
     fn schedule_cache_mark(&mut self, cx: &mut Context<Self>) {
-        if self.summary.provider != "claude" {
-            return;
-        }
-        let Some(state) = prompt_cache::state(&self.transcript.read(cx).turns) else {
+        let Some(state) =
+            prompt_cache::state(&self.transcript.read(cx).turns, &self.summary.provider)
+        else {
             return;
         };
         let at = state.warn_at();
@@ -143,7 +146,9 @@ impl Conversation {
     /// Enter sends anyway; Escape or a press outside cancels.
     pub(super) fn prompt_cache_confirm(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         self.prompt_cache.confirming?;
-        let state = self.expired_prompt_cache(cx)?;
+        let state = self
+            .expired_prompt_cache(cx)
+            .filter(|state| !state.estimated)?;
         let (_, detail, consequence) = state.tooltip(
             monocode_core::time::now_ms(),
             self.context.map(|usage| usage.used),
@@ -389,6 +394,53 @@ mod tests {
                 window: Some(200_000),
             });
             assert!(!v.confirms_expired_cache(cx));
+        });
+    }
+    #[gpui::test]
+    fn an_idle_antigravity_chat_marks_a_maybe_lapsed_cache_without_asking(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let store = Arc::new(std::sync::Mutex::new(
+            monocode_core::store::Store::open(Path::new(":memory:")).unwrap(),
+        ));
+        let summary = locked(&store)
+            .unwrap()
+            .create("antigravity", "/tmp")
+            .unwrap();
+        let view = cx.new(|cx| Conversation::new(summary, store.clone(), cx));
+        let idle = monocode_core::time::now_ms() - prompt_cache::GEMINI_IDLE_SECONDS * 1000;
+        view.update(cx, |v, cx| {
+            v.loaded = true;
+            v.summary.has_messages = true;
+            v.context = Some(monocode_core::context::Usage {
+                used: 132_000,
+                window: Some(1_048_576),
+            });
+            v.transcript.update(cx, |t, _| {
+                t.turns.insert(
+                    1,
+                    TurnInfo {
+                        completed_at: Some(idle),
+                        // agy names no cache lifetime.
+                        metrics: Some(TurnMetrics {
+                            input_tokens: 2_185,
+                            cache_read_tokens: 129_818,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                );
+            });
+            let state = v.expired_prompt_cache(cx).expect("the mark shows");
+            assert!(state.estimated);
+            v.input
+                .update(cx, |i, cx| i.set_text("next question".into(), cx));
+            assert!(
+                !v.confirms_expired_cache(cx),
+                "an estimate does not block Send"
+            );
+            v.prompt_cache.confirming = Some(false);
+            assert!(v.prompt_cache_confirm(cx).is_none());
         });
     }
 }
