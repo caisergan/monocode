@@ -104,8 +104,6 @@ struct Session {
 pub(crate) enum KeepAwakeEvent {
     OpenSettings,
     OpenSession(i64),
-    KeepDisplay(bool),
-    KeepLid(bool),
 }
 
 /// Lid-closed mode's state: pmset runs off the main thread, one call at a time.
@@ -782,9 +780,8 @@ impl KeepAwake {
             .child(self.hero(now, cx))
             .child(self.rail(cx))
             .child(self.card(now, cx))
-            .child(self.display_row(cx))
-            .child(self.lid_row(cx))
-            .child(div().h(px(1.)).mx(px(6.)).bg(content(0.07)))
+            .when_some(self.lid_row(cx), |d, row| d.child(row))
+            .child(div().mt(px(8.)).h(px(1.)).mx(px(6.)).bg(content(0.07)))
             .child(self.foot(now, cx))
             .into_any_element()
     }
@@ -920,36 +917,17 @@ impl KeepAwake {
         let running = self.session.is_some();
         let button = div()
             .id("keep-awake-start-stop")
-            .role(Role::Button)
-            .aria_label(if running {
-                "Stop keeping awake"
+            .role(Role::Switch)
+            .aria_label("Keep Mac awake")
+            .aria_toggled(if running {
+                gpui::Toggled::True
             } else {
-                "Start keeping awake"
+                gpui::Toggled::False
             })
-            .h(px(24.))
-            .px(px(10.))
-            .rounded(px(7.))
-            .flex()
-            .items_center()
             .flex_shrink_0()
-            .text_size(px(11.))
-            .font_weight(FontWeight::MEDIUM)
             .cursor_pointer()
-            .map(|d| {
-                if running {
-                    d.bg(content(0.08))
-                        .border_1()
-                        .border_color(content(0.07))
-                        .text_color(content(0.8))
-                        .hover(|s| s.bg(content(0.12)).text_color(content(1.)))
-                        .child("Stop")
-                } else {
-                    d.bg(accent)
-                        .text_color(ink_on(accent))
-                        .hover(|s| s.opacity(0.9))
-                        .child("Start")
-                }
-            })
+            .hover(|s| s.opacity(0.9))
+            .child(Self::switch_track(running, 34., 20.))
             .on_click(cx.listener(|this, _, _, cx| this.toggle_session(cx)));
         div()
             .flex()
@@ -1310,82 +1288,48 @@ impl KeepAwake {
             .into_any_element()
     }
 
-    fn display_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        let on = self.keep_display;
-        Self::switch_row("keep-awake-display", "display", "Keep display open", on)
-            .pt(px(10.))
-            .pb(px(4.))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.keep_display = !on;
-                this.sync(cx);
-                cx.emit(KeepAwakeEvent::KeepDisplay(!on));
-            }))
-            .into_any_element()
+    /// Lid mode's switch lives in Settings; the popover only keeps the line
+    /// that needs the user: setup, the admin prompt, or a failed pmset call.
+    fn lid_row(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (text, warn, setup) = self.keep_lid.then(|| self.lid_note()).flatten()?;
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .mx(px(2.))
+                .mt(px(8.))
+                .px(px(8.))
+                .text_size(px(10.))
+                .text_color(if warn {
+                    gpui::rgb(0xf5b041).into()
+                } else {
+                    content(0.45)
+                })
+                .child(icon("laptop", 12.).text_color(content(0.5)))
+                .child(div().flex_1().min_w_0().truncate().child(text))
+                .when(setup, |d| {
+                    d.child(
+                        div()
+                            .id("keep-awake-lid-setup")
+                            .role(Role::Button)
+                            .aria_label("Set up lid closed mode")
+                            .flex_shrink_0()
+                            .text_color(picked_accent())
+                            .cursor_pointer()
+                            .hover(|s| s.text_color(content(1.)))
+                            .child("Set up")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.set_up_lid(cx);
+                            })),
+                    )
+                })
+                .into_any_element(),
+        )
     }
 
-    fn lid_row(&self, cx: &mut Context<Self>) -> AnyElement {
-        let on = self.keep_lid;
-        let row = Self::switch_row("keep-awake-lid", "laptop", "Run with lid closed", on)
-            .pt(px(4.))
-            .pb(px(if on && self.lid_note().is_some() {
-                2.
-            } else {
-                8.
-            }))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.keep_lid = !on;
-                // A fresh choice retries a failure straight away.
-                this.lid.failed_at = None;
-                if !on && matches!(this.lid.status, lid::Status::Failed(_)) {
-                    this.lid.status = lid::Status::Ready;
-                }
-                this.sync(cx);
-                cx.emit(KeepAwakeEvent::KeepLid(!on));
-            }));
-        let note = on.then(|| self.lid_note()).flatten();
-        div()
-            .flex()
-            .flex_col()
-            .child(row)
-            .when_some(note, |d, (text, warn, setup)| {
-                d.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .pl(px(30.))
-                        .pr(px(8.))
-                        .pb(px(8.))
-                        .text_size(px(10.))
-                        .text_color(if warn {
-                            gpui::rgb(0xf5b041).into()
-                        } else {
-                            content(0.45)
-                        })
-                        .child(div().flex_1().min_w_0().truncate().child(text))
-                        .when(setup, |d| {
-                            d.child(
-                                div()
-                                    .id("keep-awake-lid-setup")
-                                    .role(Role::Button)
-                                    .aria_label("Set up lid closed mode")
-                                    .flex_shrink_0()
-                                    .text_color(picked_accent())
-                                    .cursor_pointer()
-                                    .hover(|s| s.text_color(content(1.)))
-                                    .child("Set up")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        this.set_up_lid(cx);
-                                    })),
-                            )
-                        }),
-                )
-            })
-            .into_any_element()
-    }
-
-    /// The line under the lid switch: its text, whether it warns, and
+    /// The lid line that needs the user: its text, whether it warns, and
     /// whether it offers setup.
     fn lid_note(&self) -> Option<(SharedString, bool, bool)> {
         let lid = &self.lid;
@@ -1393,78 +1337,53 @@ impl KeepAwake {
             return Some(("Waiting for your admin password…".into(), false, false));
         }
         match &lid.status {
-            lid::Status::NeedsSetup => Some(("Needs your admin password once".into(), false, true)),
+            lid::Status::NeedsSetup => Some((
+                "Lid closed mode needs your admin password once".into(),
+                false,
+                true,
+            )),
             lid::Status::Failed(error) => Some((
                 format!("Couldn't change sleep: {error}").into(),
                 true,
                 false,
             )),
-            _ if lid.held == Some(lid::Engaged::Borrowed) => {
-                Some(("Another app already keeps sleep off".into(), false, false))
-            }
-            _ if lid.held.is_some() => {
-                Some(("Closing the lid won't sleep the Mac".into(), false, false))
-            }
             _ => None,
         }
     }
 
-    fn switch_row(
-        id: &'static str,
-        glyph: &'static str,
-        label: &'static str,
-        on: bool,
-    ) -> gpui::Stateful<gpui::Div> {
-        let accent = picked_accent();
+    fn switch_track(on: bool, width: f32, height: f32) -> gpui::Div {
+        let knob = height - 3.;
         div()
-            .id(id)
-            .role(Role::Switch)
-            .aria_label(label)
-            .aria_toggled(if on {
-                gpui::Toggled::True
-            } else {
-                gpui::Toggled::False
-            })
-            .flex()
-            .items_center()
-            .gap(px(8.))
-            .px(px(8.))
-            .text_color(content(0.65))
-            .cursor_pointer()
-            .child(icon(glyph, 14.).text_color(content(0.5)))
-            .child(div().flex_1().child(label))
+            .relative()
+            .w(px(width))
+            .h(px(height))
+            .flex_shrink_0()
+            .rounded_full()
+            .bg(if on { picked_accent() } else { content(0.2) })
             .child(
                 div()
-                    .relative()
-                    .w(px(26.))
-                    .h(px(15.))
-                    .flex_shrink_0()
+                    .absolute()
+                    .top(px(1.5))
+                    .left(px(if on { width - knob - 1.5 } else { 1.5 }))
+                    .size(px(knob))
                     .rounded_full()
-                    .bg(if on { accent } else { content(0.2) })
-                    .child(
-                        div()
-                            .absolute()
-                            .top(px(1.5))
-                            .left(px(if on { 12.5 } else { 1.5 }))
-                            .size(px(12.))
-                            .rounded_full()
-                            .bg(gpui::white()),
-                    ),
+                    .bg(gpui::white()),
             )
     }
 
     fn foot(&self, now: u64, cx: &mut Context<Self>) -> AnyElement {
         let hold = self.holding_at(now);
-        let (glyph, text, tone) = if !hold {
-            ("moon", "Not blocking sleep", content(0.45))
+        // A working hold says nothing; only an idle or failed one is worth a line.
+        let status = if !hold {
+            Some(("moon", "Not blocking sleep", content(0.45)))
         } else if self.verified {
-            ("check-circle", "Verified with macOS", content(0.45))
+            None
         } else {
-            (
+            Some((
                 "circle-alert",
                 "macOS is not holding it",
                 gpui::rgb(0xf5b041).into(),
-            )
+            ))
         };
         div()
             .flex()
@@ -1480,8 +1399,9 @@ impl KeepAwake {
                     .flex()
                     .items_center()
                     .gap(px(5.))
-                    .child(icon(glyph, 11.).text_color(tone))
-                    .child(text),
+                    .when_some(status, |d, (glyph, text, tone)| {
+                        d.child(icon(glyph, 11.).text_color(tone)).child(text)
+                    }),
             )
             .child(
                 div()

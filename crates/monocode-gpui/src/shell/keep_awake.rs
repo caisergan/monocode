@@ -63,18 +63,6 @@ impl Shell {
                     this.open_settings(crate::settings::Section::General, window, cx)
                 }
                 KeepAwakeEvent::OpenSession(id) => this.open(*id, window, cx),
-                KeepAwakeEvent::KeepDisplay(on) => {
-                    this.workspace.preferences.keep_awake_display = *on;
-                    this.apply_preferences(cx);
-                    this.persist(cx);
-                    this.sync_settings(cx);
-                }
-                KeepAwakeEvent::KeepLid(on) => {
-                    this.workspace.preferences.keep_awake_lid = *on;
-                    this.apply_preferences(cx);
-                    this.persist(cx);
-                    this.sync_settings(cx);
-                }
             },
         ));
         // Redraw the footer only when the chip appears or goes.
