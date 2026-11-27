@@ -15,6 +15,7 @@ import Animated, {
 } from "react-native-reanimated";
 
 import { PulsingDot, useOffline } from "@/features/connection/ConnectionNotice";
+import { useLinkNoun } from "@/features/connection/ConnectionProvider";
 import type { Harness } from "@/features/workspace/types";
 import { FileTypeIcon } from "@/features/files/FileTypeIcon";
 import { Icon, type IconName } from "@/ui/Icon";
@@ -41,7 +42,8 @@ import { COMPOSER_INPUT_ID } from "./SessionScreen";
 export const COMPOSER_PLACEHOLDER = "Plan, ask, build…";
 /** Mid-turn the desktop steers with the message or queues it, as its setting says. */
 const BUSY_PLACEHOLDER = "Send a follow-up…";
-const OFFLINE_PLACEHOLDER = "Reconnecting to desktop…";
+/** While the desktop or machine is out of reach. */
+const offlinePlaceholder = (noun: "desktop" | "machine") => `Reconnecting to ${noun}…`;
 
 const BUTTON = 36;
 /** Gap between the round buttons and the composer's edge. */
@@ -128,6 +130,7 @@ export function Composer({
   const colors = useColors();
   const styles = useStyles();
   const offline = useOffline();
+  const noun = useLinkNoun();
   // Losing the desktop holds back only what needs it, Send and Stop; the
   // person can keep writing. An error waits until it's back.
   const blocked = !offline && !!notice;
@@ -421,7 +424,7 @@ export function Composer({
               ),
             )
           }
-          placeholder={offline ? OFFLINE_PLACEHOLDER : busy ? BUSY_PLACEHOLDER : COMPOSER_PLACEHOLDER}
+          placeholder={offline ? offlinePlaceholder(noun) : busy ? BUSY_PLACEHOLDER : COMPOSER_PLACEHOLDER}
           placeholderTextColor={colors.muted}
           multiline
           keyboardAppearance={scheme}

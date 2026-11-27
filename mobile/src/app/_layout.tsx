@@ -13,6 +13,7 @@ import {
   ConnectionProvider,
   useConnection,
 } from "@/features/connection/ConnectionProvider";
+import { PairingLinks } from "@/features/connection/PairingLinks";
 import { WorkspaceGate } from "@/features/connection/WorkspaceGate";
 
 import { SessionNotifications } from "@/features/notifications/SessionNotifications";
@@ -152,6 +153,7 @@ export default function RootLayout() {
           <SafeAreaProvider>
             <ConnectionProvider>
               <StatusBar style={scheme === "dark" ? "light" : "dark"} />
+              <PairingLinks />
               <WorkspaceGate>
                 <LinkedWorkspace />
               </WorkspaceGate>
