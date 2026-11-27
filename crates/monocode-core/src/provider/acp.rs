@@ -35,7 +35,7 @@ struct BackgroundDispatch {
 pub(super) struct State {
     sequence: u64,
     stage: Stage,
-    session: String,
+    pub(super) session: String,
     options: VecDeque<(&'static str, Value)>,
     message: usize,
     setup: Value,
@@ -1444,10 +1444,23 @@ impl Protocol {
                 {
                     call.state = ToolState::Running;
                 }
+                // DSH returns `started subagent <name>` the instant a subagent
+                // is spawned and runs its work in a separate session it never
+                // streams over ACP. Hold the row open and read the child's own
+                // log instead, so it is not shown finished the moment it starts.
+                let dsh_subagent = self.request.kind == Kind::Dsh && is_dsh_subagent_tool(&call.name);
+                if dsh_subagent {
+                    call.state = ToolState::Running;
+                    let _ = call.agent_mut();
+                }
                 if self.request.kind == Kind::Hermes {
                     self.hermes_tool(id, tool, events);
                 } else {
-                    events.push(Event::Tool(call.clone()));
+                    let snapshot = call.clone();
+                    if dsh_subagent {
+                        self.register_dsh_subagent(id, &snapshot.input);
+                    }
+                    events.push(Event::Tool(snapshot));
                 }
                 if is_new {
                     self.acp.message += 1;
@@ -1706,6 +1719,12 @@ fn dsh_permission_mode(settings: &Settings) -> &'static str {
     } else {
         "workspace-write"
     }
+}
+/// Whether a DSH tool call is a subagent delegation. DSH names the tool after
+/// the delegation target, `subagent` by default and `subagent_fork` for a fork.
+fn is_dsh_subagent_tool(name: &str) -> bool {
+    let name = name.trim().to_lowercase();
+    name == "subagent" || name.starts_with("subagent_") || name.starts_with("subagent ")
 }
 /// The ACP kind of a DSH tool, from the names its shipped tools register.
 /// Only `bash`/`pwsh` and the file tools ask leave; the rest are named so
@@ -2771,6 +2790,40 @@ mod tests {
         let mut failed = failed;
         failed["id"] = new["id"].clone();
         assert!(again.frame(failed, &mut out).is_err());
+    }
+    #[test]
+    fn a_dsh_subagent_stays_open_and_is_tracked_from_its_spawn() {
+        let mut p = protocol(Kind::Dsh);
+        p.acp.stage = Stage::Prompt;
+        p.acp.session = "lead".into();
+        let mut events = Vec::new();
+        // The subagent is spawned and its "started subagent" result lands at once.
+        p.acp_update(
+            &json!({"sessionUpdate":"tool_call","toolCallId":"t","title":"subagent","kind":"other","status":"in_progress","rawInput":{"name":"q1","description":"Judge it"}}),
+            &mut events,
+        );
+        p.acp_update(
+            &json!({"sessionUpdate":"tool_call_update","toolCallId":"t","status":"completed","content":[{"type":"content","content":{"type":"text","text":"started subagent q1"}}]}),
+            &mut events,
+        );
+        let tool = events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                Event::Tool(call) if call.id == "t" => Some(call.clone()),
+                _ => None,
+            })
+            .expect("the subagent call is emitted");
+        // Not shown finished the instant it was spawned.
+        assert_eq!(tool.state, ToolState::Running);
+        // It reads as an agent run named by the subagent, not a plain tool row.
+        let run = match tool.panel() {
+            Some(crate::tool::tasks::Panel::Agent(run)) => run,
+            other => panic!("expected an agent panel, got {other:?}"),
+        };
+        assert_eq!(run.title(), "q1");
+        // It is tracked for its child log to be found and read.
+        assert!(p.activities.dsh_children.contains_key("t"));
     }
     #[test]
     fn dsh_waits_briefly_for_a_session_another_process_holds() {

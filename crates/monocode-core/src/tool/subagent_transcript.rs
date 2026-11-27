@@ -94,6 +94,13 @@ pub struct SubagentTranscript {
     open_calls: Vec<(String, usize)>,
     /// The summary a live log closes with: the opening of the run's reply.
     summary: Option<String>,
+    /// DSH writes its child sessions as a zstd-compressed v4 JSONL log that
+    /// grows by appended frames, never over ACP. Such a reader decodes the
+    /// whole file and rebuilds, rather than reading forward by byte offset.
+    dsh: bool,
+    /// How a DSH child's latest turn ended, once one has: a spawned child runs
+    /// a single task, so its `turn/end` is the run's own outcome.
+    dsh_outcome: Option<ToolState>,
 }
 
 impl SubagentTranscript {
@@ -109,6 +116,8 @@ impl SubagentTranscript {
             tools: HashMap::new(),
             open_calls: Vec::new(),
             summary: None,
+            dsh: false,
+            dsh_outcome: None,
         }
     }
     /// A reader that also keeps the conversation, for the context view.
@@ -116,6 +125,15 @@ impl SubagentTranscript {
         Self {
             entries: Some(Vec::new()),
             ..Self::usage_only(path)
+        }
+    }
+    /// A reader of one DSH child session's compressed v4 JSONL log. It keeps
+    /// the conversation — a DSH child never streams over ACP, so this file is
+    /// the only place its steps, reply and tokens are to be had.
+    pub fn dsh(path: impl Into<PathBuf>) -> Self {
+        Self {
+            dsh: true,
+            ..Self::conversation(path)
         }
     }
     pub fn path(&self) -> &std::path::Path {
@@ -132,6 +150,9 @@ impl SubagentTranscript {
     /// when anything new arrived; only whole lines are taken, so a line still
     /// being written is left for next time.
     pub fn read(&mut self) -> std::io::Result<bool> {
+        if self.dsh {
+            return self.read_dsh();
+        }
         // `outputFile` is a /tmp symlink into the session's own directory.
         if let Ok(path) = std::fs::canonicalize(&self.path) {
             self.path = path;
@@ -176,6 +197,145 @@ impl SubagentTranscript {
         self.summary = None;
         if let Some(entries) = &mut self.entries {
             entries.clear();
+        }
+    }
+
+    /// Decode the whole DSH child log and rebuild from it. A DSH log grows by
+    /// appended zstd frames, so `offset` tracks its compressed length and a
+    /// read redecodes only when it has grown.
+    fn read_dsh(&mut self) -> std::io::Result<bool> {
+        let compressed = std::fs::read(&self.path)?;
+        let size = compressed.len() as u64;
+        if size == self.offset && self.offset != 0 {
+            return Ok(false);
+        }
+        let decoded = zstd::stream::decode_all(&compressed[..])?;
+        self.reset();
+        self.dsh_outcome = None;
+        self.offset = size;
+        self.dsh_feed(&decoded);
+        Ok(true)
+    }
+
+    /// The outcome a DSH child's run has reached, or `None` while it still
+    /// works. The tick finishes the parent's agent row once this is `Some`.
+    pub fn dsh_outcome(&self) -> Option<ToolState> {
+        self.dsh_outcome.clone()
+    }
+
+    /// Take in a DSH child's committed v4 JSONL events: its reasoning and
+    /// answer, the model it ran, the tools it called and their results, and
+    /// each request's tokens. DSH commits whole messages, so there are no
+    /// streaming repeats to merge away.
+    fn dsh_feed(&mut self, bytes: &[u8]) {
+        for line in bytes.split(|byte| *byte == b'\n') {
+            if line.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            let Ok(record) = serde_json::from_slice::<Value>(line) else {
+                continue;
+            };
+            let data = &record["data"];
+            match record["type"].as_str() {
+                Some("subagent/descriptor") => {
+                    if let Some(model) = trimmed(&data["agentModel"]) {
+                        self.model = Some(model.to_owned());
+                    }
+                }
+                Some("assistant/message") => self.dsh_assistant(&record),
+                // A spawned child runs one task; its latest turn's end is the
+                // run's own outcome. A fresh turn means it is working again.
+                Some("turn/start") => self.dsh_outcome = None,
+                Some("turn/end") => {
+                    self.dsh_outcome = Some(match data["reason"]["kind"].as_str() {
+                        Some("error") => ToolState::Failed,
+                        Some("cancelled" | "canceled" | "aborted") => ToolState::Cancelled,
+                        _ => ToolState::Completed,
+                    });
+                }
+                Some("tool/call") => {
+                    let Some(entries) = &mut self.entries else {
+                        continue;
+                    };
+                    let Some(id) = data["callId"].as_str() else {
+                        continue;
+                    };
+                    if self.tools.contains_key(id) {
+                        continue;
+                    }
+                    let mut call = ToolCall::new(id, data["name"].as_str().unwrap_or("Tool"));
+                    if let Some(input) = data["arguments"].as_str() {
+                        call.input = input.to_owned();
+                    }
+                    call.state = ToolState::Running;
+                    if push(entries, Entry::Tool(Box::new(call))) {
+                        self.tools.insert(id.to_owned(), entries.len() - 1);
+                    }
+                }
+                Some("tool/result") => {
+                    let message = &data["message"];
+                    let Some(entries) = &mut self.entries else {
+                        continue;
+                    };
+                    let Some(index) = message["toolCallId"]
+                        .as_str()
+                        .and_then(|id| self.tools.get(id))
+                    else {
+                        continue;
+                    };
+                    let Some(Entry::Tool(call)) = entries.get_mut(*index) else {
+                        continue;
+                    };
+                    call.state = if message["isError"] == true {
+                        ToolState::Failed
+                    } else {
+                        ToolState::Completed
+                    };
+                    call.output = capped(result_text(&message["content"]).trim(), MAX_TOOL_OUTPUT);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn dsh_assistant(&mut self, record: &Value) {
+        let data = &record["data"];
+        // DSH has no cache-write tokens; its `totalTokens` is the context size,
+        // which equals input + cacheRead + output, so the shared window formula
+        // lands on it. Each committed message is its own request.
+        if let Some(usage) = data["usage"].as_object() {
+            let count = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+            let id = record["seq"].as_u64().unwrap_or(0).to_string();
+            merge_request(
+                &mut self.requests,
+                &id,
+                RequestUsage {
+                    input: count("inputTokens"),
+                    cache_read: count("cacheReadTokens"),
+                    cache_write: 0,
+                    output: count("outputTokens"),
+                },
+            );
+            self.last_request = Some(id);
+        }
+        let Some(entries) = &mut self.entries else {
+            return;
+        };
+        for block in data["message"]["content"].as_array().into_iter().flatten() {
+            let role = match block["type"].as_str() {
+                Some("reasoning") => "reasoning",
+                Some("text") => "assistant",
+                _ => continue,
+            };
+            if let Some(text) = trimmed(&block["text"]) {
+                push(
+                    entries,
+                    Entry::Said {
+                        role,
+                        text: capped(text, MAX_TEXT),
+                    },
+                );
+            }
         }
     }
 
@@ -781,4 +941,76 @@ started: 2026-11-10 01:26:07
         // Lines that are not log lines are left alone.
         assert!(!transcript.feed(b"not a log line\n12:00 | nor this\n"));
     }
+
+    /// The events are the shapes a DSH child commits to its v4 session log.
+    #[test]
+    fn a_dsh_child_log_reads_as_the_runs_conversation_and_tokens() {
+        let dir = std::env::temp_dir().join(format!(
+            "dsh-child-{}-{}",
+            std::process::id(),
+            crate::time::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.v4.jsonl.zstd");
+        let working = line(json!({"type":"session","id":"c","parentSession":"lead","origin":"subagent"}))
+            + &line(json!({"type":"subagent/descriptor","data":{"label":"Audit it","agentModel":"deepseek-v4.1-flash"}}))
+            + &line(json!({"type":"turn/start","data":{"turn":1}}))
+            + &line(json!({"type":"assistant/message","seq":14,"data":{"usage":{"inputTokens":100,"cacheReadTokens":900,"outputTokens":50,"totalTokens":1050},"message":{"role":"assistant","content":[
+                {"type":"reasoning","text":"Reading first"},
+                {"type":"text","text":"Here is a partial note"}]}}}))
+            + &line(json!({"type":"tool/call","data":{"callId":"t1","name":"read","arguments":"{\"path\":\"a.rs\"}"}}));
+        let compress = |text: &str| zstd::stream::encode_all(text.as_bytes(), 0).unwrap();
+        std::fs::write(&path, compress(&working)).unwrap();
+
+        let mut transcript = SubagentTranscript::dsh(&path);
+        assert!(transcript.read().unwrap(), "the log is read");
+        assert!(!transcript.read().unwrap(), "an unchanged log is not re-read");
+        assert_eq!(transcript.model(), Some("deepseek-v4.1-flash"));
+        assert_eq!(transcript.dsh_outcome(), None, "it is still working");
+        let steps = transcript.steps();
+        assert_eq!(steps.len(), 2, "one thought and one running call");
+        assert_eq!(steps[0].kind, "thinking");
+        assert_eq!(steps[0].text, "Reading first");
+        assert_eq!(steps[1].state, Some(ToolState::Running));
+        let usage = transcript.usage().unwrap();
+        assert_eq!(usage.output, 50);
+        assert_eq!(usage.cache_read, 900);
+        // input + cacheRead + output is the DSH totalTokens, the context size.
+        assert_eq!(usage.context_used, Some(1050));
+
+        // The child finishes: its call returns, it answers, its turn ends.
+        let finished = working
+            + &line(json!({"type":"tool/result","data":{"message":{"toolCallId":"t1","isError":false,"content":[{"type":"text","text":"file body"}]}}}))
+            + &line(json!({"type":"assistant/message","seq":20,"data":{"usage":{"inputTokens":200,"cacheReadTokens":1000,"outputTokens":80,"totalTokens":1280},"message":{"role":"assistant","content":[
+                {"type":"text","text":"The audit is done."}]}}}))
+            + &line(json!({"type":"turn/end","data":{"turn":1,"reason":{"kind":"completed"}}}));
+        std::fs::write(&path, compress(&finished)).unwrap();
+        assert!(transcript.read().unwrap(), "the grown log is read again");
+        assert_eq!(transcript.dsh_outcome(), Some(ToolState::Completed));
+        let steps = transcript.steps();
+        assert_eq!(steps[1].state, Some(ToolState::Completed), "the call settled");
+        assert_eq!(transcript.reply(), Some("The audit is done."));
+        assert_eq!(transcript.usage().unwrap().context_used, Some(1280));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A failed turn is the run's outcome, not a completion.
+    #[test]
+    fn a_dsh_child_that_errors_reads_as_failed() {
+        let dir = std::env::temp_dir().join(format!(
+            "dsh-child-fail-{}-{}",
+            std::process::id(),
+            crate::time::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.v4.jsonl.zstd");
+        let log = line(json!({"type":"session","id":"c","parentSession":"lead","origin":"subagent"}))
+            + &line(json!({"type":"turn/end","data":{"turn":1,"reason":{"kind":"error","error":{"message":"boom"}}}}));
+        std::fs::write(&path, zstd::stream::encode_all(log.as_bytes(), 0).unwrap()).unwrap();
+        let mut transcript = SubagentTranscript::dsh(&path);
+        transcript.read().unwrap();
+        assert_eq!(transcript.dsh_outcome(), Some(ToolState::Failed));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
+

@@ -73,6 +73,21 @@ pub(super) struct Activities {
     subagents_read_at: Option<Instant>,
     /// Updates from replying to a control, sent on with the next tick.
     queued: Vec<Event>,
+    /// DSH subagents by their spawning call id. DSH sends nothing of a child's
+    /// work over ACP, so each is found by its own session log on disk and read
+    /// from there, like a Hermes live log.
+    pub(super) dsh_children: HashMap<String, DshChild>,
+}
+/// One DSH subagent tracked from its spawning tool call to its child log.
+pub(super) struct DshChild {
+    /// The subagent's label, which is its child session's descriptor label.
+    label: String,
+    /// When the spawning call was seen, in ms: its child log is newer.
+    since: u64,
+    /// The child session log, once found by its parent and label.
+    path: Option<std::path::PathBuf>,
+    /// Set once the child's run has ended and the row has been finished.
+    done: bool,
 }
 fn text(value: &Value) -> Option<&str> {
     value.as_str().filter(|s| !s.trim().is_empty())
@@ -747,6 +762,103 @@ impl Protocol {
         self.activities.subagents_read_at = None;
     }
 
+    /// Track a DSH subagent from the call that spawned it. DSH returns
+    /// `started subagent <name>` at once and runs the child in a separate
+    /// session it never streams over ACP, so the row is held open here and its
+    /// work read from the child's own log once that is found.
+    pub(super) fn register_dsh_subagent(&mut self, call: &str, input: &str) {
+        if self.activities.dsh_children.contains_key(call) {
+            return;
+        }
+        let label = serde_json::from_str::<Value>(input)
+            .ok()
+            .as_ref()
+            .and_then(|value| text(&value["description"]))
+            .unwrap_or_default()
+            .to_owned();
+        self.activities.dsh_children.insert(
+            call.into(),
+            DshChild {
+                label,
+                since: crate::time::now_ms(),
+                path: None,
+                done: false,
+            },
+        );
+        // Look for its log soon rather than at the next poll.
+        self.activities.subagents_read_at = None;
+    }
+
+    /// Find the child log for each DSH subagent not yet reading one, and begin.
+    fn dsh_resolve_children(&mut self, events: &mut Vec<Event>) {
+        if self.activities.dsh_children.is_empty() {
+            return;
+        }
+        let parent = self.acp.session.clone();
+        if parent.is_empty() {
+            return;
+        }
+        let taken: std::collections::HashSet<std::path::PathBuf> = self
+            .activities
+            .dsh_children
+            .values()
+            .filter_map(|child| child.path.clone())
+            .collect();
+        let pending: Vec<(String, String, u64)> = self
+            .activities
+            .dsh_children
+            .iter()
+            .filter(|(_, child)| child.path.is_none() && !child.done)
+            .map(|(call, child)| (call.clone(), child.label.clone(), child.since))
+            .collect();
+        let mut claimed = taken;
+        for (call, label, since) in pending {
+            let Some(path) = dsh_find_child_log(&parent, &label, since, &claimed) else {
+                continue;
+            };
+            claimed.insert(path.clone());
+            if let Some(child) = self.activities.dsh_children.get_mut(&call) {
+                child.path = Some(path.clone());
+            }
+            let tally = self.activities.tallies.entry(call.clone()).or_default();
+            if tally.transcript.is_none() {
+                tally.transcript = Some(SubagentTranscript::dsh(&path));
+                tally.read = false;
+                tally.misses = 0;
+            }
+            // Show the child's first steps without waiting a whole poll.
+            self.refresh_subagent(&call, events);
+        }
+    }
+
+    /// Finish any DSH subagent row whose child log now shows its run has ended.
+    fn dsh_finish_children(&mut self, events: &mut Vec<Event>) {
+        let ended: Vec<(String, ToolState)> = self
+            .activities
+            .dsh_children
+            .iter()
+            .filter(|(_, child)| !child.done)
+            .filter_map(|(call, _)| {
+                let outcome = self
+                    .activities
+                    .tallies
+                    .get(call)
+                    .and_then(|tally| tally.transcript.as_ref())
+                    .and_then(SubagentTranscript::dsh_outcome)?;
+                Some((call.clone(), outcome))
+            })
+            .collect();
+        for (call, outcome) in ended {
+            if let Some(child) = self.activities.dsh_children.get_mut(&call) {
+                child.done = true;
+            }
+            if let Some(tool) = self.tools.get_mut(&call) {
+                tool.state = outcome;
+            }
+            self.finish_agent_run(&call, events);
+        }
+    }
+
     /// Read the running runs' transcripts every so often.
     pub(super) fn subagent_tick(&mut self) -> Vec<Event> {
         let mut events = std::mem::take(&mut self.activities.queued);
@@ -754,10 +866,13 @@ impl Protocol {
             .activities
             .subagents_read_at
             .is_none_or(|at| at.elapsed() >= SUBAGENT_POLL);
-        if !due || self.activities.tallies.is_empty() {
+        if !due || (self.activities.tallies.is_empty() && self.activities.dsh_children.is_empty()) {
             return events;
         }
         self.activities.subagents_read_at = Some(Instant::now());
+        // A DSH child's log may have appeared since the last tick; find and
+        // begin reading any that have before the shared refresh pass.
+        self.dsh_resolve_children(&mut events);
         let calls: Vec<String> = self
             .activities
             .tallies
@@ -768,6 +883,8 @@ impl Protocol {
         for call in calls {
             self.refresh_subagent(&call, &mut events);
         }
+        // Finish any DSH child whose log now shows its run has ended.
+        self.dsh_finish_children(&mut events);
         events
     }
 
@@ -1077,6 +1194,179 @@ fn text_content(value: &Value) -> String {
             .collect::<Vec<_>>()
             .join("\n")
     })
+}
+
+/// Where DSH keeps its session logs. It is `~/.dsh/sessions`, honouring a
+/// `DSH_HOME` override of the data root if one is set.
+fn dsh_sessions_root() -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("DSH_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".dsh")))?;
+    let sessions = home.join("sessions");
+    sessions.is_dir().then_some(sessions)
+}
+
+/// The parent session and descriptor label at the head of a DSH session log,
+/// decoded from only its first frames. Returns nothing unless it is a subagent
+/// log, so a sibling top-level session is never taken for a child.
+fn dsh_log_header(path: &std::path::Path) -> Option<(String, String)> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    let decoder = zstd::stream::read::Decoder::new(file).ok()?;
+    // The session header and descriptor are the first two lines; a child's
+    // whole prompt can follow, so read a bounded prefix, not the whole log.
+    let mut head = Vec::new();
+    decoder.take(64 * 1024).read_to_end(&mut head).ok()?;
+    let mut parent = None;
+    let mut label = None;
+    for line in head.split(|byte| *byte == b'\n') {
+        let Ok(record) = serde_json::from_slice::<Value>(line) else {
+            continue;
+        };
+        match record["type"].as_str() {
+            Some("session") => {
+                if record["origin"].as_str() != Some("subagent") {
+                    return None;
+                }
+                parent = record["parentSession"].as_str().map(str::to_owned);
+            }
+            Some("subagent/descriptor") => {
+                label = record["data"]["label"].as_str().map(str::to_owned);
+                break;
+            }
+            _ => {}
+        }
+    }
+    Some((parent?, label.unwrap_or_default()))
+}
+
+/// Find a DSH subagent's child log: a subagent session under the parent's
+/// directory whose descriptor label matches and which is newer than the call
+/// that spawned it, skipping any already claimed by a sibling subagent.
+fn dsh_find_child_log(
+    parent: &str,
+    label: &str,
+    since: u64,
+    claimed: &std::collections::HashSet<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    dsh_find_child_log_in(&dsh_sessions_root()?, parent, label, since, claimed)
+}
+
+fn dsh_find_child_log_in(
+    root: &std::path::Path,
+    parent: &str,
+    label: &str,
+    since: u64,
+    claimed: &std::collections::HashSet<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    // A child is created moments after the call; allow a little clock slack.
+    let after = since.saturating_sub(5_000);
+    let mut best: Option<(u64, std::path::PathBuf)> = None;
+    // Logs live at `<root>/<cwd-slug>/<child-id>/session.v4.jsonl.zstd`.
+    for slug in std::fs::read_dir(root).into_iter().flatten().flatten() {
+        if !slug.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        for child in std::fs::read_dir(slug.path()).into_iter().flatten().flatten() {
+            let log = child.path().join("session.v4.jsonl.zstd");
+            if claimed.contains(&log) || !log.is_file() {
+                continue;
+            }
+            let created = log
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map_or(0, |since| since.as_millis() as u64);
+            if created < after {
+                continue;
+            }
+            let Some((child_parent, child_label)) = dsh_log_header(&log) else {
+                continue;
+            };
+            if child_parent != parent || child_label != label {
+                continue;
+            }
+            // Oldest matching child first, so siblings sharing a label are
+            // claimed in the order they were spawned.
+            if best.as_ref().is_none_or(|(best, _)| created < *best) {
+                best = Some((created, log));
+            }
+        }
+    }
+    best.map(|(_, log)| log)
+}
+
+#[cfg(test)]
+mod dsh_discovery_tests {
+    use super::*;
+
+    fn write_log(path: &std::path::Path, lines: &[Value]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let text: String = lines.iter().map(|value| format!("{value}\n")).collect();
+        std::fs::write(path, zstd::stream::encode_all(text.as_bytes(), 0).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_header_names_only_a_subagents_parent_and_label() {
+        let dir = std::env::temp_dir().join(format!("dsh-hdr-{}", crate::time::now_ms()));
+        let child = dir.join("slug/c/session.v4.jsonl.zstd");
+        write_log(
+            &child,
+            &[
+                serde_json::json!({"type":"session","id":"c","parentSession":"lead","origin":"subagent"}),
+                serde_json::json!({"type":"subagent/descriptor","data":{"label":"Judge it"}}),
+            ],
+        );
+        assert_eq!(
+            dsh_log_header(&child),
+            Some(("lead".into(), "Judge it".into()))
+        );
+        // A top-level session is not a child and is never matched.
+        let lead = dir.join("slug/lead/session.v4.jsonl.zstd");
+        write_log(
+            &lead,
+            &[serde_json::json!({"type":"session","id":"lead","delegationDepth":0})],
+        );
+        assert_eq!(dsh_log_header(&lead), None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_child_is_found_by_its_parent_and_label_and_claimed_once() {
+        let root = std::env::temp_dir().join(format!("dsh-find-{}", crate::time::now_ms()));
+        let descriptor = |label: &str| {
+            [
+                serde_json::json!({"type":"session","parentSession":"lead","origin":"subagent"}),
+                serde_json::json!({"type":"subagent/descriptor","data":{"label":label}}),
+            ]
+        };
+        let a = root.join("slug/a/session.v4.jsonl.zstd");
+        let b = root.join("slug/b/session.v4.jsonl.zstd");
+        let other = root.join("slug/x/session.v4.jsonl.zstd");
+        write_log(&a, &descriptor("shared"));
+        write_log(&b, &descriptor("shared"));
+        write_log(
+            &other,
+            &[
+                serde_json::json!({"type":"session","parentSession":"someone-else","origin":"subagent"}),
+                serde_json::json!({"type":"subagent/descriptor","data":{"label":"shared"}}),
+            ],
+        );
+        let none = std::collections::HashSet::new();
+        let first = dsh_find_child_log_in(&root, "lead", "shared", 0, &none).unwrap();
+        assert!(first == a || first == b, "a matching child is found");
+        // The one already taken is skipped, so a sibling with the same label
+        // resolves to the other child, never the wrong parent's.
+        let mut claimed = std::collections::HashSet::new();
+        claimed.insert(first.clone());
+        let second = dsh_find_child_log_in(&root, "lead", "shared", 0, &claimed).unwrap();
+        assert_ne!(second, first);
+        assert_ne!(second, other);
+        // No match for an unknown label.
+        assert!(dsh_find_child_log_in(&root, "lead", "absent", 0, &none).is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[cfg(test)]
