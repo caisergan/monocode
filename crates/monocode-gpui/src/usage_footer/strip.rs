@@ -9,7 +9,10 @@ use monocode_core::accounts::Profile;
 /// Providers the footer can read usage for.
 pub(crate) fn reports_usage(kind: Kind) -> bool {
     kind.subscription_usage()
-        || matches!(kind, Kind::Devin | Kind::OpenCode | Kind::Pi | Kind::Hermes)
+        || matches!(
+            kind,
+            Kind::Devin | Kind::OpenCode | Kind::Pi | Kind::Hermes | Kind::Antigravity
+        )
 }
 
 pub(crate) struct UsageStrip {

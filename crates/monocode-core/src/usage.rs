@@ -1,5 +1,6 @@
 //! Subscription usage, ported from rateLimits.ts and src-tauri/rate_limits.rs.
 //! Blocking probes belong on a worker. Credentials are read only, never rotated.
+mod antigravity;
 pub(crate) mod claude;
 mod devin;
 pub(crate) mod hermes;
@@ -145,6 +146,9 @@ pub fn fetch_for(
     }
     if kind == Kind::Hermes {
         return fetch_hermes(model);
+    }
+    if kind == Kind::Antigravity {
+        return antigravity::fetch();
     }
     if !kind.subscription_usage() {
         return Err(FetchError::unavailable(format!(
