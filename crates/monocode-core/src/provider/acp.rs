@@ -1,4 +1,5 @@
-//! ACP lifecycle shared by Cursor, Grok, OpenCode, Antigravity, fx, Hermes and Devin.
+//! ACP lifecycle shared by Cursor, Grok, OpenCode, Antigravity, fx, Hermes, Devin and
+//! DeepSeek Harness.
 //! Mirrors the ACP adapters in src/integrations/harness/providers. Providers own
 //! filesystem/terminal access; we never claim client capabilities we cannot serve.
 use super::*;
@@ -56,6 +57,15 @@ pub(super) struct State {
     forking: bool,
     /// A `session/prompt` is out and unanswered.
     prompt_open: bool,
+    /// The server takes inline images in a prompt, as `initialize` said.
+    prompt_images: bool,
+    /// DSH could not start the editor's MCP servers: the session opens
+    /// without them.
+    mcp_plain: bool,
+    /// Another DSH process still holds this session's log: when to ask for
+    /// it again, and how long to keep asking.
+    resume_retry: Option<Instant>,
+    resume_until: Option<Instant>,
     /// A control Hermes refused because a turn is running, to ask again:
     /// when, and the request.
     busy_retry: Option<(Instant, &'static str, Value)>,
@@ -109,6 +119,12 @@ pub(super) fn configure(command: &mut Command, request: &Request) -> Result<(), 
                 command.args(["--model", model]);
             }
         }
+        Kind::Dsh => {
+            command.args(["--profile", "acp"]);
+            // DSH reads its sandbox and approval policy from the environment
+            // once, at launch: a change of access starts another child.
+            command.env("DSH_PERMISSION_MODE", dsh_permission_mode(settings));
+        }
         _ => {
             command.arg("acp");
         }
@@ -127,6 +143,9 @@ impl Protocol {
                 hermes::has_own_mcp_servers(&home) && !hermes::overlay_reaches_profile(&home)
             })
         {
+            return json!([]);
+        }
+        if self.acp.mcp_plain {
             return json!([]);
         }
         let mut servers = crate::visual_bridge::acp_servers(&settings.environment);
@@ -166,8 +185,11 @@ impl Protocol {
                 stdin,
             )?;
         }
-        // Hermes does answer a cancelled prompt, after the turn's last frames.
-        // The child is reused: those frames must not open the next reply.
+        // Hermes and DSH answer a cancelled prompt, after the turn's last
+        // frames. The child is reused: those frames must not open the next reply.
+        if self.request.kind == Kind::Dsh && std::mem::take(&mut self.acp.prompt_open) {
+            self.acp.unsettled = Some(self.acp.sequence.into());
+        }
         if self.request.kind == Kind::Hermes {
             if std::mem::take(&mut self.acp.prompt_open) {
                 self.acp.unsettled = Some(self.acp.sequence.into());
@@ -224,6 +246,10 @@ impl Protocol {
             events.append(&mut self.acp.notices);
             return Ok(events);
         }
+        if self.acp.resume_retry.is_some_and(|at| Instant::now() >= at) {
+            self.acp.resume_retry = None;
+            self.acp_session(stdin)?;
+        }
         let mut events = std::mem::take(&mut self.acp.notices);
         if self.request.kind == Kind::Hermes {
             events.extend(self.hermes_tick());
@@ -253,7 +279,7 @@ impl Protocol {
             match (self.request.kind, stage) {
                 (Kind::Devin, Stage::ThoughtProbe) => Some(5),
                 (Kind::Cursor | Kind::Grok | Kind::Antigravity, _) => Some(12),
-                (Kind::Hermes, _) => Some(20),
+                (Kind::Hermes | Kind::Dsh, _) => Some(20),
                 (Kind::Devin, _) => Some(30),
                 _ => None,
             }
@@ -264,7 +290,7 @@ impl Protocol {
                 // Hermes may sync its environment before it serves ACP, and
                 // every control is several calls to its gateway.
                 (Kind::Hermes, Stage::Initialize | Stage::Configure) => Some(60),
-                (Kind::Devin, Stage::Initialize) => Some(20),
+                (Kind::Devin | Kind::Dsh, Stage::Initialize) => Some(20),
                 (Kind::Grok, Stage::Authenticate) => Some(15),
                 (Kind::Devin, Stage::Authenticate) => {
                     Some(if params["_meta"]["api_key"].is_string() {
@@ -277,7 +303,9 @@ impl Protocol {
                 // A load replays the whole chat before it answers.
                 (Kind::Hermes, Stage::New | Stage::Load | Stage::Resume) => Some(180),
                 (_, Stage::New | Stage::Load | Stage::Resume) => Some(45),
-                (Kind::Grok | Kind::Fx | Kind::Antigravity, Stage::Configure) => Some(15),
+                (Kind::Grok | Kind::Fx | Kind::Antigravity | Kind::Dsh, Stage::Configure) => {
+                    Some(15)
+                }
                 (Kind::Devin, Stage::Configure) => Some(20),
                 // Hermes's gateway owns the turn and runs it whether this
                 // child lives or not: giving up on a long one would leave it
@@ -357,8 +385,12 @@ impl Protocol {
         let mut params = json!({"cwd":self.request.cwd,"mcpServers":self.mcp_servers()});
         if let Some(id) = &self.request.provider_id {
             params["sessionId"] = id.clone().into();
-            if matches!(self.request.kind, Kind::Grok | Kind::Fx | Kind::Antigravity) {
-                if self.request.kind != Kind::Antigravity {
+            // DSH resumes a persisted session and has no `session/load`.
+            if matches!(
+                self.request.kind,
+                Kind::Grok | Kind::Fx | Kind::Antigravity | Kind::Dsh
+            ) {
+                if !matches!(self.request.kind, Kind::Antigravity | Kind::Dsh) {
                     params = json!({"sessionId":id});
                 }
                 return self.acp_send(Stage::Resume, "session/resume", params, stdin);
@@ -459,7 +491,9 @@ impl Protocol {
             self.acp_send(
                 Stage::Prompt,
                 "session/prompt",
-                json!({"sessionId":self.acp.session,"prompt":self.request.acp_content()?}),
+                json!({"sessionId":self.acp.session,"prompt":self.request.acp_prompt(
+                    self.request.kind != Kind::Dsh || self.acp.prompt_images
+                )?}),
                 stdin,
             )
         }
@@ -584,7 +618,7 @@ impl Protocol {
                     "session/set_config_option",
                     json!({"sessionId":self.acp.session,"configId":"model","value":model}),
                 ));
-            } else if matches!(kind, Kind::Antigravity | Kind::Devin) {
+            } else if matches!(kind, Kind::Antigravity | Kind::Devin | Kind::Dsh) {
                 // These servers only accept config options they advertised.
             } else {
                 self.acp.options.push_back((
@@ -655,7 +689,7 @@ impl Protocol {
             if matches!(config_id, "provider" | "model" | "mode") || !resolved.insert(config_id) {
                 continue;
             }
-            if matches!(kind, Kind::Devin | Kind::Hermes) {
+            if matches!(kind, Kind::Devin | Kind::Hermes | Kind::Dsh) {
                 let mut choices = Vec::new();
                 config_choices(&option["options"], &mut choices);
                 if !choices.is_empty() && !choices.contains(&value) {
@@ -715,6 +749,24 @@ impl Protocol {
             return Ok(());
         }
         match self.acp.stage {
+            // DSH opens no session at all when one MCP server fails to start.
+            // The chat goes on without MonoCode's tools rather than not at all.
+            Stage::New | Stage::Resume
+                if kind == Kind::Dsh
+                    && !timed_out
+                    && !self.acp.mcp_plain
+                    && detail.contains("mcp-client(") =>
+            {
+                self.acp.mcp_plain = true;
+                self.acp.notices.push(Event::Status(format!(
+                    "DeepSeek Harness could not start MonoCode's tools ({detail}); this chat runs without them."
+                )));
+                return if self.acp.stage == Stage::Resume {
+                    self.acp_session(stdin)
+                } else {
+                    self.acp_new(stdin)
+                };
+            }
             Stage::DeleteProbe => {
                 self.done = true;
                 return Ok(());
@@ -746,6 +798,33 @@ impl Protocol {
             }
             Stage::Authenticate if matches!(kind, Kind::Cursor | Kind::Grok) => {
                 return self.acp_session(stdin);
+            }
+            // A session DSH no longer has, or one opened in another folder,
+            // starts over; anything else (a slow or busy resume) is an error
+            // rather than an empty session behind the same transcript.
+            Stage::Resume if kind == Kind::Dsh => {
+                // DSH lets one process at a time write a session. A child
+                // of this chat that just exited lets go within moments; one
+                // that holds on is another window's, or the DSH app's.
+                if !timed_out && detail.contains("active write handle") {
+                    let now = Instant::now();
+                    let until = *self.acp.resume_until.get_or_insert(now + DSH_RESUME_WAIT);
+                    if now < until {
+                        self.acp.resume_retry = Some(now + Duration::from_millis(250));
+                        return Ok(());
+                    }
+                    return Err(DSH_SESSION_HELD.into());
+                }
+                if !timed_out
+                    && ["not resumable", "cwd does not match"]
+                        .iter()
+                        .any(|marker| detail.contains(marker))
+                {
+                    self.acp.notices.push(Event::Status(
+                        "DeepSeek Harness no longer has this chat's session; it continues in a new one without the earlier context.".into(),
+                    ));
+                    return self.acp_new(stdin);
+                }
             }
             Stage::Resume if !(kind == Kind::Antigravity && timed_out) => {
                 return self.acp_send(Stage::Load, "session/load", json!({"sessionId":self.request.provider_id,"cwd":self.request.cwd,"mcpServers":self.mcp_servers()}), stdin);
@@ -863,6 +942,9 @@ impl Protocol {
             }
             _ => {}
         }
+        if kind == Kind::Dsh && detail.contains("no API key") {
+            return Err(DSH_NO_KEY.into());
+        }
         // A JSON-RPC failure is not evidence that the user needs to log in.
         Err(format!("{}: {detail}", kind.label()))
     }
@@ -967,7 +1049,9 @@ impl Protocol {
                             && if self.request.kind == Kind::Antigravity {
                                 kind == Some("edit")
                             } else {
-                                self.request.kind != Kind::Devin
+                                // DSH asks only to leave its sandbox: edits in
+                                // the project never reach here.
+                                !matches!(self.request.kind, Kind::Devin | Kind::Dsh)
                                     && !matches!(kind, Some("execute" | "other" | "fetch"))
                             });
                     // Hermes asks leave outside a prompt of ours too: for a
@@ -1056,6 +1140,8 @@ impl Protocol {
         };
         match self.acp.stage {
             Stage::Initialize => {
+                self.acp.prompt_images =
+                    result["agentCapabilities"]["promptCapabilities"]["image"] == true;
                 if self.probe && self.request.kind == Kind::Cursor {
                     self.acp_send(
                         Stage::ListModels,
@@ -1181,10 +1267,12 @@ impl Protocol {
                 self.acp_next(stdin)?;
             }
             Stage::Prompt => {
-                if matches!(self.request.kind, Kind::Antigravity | Kind::Devin)
-                    && result["stopReason"]
-                        .as_str()
-                        .is_some_and(|reason| !matches!(reason, "end_turn" | "cancelled"))
+                if matches!(
+                    self.request.kind,
+                    Kind::Antigravity | Kind::Devin | Kind::Dsh
+                ) && result["stopReason"]
+                    .as_str()
+                    .is_some_and(|reason| !matches!(reason, "end_turn" | "cancelled"))
                 {
                     return Err(format!(
                         "{} ended the turn ({}).",
@@ -1291,6 +1379,13 @@ impl Protocol {
                     return;
                 }
                 if let Some(kind) = tool["kind"].as_str() {
+                    // DSH calls every tool `other`: its name says what it does.
+                    let kind = match tool["title"].as_str() {
+                        Some(name) if self.request.kind == Kind::Dsh && kind == "other" => {
+                            dsh_tool_kind(name)
+                        }
+                        _ => kind,
+                    };
                     self.acp.tool_kinds.insert(id.into(), kind.into());
                 }
                 let call = self.tools.entry(id.into()).or_insert_with(|| {
@@ -1590,6 +1685,40 @@ fn config_choices(options: &Value, choices: &mut Vec<String>) {
             }
             config_choices(&option["options"], choices);
         }
+    }
+}
+const DSH_RESUME_WAIT: Duration = Duration::from_secs(5);
+const DSH_SESSION_HELD: &str = "This chat's DeepSeek Harness session is open in another process (the DeepSeek Harness app or another MonoCode window). Close it there, then send again.";
+const DSH_NO_KEY: &str = "DeepSeek Harness has no DeepSeek API key. Open the DeepSeek Harness app, add your key on its Models page, then send again.";
+/// MonoCode's access as DSH's `DSH_PERMISSION_MODE`. DSH asks only when a
+/// tool wants to leave its sandbox, so Supervised runs it read-only: every
+/// file change, by an edit or a command, is then a request to the user.
+fn dsh_permission_mode(settings: &Settings) -> &'static str {
+    if settings.plan
+        || matches!(
+            settings.access,
+            AccessMode::ReadOnly | AccessMode::Supervised
+        )
+    {
+        "read-only"
+    } else if settings.access == AccessMode::FullAccess {
+        "danger-full-access"
+    } else {
+        "workspace-write"
+    }
+}
+/// The ACP kind of a DSH tool, from the names its shipped tools register.
+/// Only `bash`/`pwsh` and the file tools ask leave; the rest are named so
+/// their rows read right.
+fn dsh_tool_kind(name: &str) -> &'static str {
+    match name {
+        "read" | "read_image" | "job_output" | "job_list" => "read",
+        "glob" | "grep" => "search",
+        "write" | "edit" | "apply_patch" => "edit",
+        "bash" | "pwsh" | "job_kill" => "execute",
+        "web_search" | "web_fetch" => "fetch",
+        "todo_write" => "think",
+        _ => "other",
     }
 }
 fn nearest_effort(value: &str, choices: &[String]) -> Option<String> {
@@ -2384,6 +2513,351 @@ mod tests {
         assert!(events.contains(&Event::SessionId("replacement".into())));
         assert_eq!(p.acp.session, "replacement");
         assert_eq!(last(&mut out)["method"], "session/prompt");
+    }
+    /// Drives the installed DeepSeek Harness: its catalog, a turn, a resume.
+    #[test]
+    #[ignore = "manual integration check: runs the installed DeepSeek Harness"]
+    fn installed_dsh_lists_models_runs_and_resumes() {
+        let binary = super::super::resolve(Kind::Dsh).expect("DeepSeek Harness is not installed");
+        let catalog = super::super::catalog_for(Kind::Dsh, Default::default()).unwrap();
+        let models = crate::catalog::acp_models_for_tests(&catalog);
+        eprintln!(
+            "models: {:?}",
+            models
+                .iter()
+                .map(|m| (&m.id, &m.name, &m.efforts))
+                .collect::<Vec<_>>()
+        );
+        assert!(!models.is_empty());
+        let cwd = std::env::temp_dir().join(format!("monocode-dsh-live-{}", std::process::id()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(cwd.join("note.txt"), "hello from monocode\n").unwrap();
+        let turn = |prompt: &str, provider_id: Option<String>| {
+            let mut events = Vec::new();
+            let result = super::super::run(
+                Request {
+                    kind: Kind::Dsh,
+                    binary: binary.clone(),
+                    cwd: cwd.clone(),
+                    prompt: prompt.into(),
+                    provider_id,
+                    model: Some(models[0].id.clone()),
+                    settings: Settings {
+                        effort: Some("low".into()),
+                        access: AccessMode::FullAccess,
+                        ..Default::default()
+                    },
+                },
+                Arc::new(AtomicBool::new(false)),
+                |batch| {
+                    events.extend(batch);
+                    Ok(())
+                },
+            );
+            eprintln!("result: {result:?}");
+            for event in &events {
+                eprintln!("event: {event:?}");
+            }
+            (result, events)
+        };
+        let session = |events: &[Event]| {
+            events.iter().find_map(|event| match event {
+                Event::SessionId(id) => Some(id.clone()),
+                _ => None,
+            })
+        };
+        let (first, events) = turn(
+            "Read note.txt with your read tool, then reply with its contents only.",
+            None,
+        );
+        let id = session(&events).expect("no session id");
+        match first {
+            Err(error) => assert!(error.contains("Models page"), "{error}"),
+            Ok(()) => assert!(events.iter().any(|event| matches!(event, Event::Tool(_)))),
+        }
+        // Another DSH process holds the session for a second, as a warm
+        // child that is exiting does: the resume waits for it.
+        let mut holder = Command::new(&binary)
+            .args(["--profile", "acp"])
+            .current_dir(&cwd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut input = holder.stdin.take().unwrap();
+        let mut output = std::io::BufReader::new(holder.stdout.take().unwrap());
+        for line in [
+            json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1,"clientCapabilities":{}}}),
+            json!({"jsonrpc":"2.0","id":2,"method":"session/resume","params":{"sessionId":id,"cwd":cwd,"mcpServers":[]}}),
+        ] {
+            writeln!(input, "{line}").unwrap();
+            let mut reply = String::new();
+            std::io::BufRead::read_line(&mut output, &mut reply).unwrap();
+            assert!(reply.contains("\"result\""), "{reply}");
+        }
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(1));
+            drop(input);
+            holder.wait().unwrap();
+        });
+        let (second, events) = turn("What did the file say?", Some(id.clone()));
+        release.join().unwrap();
+        assert_eq!(session(&events), Some(id));
+        if let Err(error) = second {
+            assert!(error.contains("Models page"), "{error}");
+        }
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+    #[test]
+    fn dsh_resumes_and_starts_over_only_for_a_session_it_lost() {
+        let resumed = |error: &str| {
+            let mut p = protocol(Kind::Dsh);
+            p.request.provider_id = Some("saved".into());
+            let mut out = Vec::new();
+            p.acp_session(&mut out).unwrap();
+            let request = last(&mut out);
+            assert_eq!(request["method"], "session/resume");
+            assert_eq!(request["params"]["sessionId"], "saved");
+            assert_eq!(request["params"]["cwd"], "/tmp");
+            assert!(request["params"]["mcpServers"].is_array());
+            let result = p.frame(
+                json!({"id":request["id"],"error":{"code":-32602,"message":format!("Invalid params: {error}")}}),
+                &mut out,
+            );
+            (p, out, result)
+        };
+        for error in [
+            "session is not resumable: saved",
+            "session cwd does not match: /tmp",
+        ] {
+            let (mut p, mut out, result) = resumed(error);
+            result.unwrap();
+            let replacement = last(&mut out);
+            assert_eq!(replacement["method"], "session/new");
+            let events = p
+                .frame(
+                    json!({"id":replacement["id"],"result":{"sessionId":"fresh"}}),
+                    &mut out,
+                )
+                .unwrap();
+            assert!(events.contains(&Event::SessionId("fresh".into())));
+            assert!(events
+                .iter()
+                .any(|event| matches!(event, Event::Status(text) if text.contains("new one"))));
+        }
+        let (_, mut out, result) = resumed("session is already active: saved");
+        assert!(result.unwrap_err().contains("already active"));
+        assert!(out.is_empty() || last(&mut out)["method"] != "session/new");
+    }
+    #[test]
+    fn dsh_permissions_follow_the_tool_name_it_sends_as_other() {
+        let asked = |access: AccessMode, plan: bool, tool: &str| {
+            let mut p = protocol(Kind::Dsh);
+            p.acp.stage = Stage::Prompt;
+            p.acp.session = "s".into();
+            p.request.settings.access = access;
+            p.request.settings.plan = plan;
+            p.acp_update(&json!({"sessionUpdate":"tool_call","toolCallId":"t","title":tool,"kind":"other","status":"in_progress","rawInput":{}}), &mut Vec::new());
+            let mut out = Vec::new();
+            let events = p.frame(json!({"id":7,"method":"session/request_permission","params":{"sessionId":"s","toolCall":{"toolCallId":"t"},"options":[{"optionId":"allow-once","name":"Allow once","kind":"allow_once"},{"optionId":"reject-once","name":"Reject","kind":"reject_once"}]}}), &mut out).unwrap();
+            if events
+                .iter()
+                .any(|event| matches!(event, Event::Approval(_)))
+            {
+                return "ask".to_owned();
+            }
+            last(&mut out)["result"]["outcome"]["optionId"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(asked(AccessMode::Supervised, true, "read"), "allow-once");
+        assert_eq!(asked(AccessMode::Supervised, true, "grep"), "allow-once");
+        assert_eq!(asked(AccessMode::FullAccess, true, "bash"), "reject-once");
+        assert_eq!(asked(AccessMode::FullAccess, true, "edit"), "reject-once");
+        assert_eq!(asked(AccessMode::AutoAcceptEdits, false, "edit"), "ask");
+        assert_eq!(asked(AccessMode::AutoAcceptEdits, false, "bash"), "ask");
+        assert_eq!(asked(AccessMode::Supervised, false, "read"), "ask");
+        assert_eq!(asked(AccessMode::Auto, false, "bash"), "allow-once");
+    }
+    #[test]
+    fn dsh_launches_its_acp_profile_in_the_matching_sandbox() {
+        let mode = |access: AccessMode, plan: bool| {
+            let mut request = protocol(Kind::Dsh).request;
+            request.settings.access = access;
+            request.settings.plan = plan;
+            let mut command = Command::new("dsh");
+            configure(&mut command, &request).unwrap();
+            assert_eq!(command.get_args().collect::<Vec<_>>(), ["--profile", "acp"]);
+            command
+                .get_envs()
+                .find(|(key, _)| *key == "DSH_PERMISSION_MODE")
+                .and_then(|(_, value)| value)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        };
+        assert_eq!(mode(AccessMode::Supervised, false), "read-only");
+        assert_eq!(mode(AccessMode::AutoAcceptEdits, false), "workspace-write");
+        assert_eq!(mode(AccessMode::ReadOnly, false), "read-only");
+        assert_eq!(mode(AccessMode::FullAccess, true), "read-only");
+        assert_eq!(mode(AccessMode::FullAccess, false), "danger-full-access");
+    }
+    #[test]
+    fn dsh_takes_only_a_reasoning_level_it_offers() {
+        let setup = json!({"configOptions":[
+            {"id":"model","category":"model","currentValue":"[\"deepseek-official\",\"deepseek-v4-flash\"]","options":[{"group":"deepseek-official","name":"DeepSeek","options":[{"value":"[\"deepseek-official\",\"deepseek-v4-flash\"]","name":"deepseek-v4-flash"}]}]},
+            {"id":"reasoning_effort","category":"thought_level","currentValue":"high","options":[{"value":"off"},{"value":"low"},{"value":"high"},{"value":"max"}]}
+        ]});
+        let sent = |effort: &str| {
+            let mut p = protocol(Kind::Dsh);
+            p.request.settings.effort = Some(effort.into());
+            p.acp_settings(&setup);
+            p.acp
+                .options
+                .iter()
+                .map(|(_, params)| params["value"].as_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(sent("max"), ["max"]);
+        assert_eq!(sent("off"), ["off"]);
+        assert_eq!(sent("xhigh"), ["high"]);
+        assert!(sent("default").is_empty());
+        let models = crate::catalog::acp_models_for_tests(&setup);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].name, "deepseek-v4-flash");
+        assert!(models[0].default);
+        assert!(models[0].efforts.contains(&"max".to_owned()));
+    }
+    #[test]
+    fn dsh_opens_without_monocodes_tools_when_they_fail_to_start() {
+        let mut p = protocol(Kind::Dsh);
+        p.request.settings.environment = [
+            ("MONOCODE_VISUAL_ENDPOINT", "http://127.0.0.1:9/"),
+            ("MONOCODE_VISUAL_TOKEN", "t"),
+            ("MONOCODE_VISUAL_SESSION", "1"),
+            ("MONOCODE_VISUAL_EXECUTABLE", "/app/monocode-gpui"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.into(), value.into()))
+        .collect();
+        let mut out = Vec::new();
+        p.acp_session(&mut out).unwrap();
+        let new = last(&mut out);
+        assert_eq!(
+            new["params"]["mcpServers"].as_array().map(Vec::len),
+            Some(1)
+        );
+        let failed = json!({"id":new["id"],"error":{"code":-32603,"message":"Internal error","data":{"details":"mcp-client(monocode_visual): initial connection or tool synchronization failed"}}});
+        p.frame(failed.clone(), &mut out).unwrap();
+        let retry = last(&mut out);
+        assert_eq!(retry["method"], "session/new");
+        assert_eq!(retry["params"]["mcpServers"], json!([]));
+        let events = p
+            .frame(
+                json!({"id":retry["id"],"result":{"sessionId":"s"}}),
+                &mut out,
+            )
+            .unwrap();
+        assert!(events
+            .iter()
+            .any(|event| matches!(event, Event::Status(text) if text.contains("without them"))));
+        // Only once: a second failure is the chat's error.
+        let mut again = protocol(Kind::Dsh);
+        again.acp.mcp_plain = true;
+        again.acp_session(&mut out).unwrap();
+        let new = last(&mut out);
+        let mut failed = failed;
+        failed["id"] = new["id"].clone();
+        assert!(again.frame(failed, &mut out).is_err());
+    }
+    #[test]
+    fn dsh_waits_briefly_for_a_session_another_process_holds() {
+        let mut p = protocol(Kind::Dsh);
+        p.request.provider_id = Some("saved".into());
+        let mut out = Vec::new();
+        p.acp_session(&mut out).unwrap();
+        let held = |id: &Value| json!({"id":id,"error":{"code":-32603,"message":"Internal error","data":{"details":"session \"saved\" is already owned by an active write handle"}}});
+        let request = last(&mut out);
+        assert!(p.frame(held(&request["id"]), &mut out).unwrap().is_empty());
+        assert!(out.is_empty());
+        p.acp.resume_retry = Some(Instant::now());
+        p.acp_tick(&mut out).unwrap();
+        let again = last(&mut out);
+        assert_eq!(again["method"], "session/resume");
+        // Opened: nothing is asked again later.
+        p.frame(
+            json!({"id":again["id"],"result":{"configOptions":[]}}),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(last(&mut out)["method"], "session/prompt");
+        assert!(p.acp.resume_retry.is_none());
+        // One that holds on past the wait is the user's to close.
+        let mut q = protocol(Kind::Dsh);
+        q.request.provider_id = Some("saved".into());
+        q.acp.resume_until = Some(Instant::now());
+        q.acp_session(&mut out).unwrap();
+        let request = last(&mut out);
+        let error = q.frame(held(&request["id"]), &mut out).unwrap_err();
+        assert!(error.contains("open in another process"), "{error}");
+    }
+    #[test]
+    fn dsh_without_a_key_says_where_to_add_one() {
+        let mut p = protocol(Kind::Dsh);
+        p.acp.stage = Stage::Prompt;
+        p.acp.session = "s".into();
+        p.acp.sequence = 4;
+        let error = p
+            .frame(json!({"id":4,"error":{"code":-32603,"message":"Internal error: turn failed: llm-deepseek: no API key for provider route \"deepseek-official\"; store DEEPSEEK_API_KEY through the credentials service"}}), &mut Vec::new())
+            .unwrap_err();
+        assert!(error.contains("Models page"), "{error}");
+    }
+    #[test]
+    fn dsh_gets_images_as_links_unless_it_takes_them_inline() {
+        let mut request = protocol(Kind::Dsh).request;
+        request.settings.attachments = vec!["/tmp/shot.png".into()];
+        let blocks = request.acp_prompt(false).unwrap();
+        assert_eq!(blocks[1]["type"], "resource_link");
+        assert_eq!(blocks[1]["uri"], "file:///tmp/shot.png");
+        assert_eq!(blocks[1]["name"], "shot.png");
+        let mut p = protocol(Kind::Dsh);
+        let mut out = Vec::new();
+        p.acp_start(&mut out).unwrap();
+        let init = last(&mut out);
+        p.frame(json!({"id":init["id"],"result":{"agentCapabilities":{"promptCapabilities":{"image":true}}}}), &mut out).unwrap();
+        assert!(p.acp.prompt_images);
+    }
+    #[test]
+    fn a_stopped_dsh_turns_tail_does_not_open_the_next_reply() {
+        let mut p = protocol(Kind::Dsh);
+        let mut out = Vec::new();
+        p.acp_session(&mut out).unwrap();
+        let new = last(&mut out);
+        p.frame(json!({"id":new["id"],"result":{"sessionId":"s"}}), &mut out)
+            .unwrap();
+        let prompt = last(&mut out);
+        assert_eq!(prompt["method"], "session/prompt");
+        p.acp_cancel(&mut out).unwrap();
+        assert_eq!(last(&mut out)["method"], "session/cancel");
+        // The next turn reuses the child.
+        let mut next = protocol(Kind::Dsh);
+        next.acp = std::mem::take(&mut p.acp);
+        next.acp_resume_warm(&mut out).unwrap();
+        assert_eq!(last(&mut out)["method"], "session/prompt");
+        let chunk = |text: &str| json!({"method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":text}}}});
+        assert!(next.frame(chunk("old words"), &mut out).unwrap().is_empty());
+        assert!(next
+            .frame(
+                json!({"id":prompt["id"],"result":{"stopReason":"cancelled"}}),
+                &mut out
+            )
+            .unwrap()
+            .is_empty());
+        assert!(!next.done);
+        let live = next.frame(chunk("new words"), &mut out).unwrap();
+        assert!(live.contains(&Event::Text("new words".into())));
     }
     #[test]
     fn permissions_use_semantic_kinds_and_never_guess_opaque_allow_options() {

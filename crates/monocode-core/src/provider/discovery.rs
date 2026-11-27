@@ -1,4 +1,4 @@
-//! Some unrelated programs also install `pi`, `omp`, `fx` or `grok`. As in the
+//! Some unrelated programs also install `pi`, `omp`, `fx`, `grok` or `dsh`. As in the
 //! legacy binary resolver, verify their CLI contract before marking them installed.
 use super::*;
 use std::sync::OnceLock;
@@ -19,7 +19,10 @@ pub(super) fn matches(kind: Kind, path: &Path) -> bool {
             });
         }
     }
-    if !matches!(kind, Kind::Pi | Kind::Omp | Kind::Fx | Kind::Grok) {
+    if !matches!(
+        kind,
+        Kind::Pi | Kind::Omp | Kind::Fx | Kind::Grok | Kind::Dsh
+    ) {
         return true;
     }
     static CACHE: OnceLock<Mutex<IdentityCache>> = OnceLock::new();
@@ -65,6 +68,7 @@ fn help_matches(kind: Kind, text: &str) -> bool {
             text.contains("acp") && (text.contains("fx.sh") || text.contains("coding agent"))
         }
         Kind::Grok => text.contains("agent") && (text.contains("x.ai") || text.contains("grok")),
+        Kind::Dsh => text.contains("deepseek harness") && text.contains("--profile"),
         _ => true,
     }
 }
@@ -87,5 +91,13 @@ mod tests {
         ));
         assert!(help_matches(Kind::Pi, "pi --mode rpc"));
         assert!(help_matches(Kind::Grok, "grok build: x.ai agent stdio"));
+        assert!(!help_matches(
+            Kind::Dsh,
+            "dsh - dancer's shell, or distributed shell. -m machine -a all"
+        ));
+        assert!(help_matches(
+            Kind::Dsh,
+            "usage: dsh [--profile] <name>\ndsh: boot a deepseek harness profile"
+        ));
     }
 }

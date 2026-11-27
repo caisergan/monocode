@@ -30,9 +30,25 @@ impl Request {
         Ok(json!(blocks))
     }
     pub(super) fn acp_content(&self) -> Result<Value, String> {
+        self.acp_prompt(true)
+    }
+    /// The prompt's blocks, with images inline or, for a DSH model that
+    /// takes none, as links to the files.
+    pub(super) fn acp_prompt(&self, inline_images: bool) -> Result<Value, String> {
         let mut blocks = vec![json!({"type":"text","text":self.prompt})];
         for path in &self.settings.attachments {
             if let Some(mime) = crate::composer::image_mime(path) {
+                // Its model opens a linked file with its own tools.
+                if !inline_images && self.kind == Kind::Dsh {
+                    let file = Path::new(path);
+                    blocks.push(json!({
+                        "type":"resource_link",
+                        "name":file.file_name().map(|name| name.to_string_lossy()).unwrap_or_default(),
+                        "uri":format!("file://{}", file.display()),
+                        "mimeType":mime,
+                    }));
+                    continue;
+                }
                 blocks.push(json!({"type":"image","mimeType":mime,"data":crate::composer::image_data(path)?}));
             }
         }
