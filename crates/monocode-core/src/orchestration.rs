@@ -850,7 +850,7 @@ agents.close {name}
 
 States: starting, working, blocked (needsInput), idle, stopped, failed (error), usageLimited.
 Wake-ups: when an agent finishes a turn, stops, fails, hits a usage limit or needs input, MonoCode sends you an [Orchestration update] turn once you are idle. You do not need to wait or poll.
-Also available: models.list, worktrees.list, worktrees.create (a worktree beside the repository, for example for your integration branch), sessions.* for the user's other sessions (run app help).
+Also available: models.list (the harnesses turned on in Settings, each with its models), worktrees.list, worktrees.create (a worktree beside the repository, for example for your integration branch), sessions.* for the user's other sessions (run app help).
 The CLI returns {ok,result,requestId}. Retry an uncertain mutation with the same --request-id and identical input.
 "#;
 

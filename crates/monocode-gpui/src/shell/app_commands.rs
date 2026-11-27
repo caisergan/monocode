@@ -382,7 +382,7 @@ impl Shell {
             }).collect::<Vec<_>>()}),
             ),
             "models.list" => {
-                let profiles: Vec<_> = Kind::ALL
+                let profiles: Vec<_> = enabled_harnesses(&self.workspace.preferences, &project)
                     .into_iter()
                     .map(|kind| {
                         let profile = if kind.id() == provider {
@@ -655,6 +655,15 @@ impl Shell {
         };
         self.finish_app_call(call, result, cx);
     }
+}
+/// Harnesses turned on in Settings, globally and for this project, in Settings
+/// order: the ones models.list describes.
+fn enabled_harnesses(prefs: &crate::settings::Preferences, project: &str) -> Vec<Kind> {
+    let hidden = prefs.hidden_for(project);
+    Kind::ALL
+        .into_iter()
+        .filter(|kind| !hidden.iter().any(|id| id == kind.id()))
+        .collect()
 }
 fn mutating(action: &str) -> bool {
     !monocode_core::orchestration::reads(action)
