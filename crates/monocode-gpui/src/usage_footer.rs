@@ -418,6 +418,13 @@ impl UsageFooter {
             _ => "Rate-limit details".into(),
         };
         let windows = state.snapshot.iter().flat_map(|s| &s.windows);
+        // Antigravity's model groups each have their own limits.
+        let groups = state
+            .snapshot
+            .as_ref()
+            .map(|s| s.groups.as_slice())
+            .filter(|groups| groups.len() > 1)
+            .unwrap_or_default();
         let has_windows = state
             .snapshot
             .as_ref()
@@ -547,12 +554,20 @@ impl UsageFooter {
                         })),
                 )
             })
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.))
-                    .children(windows.map(|w| self.window_card(w, now))),
+            .when(groups.is_empty(), |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.))
+                        .children(windows.map(|w| self.window_card(w, now))),
+                )
+            })
+            .children(
+                groups
+                    .iter()
+                    .enumerate()
+                    .map(|(at, group)| self.group_section(group, at > 0, now)),
             )
             .children(
                 state
@@ -654,6 +669,32 @@ impl UsageFooter {
             });
         }
         cx.notify();
+    }
+    /// A model group's name, the models it covers, and its limits.
+    fn group_section(&self, group: &usage::WindowGroup, later: bool, now: i64) -> gpui::Div {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .when(later, |d| d.mt(px(10.)))
+            .child(
+                div()
+                    .px_1()
+                    .child(
+                        div()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(content(0.65))
+                            .child(group.name.clone()),
+                    )
+                    .children(group.models.clone().map(|models| {
+                        div()
+                            .text_size(px(10.))
+                            .line_height(px(14.))
+                            .text_color(content(0.4))
+                            .child(models)
+                    })),
+            )
+            .children(group.windows.iter().map(|w| self.window_card(w, now)))
     }
     fn window_card(&self, w: &usage::Window, now: i64) -> gpui::Div {
         let used = w.used_percent.clamp(0., 100.);

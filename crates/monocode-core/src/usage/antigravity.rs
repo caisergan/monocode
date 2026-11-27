@@ -1,7 +1,8 @@
 //! Antigravity quota, read with the CLI's own `agy -p /usage --output-format
-//! json`: no model turn, and MonoCode never touches agy's Google login. Only
-//! the Gemini group is shown, since MonoCode runs only Gemini on Antigravity.
-use super::{FetchError, Snapshot, Window, now_ms, timestamp};
+//! json`: no model turn, and MonoCode never touches agy's Google login. Each
+//! model group has its own limits. The chip shows Gemini, the group MonoCode
+//! runs; the popover shows every group.
+use super::{FetchError, Snapshot, Window, WindowGroup, now_ms, timestamp};
 use crate::provider::Kind;
 use serde_json::Value;
 
@@ -25,19 +26,37 @@ fn parse(output: &str) -> Result<Snapshot, FetchError> {
             FetchError::unavailable(text.lines().next().unwrap_or(text).to_owned())
         }
     })?;
-    let groups = value["command"]["data"]["groups"]
+    let mut groups: Vec<WindowGroup> = value["command"]["data"]["groups"]
         .as_array()
-        .cloned()
-        .unwrap_or_default();
-    let gemini = groups.iter().find(|group| {
-        group["name"]
-            .as_str()
-            .is_some_and(|name| name.to_lowercase().contains("gemini"))
-    });
-    let windows: Vec<Window> = gemini
-        .and_then(|group| group["buckets"].as_array())
         .into_iter()
         .flatten()
+        .filter_map(group)
+        .collect();
+    // Gemini first: its limits are the chip's.
+    groups.sort_by_key(|group| !group.name.to_lowercase().contains("gemini"));
+    let Some(gemini) = groups
+        .first()
+        .filter(|group| group.name.to_lowercase().contains("gemini"))
+    else {
+        let message = value["response"]
+            .as_str()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .unwrap_or("No Antigravity Gemini quota is available for this account.");
+        return Err(FetchError::unavailable(message.to_owned()));
+    };
+    Ok(Snapshot {
+        windows: gemini.windows.clone(),
+        updated_at: now_ms(),
+        groups,
+        ..Default::default()
+    })
+}
+
+fn group(value: &Value) -> Option<WindowGroup> {
+    let windows: Vec<Window> = value["buckets"]
+        .as_array()?
+        .iter()
         .filter_map(|bucket| {
             let minutes = match bucket["window"].as_str()? {
                 "5h" => 300,
@@ -55,18 +74,19 @@ fn parse(output: &str) -> Result<Snapshot, FetchError> {
             })
         })
         .collect();
-    if windows.is_empty() {
-        let message = value["response"]
+    let name = value["name"].as_str()?.trim();
+    (!windows.is_empty() && !name.is_empty()).then(|| WindowGroup {
+        name: name.to_owned(),
+        models: value["description"]
             .as_str()
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .unwrap_or("No Antigravity Gemini quota is available for this account.");
-        return Err(FetchError::unavailable(message.to_owned()));
-    }
-    Ok(Snapshot {
+            .map(|text| {
+                text.trim()
+                    .trim_start_matches("Models within this group:")
+                    .trim()
+                    .to_owned()
+            })
+            .filter(|text| !text.is_empty()),
         windows,
-        updated_at: now_ms(),
-        ..Default::default()
     })
 }
 
@@ -75,17 +95,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_gemini_group_becomes_five_hour_and_weekly_windows() {
-        let output = r#"{"conversation_id":"","status":"SUCCESS","response":"…","num_turns":0,"command":{"name":"usage","data":{"groups":[{"name":"Gemini Models","buckets":[{"id":"gemini-weekly","window":"weekly","remaining_fraction":0.85,"reset_time":"2026-12-04T15:04:49Z"},{"id":"gemini-5h","window":"5h","remaining_fraction":1,"reset_time":"1970-01-01T00:00:00Z"}]},{"name":"Claude and GPT models","buckets":[{"id":"3p-weekly","window":"weekly","remaining_fraction":0.1,"reset_time":"2026-12-01T00:00:00Z"}]}]}}}"#;
-        let snapshot = parse(output).unwrap();
-        assert_eq!(snapshot.windows.len(), 2);
-        let weekly = &snapshot.windows[0];
+    fn every_group_is_kept_with_gemini_first_for_the_chip() {
+        let output = r#"{"conversation_id":"","status":"SUCCESS","response":"…","num_turns":0,"command":{"name":"usage","data":{"groups":[{"name":"Claude and GPT models","description":"Models within this group: Claude Opus 5.5, GPT-OSS 120B","buckets":[{"id":"3p-weekly","window":"weekly","remaining_fraction":0.1,"reset_time":"2026-12-01T00:00:00Z"},{"id":"3p-5h","window":"5h","remaining_fraction":1,"reset_time":"1970-01-01T00:00:00Z"}]},{"name":"Gemini Models","buckets":[{"id":"gemini-weekly","window":"weekly","remaining_fraction":0.85,"reset_time":"2026-12-04T15:04:49Z"},{"id":"gemini-5h","window":"5h","remaining_fraction":1,"reset_time":"1970-01-01T00:00:00Z"}]}]}}}"#;
+        let snapshot = parse(output).unwrap().ordered();
+        let five_hour = &snapshot.windows[0];
+        assert_eq!((five_hour.minutes, five_hour.used_percent), (300, 0.));
+        assert_eq!(five_hour.resets_at, None);
+        let weekly = &snapshot.windows[1];
         assert_eq!(weekly.minutes, 10_080);
         assert!((weekly.used_percent - 15.).abs() < 1e-6);
         assert_eq!(weekly.resets_at, Some(1_796_396_689_000));
-        let five_hour = &snapshot.windows[1];
-        assert_eq!((five_hour.minutes, five_hour.used_percent), (300, 0.));
-        assert_eq!(five_hour.resets_at, None);
+        assert_eq!(snapshot.windows.len(), 2);
+        let names: Vec<_> = snapshot.groups.iter().map(|g| g.name.as_str()).collect();
+        assert_eq!(names, ["Gemini Models", "Claude and GPT models"]);
+        assert_eq!(snapshot.groups[0].windows, snapshot.windows);
+        let other = &snapshot.groups[1];
+        assert_eq!(
+            other.models.as_deref(),
+            Some("Claude Opus 5.5, GPT-OSS 120B")
+        );
+        assert_eq!(
+            other.windows.iter().map(|w| w.minutes).collect::<Vec<_>>(),
+            [300, 10_080]
+        );
+        assert!((other.windows[1].used_percent - 90.).abs() < 1e-6);
     }
 
     #[test]
