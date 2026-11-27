@@ -1032,3 +1032,20 @@ fn commit_files_and_diffs_include_the_root_commit() {
     assert_eq!(commit_files(dir.path(), &root).unwrap().len(), 1);
     assert!(commit_files(dir.path(), "not-a-sha").is_err());
 }
+
+#[test]
+fn a_fork_checkout_acts_on_its_own_repository_not_upstream() {
+    // gh alone resolves the `upstream` parent in a fork, so merging #N from
+    // the pull request list hit the parent and failed to find it.
+    let dir = tmp();
+    assert!(init_git(dir.path(), "main"));
+    assert!(git(
+        dir.path(),
+        &["remote", "add", "origin", "https://github.com/me/widget.git"]
+    ));
+    assert!(git(
+        dir.path(),
+        &["remote", "add", "upstream", "git@github.com:acme/widget.git"]
+    ));
+    assert_eq!(github_repo_for(dir.path()).unwrap(), "me/widget");
+}

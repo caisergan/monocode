@@ -68,7 +68,7 @@ pub fn pull_requests(cwd: &Path, state: &str, limit: u32) -> Result<PullRequestL
         "closed" => "closed",
         _ => return Err("Unknown pull request state".into()),
     };
-    let repo = push_repo(&root)?;
+    let repo = github_repo_for(&root)?;
     let limit = limit.clamp(1, 100).to_string();
     let mut fields = String::from(
         "number,title,url,state,isDraft,author,headRefName,baseRefName,isCrossRepository,\
@@ -124,12 +124,14 @@ pub fn merge(cwd: &Path, number: u64, method: &str, auto: bool) -> Result<(), St
         "rebase" => "--rebase",
         _ => "--merge",
     };
+    let root = expand_home(cwd);
+    let repo = github_repo_for(&root)?;
     let number = number.to_string();
-    let mut args = vec!["pr", "merge", number.as_str(), flag];
+    let mut args = vec!["pr", "merge", number.as_str(), "--repo", &repo, flag];
     if auto {
         args.push("--auto");
     }
-    gh_quiet(&expand_home(cwd), &args)
+    gh_quiet(&root, &args)
 }
 
 /// Take a draft pull request out of draft.
@@ -137,7 +139,9 @@ pub fn mark_ready(cwd: &Path, number: u64) -> Result<(), String> {
     if remote_workspace::is_remote(cwd) {
         return Err("Pull requests are changed from local projects only".into());
     }
-    gh_quiet(&expand_home(cwd), &["pr", "ready", &number.to_string()])
+    let root = expand_home(cwd);
+    let repo = github_repo_for(&root)?;
+    gh_quiet(&root, &["pr", "ready", &number.to_string(), "--repo", &repo])
 }
 
 /// Delete a merged pull request's local branch. Never the checked-out one.
@@ -159,25 +163,19 @@ pub fn checkout(cwd: &Path, number: u64) -> Result<(), String> {
     if remote_workspace::is_remote(cwd) {
         return Err("Pull requests are checked out in local projects only".into());
     }
+    let root = expand_home(cwd);
+    let repo = github_repo_for(&root)?;
     let number = number.to_string();
     // gh prints nothing on stdout when it switches, which gh_run reports as an error.
-    match gh_run(&expand_home(cwd), &["pr", "checkout", &number]) {
+    match gh_run(&root, &["pr", "checkout", &number, "--repo", &repo]) {
         Ok(_) => Ok(()),
         Err(error) if error == "gh returned no output" => Ok(()),
         Err(error) => Err(error),
     }
 }
 
-/// `origin` decides the repository when it is on GitHub. For a fork that is
-/// the user's own copy, where `gh` would pick the parent named by `upstream`.
-fn push_repo(root: &Path) -> Result<String, String> {
-    git_stdout(root, &["remote", "get-url", "origin"])
-        .and_then(|url| slug_from_remote(&url))
-        .map_or_else(|| github_repo_for(root), Ok)
-}
-
 /// `owner/name` from an https, ssh or scp-style github.com remote URL.
-fn slug_from_remote(url: &str) -> Option<String> {
+pub(super) fn slug_from_remote(url: &str) -> Option<String> {
     let url = url.trim();
     let (authority, path) = match url.split_once("://") {
         Some((_, rest)) => rest.split_once('/')?,
