@@ -2,6 +2,7 @@
 //! or until stopped. A footer chip shows how many chats hold the Mac and for
 //! how long; its popover picks the mode. Everything follows the picked accent.
 mod dial;
+mod lid;
 mod power;
 
 use crate::popover::{Align, Anchor, AnchorSlot, Side, popover};
@@ -37,6 +38,8 @@ const ORBIT: Duration = Duration::from_millis(4_800);
 const BREATHE: Duration = Duration::from_millis(1_600);
 /// The most chats the popover lists before "and N more".
 const LISTED: usize = 4;
+/// A failed pmset call for lid mode retries this often.
+const LID_RETRY_MS: u64 = 30_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Mode {
@@ -102,6 +105,26 @@ pub(crate) enum KeepAwakeEvent {
     OpenSettings,
     OpenSession(i64),
     KeepDisplay(bool),
+    KeepLid(bool),
+}
+
+/// Lid-closed mode's state: pmset runs off the main thread, one call at a time.
+#[derive(Default)]
+struct Lid {
+    status: lid::Status,
+    /// Sleep is off for this app's session.
+    held: Option<lid::Engaged>,
+    busy: bool,
+    installing: bool,
+    /// When the last pmset call failed, so failures retry slowly.
+    failed_at: Option<u64>,
+}
+
+enum LidOutcome {
+    Engaged(lid::Engaged),
+    Released,
+    NeedsSetup,
+    Failed(String),
 }
 
 pub(crate) struct KeepAwake {
@@ -122,8 +145,10 @@ pub(crate) struct KeepAwake {
     footer: bool,
     default_mode: Mode,
     keep_display: bool,
+    keep_lid: bool,
     battery_floor: u32,
     shortcut: Option<String>,
+    lid: Lid,
     // Chip and popover
     open: bool,
     classic: bool,
@@ -157,8 +182,10 @@ impl KeepAwake {
             footer: false,
             default_mode: Mode::Agents,
             keep_display: false,
+            keep_lid: false,
             battery_floor: 0,
             shortcut: None,
+            lid: Lid::default(),
             open: false,
             classic: false,
             anchor: AnchorSlot::default(),
@@ -169,13 +196,148 @@ impl KeepAwake {
             shown: String::new(),
         };
         this.apply(prefs);
+        this.start_lid(cx);
         this
+    }
+
+    /// Undo sleep a crashed run left off, learn whether pmset is set up,
+    /// and turn sleep back on when the app quits.
+    fn start_lid(&mut self, cx: &mut Context<Self>) {
+        let work = cx.background_executor().spawn(async {
+            lid::recover();
+            lid::ready()
+        });
+        cx.spawn(async move |this, cx| {
+            let ready = work.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.lid.status == lid::Status::Unknown {
+                    this.lid.status = if ready {
+                        lid::Status::Ready
+                    } else {
+                        lid::Status::NeedsSetup
+                    };
+                }
+                this.drive_lid(now_ms(), cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.on_app_quit(|this, _| {
+            if this.lid.held == Some(lid::Engaged::Owned) {
+                let _ = lid::release();
+                this.lid.held = None;
+            }
+            async {}
+        })
+        .detach();
+    }
+
+    fn lid_wanted(&self, now: u64) -> bool {
+        self.keep_lid && self.holding_at(now)
+    }
+
+    /// Make pmset's sleep setting follow whether lid mode should hold now.
+    fn drive_lid(&mut self, now: u64, cx: &mut Context<Self>) {
+        let want = self.lid_wanted(now);
+        let lid = &mut self.lid;
+        if lid.busy || lid.installing || want == lid.held.is_some() {
+            return;
+        }
+        if want && matches!(lid.status, lid::Status::NeedsSetup | lid::Status::Unknown) {
+            return;
+        }
+        if lid
+            .failed_at
+            .is_some_and(|at| now.saturating_sub(at) < LID_RETRY_MS)
+        {
+            return;
+        }
+        if !want && lid.held == Some(lid::Engaged::Borrowed) {
+            lid.held = None;
+            return;
+        }
+        lid.busy = true;
+        let work = cx.background_executor().spawn(async move {
+            if !want {
+                return match lid::release() {
+                    Ok(()) => LidOutcome::Released,
+                    Err(e) => LidOutcome::Failed(e),
+                };
+            }
+            if !lid::ready() {
+                return LidOutcome::NeedsSetup;
+            }
+            match lid::engage() {
+                Ok(engaged) => LidOutcome::Engaged(engaged),
+                Err(e) => LidOutcome::Failed(e),
+            }
+        });
+        cx.spawn(async move |this, cx| {
+            let outcome = work.await;
+            let _ = this.update(cx, |this, cx| {
+                this.lid.busy = false;
+                this.lid_outcome(outcome);
+                this.drive_lid(now_ms(), cx);
+                this.ensure_tick(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn lid_outcome(&mut self, outcome: LidOutcome) {
+        let lid = &mut self.lid;
+        lid.failed_at = None;
+        match outcome {
+            LidOutcome::Engaged(engaged) => {
+                lid.held = Some(engaged);
+                lid.status = lid::Status::Ready;
+            }
+            LidOutcome::Released => {
+                lid.held = None;
+                lid.status = lid::Status::Ready;
+            }
+            LidOutcome::NeedsSetup => lid.status = lid::Status::NeedsSetup,
+            LidOutcome::Failed(error) => {
+                lid.status = lid::Status::Failed(error);
+                lid.failed_at = Some(now_ms());
+            }
+        }
+    }
+
+    /// Install the sudoers rule behind macOS's admin password sheet.
+    fn set_up_lid(&mut self, cx: &mut Context<Self>) {
+        if self.lid.installing {
+            return;
+        }
+        self.lid.installing = true;
+        cx.notify();
+        let work = cx
+            .background_executor()
+            .spawn(async { lid::install().map(|()| lid::ready()) });
+        cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let _ = this.update(cx, |this, cx| {
+                this.lid.installing = false;
+                this.lid.failed_at = None;
+                this.lid.status = match result {
+                    Ok(true) => lid::Status::Ready,
+                    Ok(false) => lid::Status::Failed("sudo still asks for a password".into()),
+                    Err(e) if e == "Cancelled" => lid::Status::NeedsSetup,
+                    Err(e) => lid::Status::Failed(e),
+                };
+                this.drive_lid(now_ms(), cx);
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn apply(&mut self, prefs: &Preferences) {
         self.footer = prefs.keep_awake_footer;
         self.default_mode = Mode::from_id(&prefs.keep_awake_mode);
         self.keep_display = prefs.keep_awake_display;
+        self.keep_lid = prefs.keep_awake_lid;
         self.battery_floor = prefs.keep_awake_battery;
         self.shortcut = crate::settings::command_shortcut(prefs, COMMAND);
     }
@@ -317,6 +479,7 @@ impl KeepAwake {
 
     fn sync(&mut self, cx: &mut Context<Self>) {
         self.settle(now_ms());
+        self.drive_lid(now_ms(), cx);
         self.shown = self.signature(now_ms());
         cx.notify();
     }
@@ -345,7 +508,8 @@ impl KeepAwake {
     }
 
     fn tick(&mut self, beat: u32, cx: &mut Context<Self>) -> bool {
-        if self.session.is_none() {
+        // Keep ticking while lid mode still has sleep to turn back on.
+        if self.session.is_none() && self.lid.held.is_none() && !self.lid.busy {
             self.ticking = false;
             return false;
         }
@@ -357,6 +521,7 @@ impl KeepAwake {
         }
         let now = now_ms();
         self.settle(now);
+        self.drive_lid(now, cx);
         let shown = self.signature(now);
         if self.open || shown != self.shown {
             self.shown = shown;
@@ -618,6 +783,7 @@ impl KeepAwake {
             .child(self.rail(cx))
             .child(self.card(now, cx))
             .child(self.display_row(cx))
+            .child(self.lid_row(cx))
             .child(div().h(px(1.)).mx(px(6.)).bg(content(0.07)))
             .child(self.foot(now, cx))
             .into_any_element()
@@ -1146,11 +1312,114 @@ impl KeepAwake {
 
     fn display_row(&self, cx: &mut Context<Self>) -> AnyElement {
         let on = self.keep_display;
+        Self::switch_row("keep-awake-display", "display", "Keep display open", on)
+            .pt(px(10.))
+            .pb(px(4.))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.keep_display = !on;
+                this.sync(cx);
+                cx.emit(KeepAwakeEvent::KeepDisplay(!on));
+            }))
+            .into_any_element()
+    }
+
+    fn lid_row(&self, cx: &mut Context<Self>) -> AnyElement {
+        let on = self.keep_lid;
+        let row = Self::switch_row("keep-awake-lid", "laptop", "Run with lid closed", on)
+            .pt(px(4.))
+            .pb(px(if on && self.lid_note().is_some() {
+                2.
+            } else {
+                8.
+            }))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.keep_lid = !on;
+                // A fresh choice retries a failure straight away.
+                this.lid.failed_at = None;
+                if !on && matches!(this.lid.status, lid::Status::Failed(_)) {
+                    this.lid.status = lid::Status::Ready;
+                }
+                this.sync(cx);
+                cx.emit(KeepAwakeEvent::KeepLid(!on));
+            }));
+        let note = on.then(|| self.lid_note()).flatten();
+        div()
+            .flex()
+            .flex_col()
+            .child(row)
+            .when_some(note, |d, (text, warn, setup)| {
+                d.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .pl(px(30.))
+                        .pr(px(8.))
+                        .pb(px(8.))
+                        .text_size(px(10.))
+                        .text_color(if warn {
+                            gpui::rgb(0xf5b041).into()
+                        } else {
+                            content(0.45)
+                        })
+                        .child(div().flex_1().min_w_0().truncate().child(text))
+                        .when(setup, |d| {
+                            d.child(
+                                div()
+                                    .id("keep-awake-lid-setup")
+                                    .role(Role::Button)
+                                    .aria_label("Set up lid closed mode")
+                                    .flex_shrink_0()
+                                    .text_color(picked_accent())
+                                    .cursor_pointer()
+                                    .hover(|s| s.text_color(content(1.)))
+                                    .child("Set up")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.set_up_lid(cx);
+                                    })),
+                            )
+                        }),
+                )
+            })
+            .into_any_element()
+    }
+
+    /// The line under the lid switch: its text, whether it warns, and
+    /// whether it offers setup.
+    fn lid_note(&self) -> Option<(SharedString, bool, bool)> {
+        let lid = &self.lid;
+        if lid.installing {
+            return Some(("Waiting for your admin password…".into(), false, false));
+        }
+        match &lid.status {
+            lid::Status::NeedsSetup => Some(("Needs your admin password once".into(), false, true)),
+            lid::Status::Failed(error) => Some((
+                format!("Couldn't change sleep: {error}").into(),
+                true,
+                false,
+            )),
+            _ if lid.held == Some(lid::Engaged::Borrowed) => {
+                Some(("Another app already keeps sleep off".into(), false, false))
+            }
+            _ if lid.held.is_some() => {
+                Some(("Closing the lid won't sleep the Mac".into(), false, false))
+            }
+            _ => None,
+        }
+    }
+
+    fn switch_row(
+        id: &'static str,
+        glyph: &'static str,
+        label: &'static str,
+        on: bool,
+    ) -> gpui::Stateful<gpui::Div> {
         let accent = picked_accent();
         div()
-            .id("keep-awake-display")
+            .id(id)
             .role(Role::Switch)
-            .aria_label("Keep display open")
+            .aria_label(label)
             .aria_toggled(if on {
                 gpui::Toggled::True
             } else {
@@ -1160,12 +1429,10 @@ impl KeepAwake {
             .items_center()
             .gap(px(8.))
             .px(px(8.))
-            .pt(px(10.))
-            .pb(px(8.))
             .text_color(content(0.65))
             .cursor_pointer()
-            .child(icon("display", 14.).text_color(content(0.5)))
-            .child(div().flex_1().child("Keep display open"))
+            .child(icon(glyph, 14.).text_color(content(0.5)))
+            .child(div().flex_1().child(label))
             .child(
                 div()
                     .relative()
@@ -1184,12 +1451,6 @@ impl KeepAwake {
                             .bg(gpui::white()),
                     ),
             )
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.keep_display = !on;
-                this.sync(cx);
-                cx.emit(KeepAwakeEvent::KeepDisplay(!on));
-            }))
-            .into_any_element()
     }
 
     fn foot(&self, now: u64, cx: &mut Context<Self>) -> AnyElement {
@@ -1389,6 +1650,42 @@ mod tests {
             assert!(k.session.is_none());
             assert!(!k.assertions.holds_system() && !k.assertions.holds_display());
             assert_eq!(k.stopped.as_deref(), Some("Stopped at 19% battery"));
+        });
+    }
+
+    #[gpui::test]
+    fn lid_mode_turns_sleep_off_only_while_holding(cx: &mut TestAppContext) {
+        let prefs = Preferences {
+            keep_awake_lid: true,
+            ..Default::default()
+        };
+        let view = cx.new(|cx| KeepAwake::new(&prefs, cx));
+        cx.run_until_parked();
+        view.update(cx, |k, cx| {
+            assert_eq!(k.lid.status, lid::Status::Ready);
+            assert!(k.lid.held.is_none(), "no session, no lid hold");
+            k.start(Mode::Agents, cx);
+        });
+        cx.run_until_parked();
+        view.update(cx, |k, cx| {
+            assert!(k.lid.held.is_none(), "armed agents mode waits for work");
+            k.set_holders(vec![holder(1)], cx);
+        });
+        cx.run_until_parked();
+        view.update(cx, |k, cx| {
+            assert_eq!(k.lid.held, Some(lid::Engaged::Owned));
+            k.stop(None, cx);
+        });
+        cx.run_until_parked();
+        view.update(cx, |k, cx| {
+            assert!(k.lid.held.is_none(), "stopping turns sleep back on");
+            k.lid.status = lid::Status::NeedsSetup;
+            k.start(Mode::Always, cx);
+        });
+        cx.run_until_parked();
+        view.update(cx, |k, _| {
+            assert!(k.lid.held.is_none(), "no pmset call before setup");
+            assert!(k.lid_note().is_some_and(|(_, _, setup)| setup));
         });
     }
 

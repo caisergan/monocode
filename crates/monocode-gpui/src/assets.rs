@@ -255,6 +255,7 @@ fn icon_body(path: &str) -> Option<&'static str> {
             "<rect x='3' y='4.5' width='18' height='12' rx='3'/><path d='M9 20h6M12 16.5V20'/>"
         }
         "moon" => "<path d='M20 14.5A8 8 0 0 1 9.5 4a8 8 0 1 0 10.5 10.5Z'/>",
+        "laptop" => "<rect x='4.5' y='5' width='15' height='10' rx='2'/><path d='M2.5 19h19'/>",
         _ => return None,
     })
 }

@@ -305,6 +305,20 @@ impl SettingsView {
                 )],
             ),
             self.row(
+                Some("keep-awake-lid"),
+                false,
+                "Run with lid closed",
+                Some("Turns sleep off while awake, so closing the lid doesn't stop agents. Asks for your admin password once.".into()),
+                vec![self.toggle(
+                    "keep-awake-lid",
+                    "Run with lid closed",
+                    p.keep_awake_lid,
+                    false,
+                    cx,
+                    |this, on, cx| this.update(cx, |p| p.keep_awake_lid = on),
+                )],
+            ),
+            self.row(
                 Some("keep-awake-battery"),
                 false,
                 "Stop on low battery",

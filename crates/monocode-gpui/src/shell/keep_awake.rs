@@ -69,6 +69,12 @@ impl Shell {
                     this.persist(cx);
                     this.sync_settings(cx);
                 }
+                KeepAwakeEvent::KeepLid(on) => {
+                    this.workspace.preferences.keep_awake_lid = *on;
+                    this.apply_preferences(cx);
+                    this.persist(cx);
+                    this.sync_settings(cx);
+                }
             },
         ));
         // Redraw the footer only when the chip appears or goes.
