@@ -87,6 +87,12 @@ pub(crate) struct Preferences {
     pub empty_session: String,
     // Providers
     pub show_remaining_usage: bool,
+    /// Providers whose usage the footer always shows; `None` shows each one
+    /// turned on in the picker once it has usage.
+    pub footer_usage_providers: Option<Vec<String>>,
+    /// The footer also shows the open tab's provider, with that tab's
+    /// account and model, so it changes as tabs change.
+    pub usage_follows_tab: bool,
     pub mask_emails: bool,
     pub idle_agents: u32,
     pub claude_hooks: bool,
@@ -183,6 +189,8 @@ impl Default for Preferences {
             composer_mascot: true,
             empty_session: "ink".into(),
             show_remaining_usage: false,
+            footer_usage_providers: None,
+            usage_follows_tab: false,
             mask_emails: true,
             idle_agents: 3,
             claude_hooks: true,

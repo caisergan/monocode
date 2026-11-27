@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 mod resets;
 mod strip;
-pub(crate) use strip::UsageStrip;
+pub(crate) use strip::{UsageStrip, reports_usage};
 
 actions!(usage_footer, [DismissUsage, ToggleUsage, RefreshUsage]);
 pub(crate) fn bind(cx: &mut App) {

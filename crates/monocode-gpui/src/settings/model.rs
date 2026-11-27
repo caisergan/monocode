@@ -518,6 +518,18 @@ pub(crate) const INDEX: &[(&str, Section, &str, &str)] = &[
         "usage limit meter bar left used quota percent",
     ),
     (
+        "footer-usage",
+        Section::Providers,
+        "Footer usage",
+        "usage limit footer status bar always show pin provider chip",
+    ),
+    (
+        "usage-follows-tab",
+        Section::Providers,
+        "Show the open tab's usage",
+        "usage footer follow active tab harness provider account",
+    ),
+    (
         "mask-emails",
         Section::Providers,
         "Mask account emails",

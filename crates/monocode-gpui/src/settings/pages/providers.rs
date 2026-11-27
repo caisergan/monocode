@@ -38,6 +38,34 @@ impl SettingsView {
                 )],
             ),
             self.row(
+                Some("footer-usage"),
+                false,
+                "Footer usage",
+                Some(
+                    if p.footer_usage_providers.is_some() {
+                        "The footer always shows usage for these providers."
+                    } else {
+                        "The footer always shows usage for these providers. Until you change them, it shows each one turned on in the picker once it has usage."
+                    }
+                    .into(),
+                ),
+                self.footer_usage_pills(&p, cx),
+            ),
+            self.row(
+                Some("usage-follows-tab"),
+                false,
+                "Show the open tab's usage",
+                Some("Also show usage for the open tab's provider, with that tab's account and model. The footer changes as you switch tabs.".into()),
+                vec![self.toggle(
+                    "usage-follows-tab",
+                    "Show the open tab's usage",
+                    p.usage_follows_tab,
+                    false,
+                    cx,
+                    |this, on, cx| this.update(cx, |p| p.usage_follows_tab = on),
+                )],
+            ),
+            self.row(
                 Some("mask-emails"),
                 false,
                 "Mask account emails",
@@ -377,5 +405,77 @@ impl SettingsView {
             ),
             self.group(None, false, "Advanced", None, None, advanced),
         ]
+    }
+
+    /// One pill per installed provider that reports usage; with no pick yet
+    /// the ones turned on in the picker read as picked, and the first click
+    /// saves that set with its change.
+    fn footer_usage_pills(
+        &self,
+        p: &crate::settings::Preferences,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let kinds: Vec<Kind> = Kind::ALL
+            .into_iter()
+            .filter(|kind| {
+                crate::usage_footer::reports_usage(*kind)
+                    && self
+                        .discovery
+                        .binaries
+                        .iter()
+                        .any(|(k, path)| k == kind && path.is_some())
+            })
+            .collect();
+        if kinds.is_empty() {
+            return vec![
+                div()
+                    .text_size(px(12.))
+                    .text_color(content(0.5))
+                    .child(if self.discovery_loading {
+                        "Checking installed CLIs…"
+                    } else {
+                        "No installed CLI reports usage."
+                    })
+                    .into_any_element(),
+            ];
+        }
+        let picked: Vec<String> = p.footer_usage_providers.clone().unwrap_or_else(|| {
+            kinds
+                .iter()
+                .filter(|k| !p.hidden_providers.iter().any(|id| id == k.id()))
+                .map(|k| k.id().to_owned())
+                .collect()
+        });
+        kinds
+            .into_iter()
+            .map(|kind| {
+                let on = picked.iter().any(|id| id == kind.id());
+                let picked = picked.clone();
+                secondary_button(
+                    SharedString::from(format!("footer-usage-{}", kind.id())),
+                    format!("Always show {} usage in the footer", kind.label()),
+                    false,
+                    false,
+                )
+                .debug_selector(move || format!("settings-footer-usage-{}", kind.id()))
+                .aria_selected(on)
+                .when(on, |d| {
+                    d.bg(content(0.1))
+                        .border_color(content(0.2))
+                        .text_color(content(1.))
+                })
+                .child(provider_icon(kind.id(), 14.))
+                .child(kind.label())
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    let mut next = picked.clone();
+                    next.retain(|id| id != kind.id());
+                    if !on {
+                        next.push(kind.id().into());
+                    }
+                    this.update(cx, |p| p.footer_usage_providers = Some(next));
+                }))
+                .into_any_element()
+            })
+            .collect()
     }
 }

@@ -260,3 +260,57 @@ fn mono_mascot_is_beside_name_and_sidebar_switch_stays_visible(cx: &mut TestAppC
     assert_eq!(switch.size, size(px(36.), px(20.)));
     assert!(switch.right() <= px(700.));
 }
+
+#[gpui::test]
+fn footer_usage_pills_start_from_the_picker_and_save_a_pick(cx: &mut TestAppContext) {
+    let window = window(Section::Providers, cx);
+    let visual = &mut VisualTestContext::from_window(window.into(), cx);
+    window
+        .update(visual, |view, _, cx| {
+            view.prefs.hidden_providers = vec!["pi".into()];
+            view.discovery.binaries = {
+                use monocode_core::provider::Kind;
+                [Kind::Claude, Kind::Codex, Kind::Pi, Kind::Cursor]
+            }
+            .into_iter()
+            .map(|k| (k, Some(std::path::PathBuf::from("/bin/true"))))
+            .collect();
+            cx.notify();
+        })
+        .unwrap();
+    visual.run_until_parked();
+    let row = visual.debug_bounds("settings-row-footer-usage").unwrap();
+    for kind in ["claude", "codex", "pi"] {
+        let pill = visual
+            .debug_bounds(Box::leak(
+                format!("settings-footer-usage-{kind}").into_boxed_str(),
+            ))
+            .unwrap();
+        assert!(row.contains(&pill.center()), "{kind}: {pill:?} in {row:?}");
+    }
+    // Cursor reports no usage.
+    assert!(
+        visual
+            .debug_bounds("settings-footer-usage-cursor")
+            .is_none()
+    );
+    assert!(
+        visual
+            .debug_bounds("settings-toggle-usage-follows-tab")
+            .is_some()
+    );
+    let codex = visual
+        .debug_bounds("settings-footer-usage-codex")
+        .unwrap()
+        .center();
+    visual.simulate_click(codex, Default::default());
+    visual.run_until_parked();
+    window
+        .update(visual, |view, _, _| {
+            assert_eq!(
+                view.prefs.footer_usage_providers,
+                Some(vec!["claude".to_owned()])
+            );
+        })
+        .unwrap();
+}
