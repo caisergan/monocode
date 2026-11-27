@@ -8,10 +8,7 @@ import {
   unwatchChild,
   watchChild,
 } from "../../core/child";
-import {
-  antigravitySpawnCwd,
-  modelsFromSessionNew,
-} from "./antigravityProtocol";
+import { modelsFromSessionNew } from "./antigravityProtocol";
 
 const PROBE_ID = "monocode-antigravity-probe";
 const REQUEST_TIMEOUT_MS = 12_000;
@@ -55,14 +52,7 @@ export async function discoverAntigravityModels(workingDirectory?: string) {
     () => acp.close(new Error("Antigravity probe exited")),
   );
   try {
-    await spawnChild(
-      probeId,
-      path,
-      args,
-      antigravitySpawnCwd(path, cwd),
-      undefined,
-      "antigravity",
-    );
+    await spawnChild(probeId, path, args, cwd, undefined, "antigravity");
     await acp.request(
       "initialize",
       {

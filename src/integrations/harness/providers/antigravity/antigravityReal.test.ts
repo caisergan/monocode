@@ -1,5 +1,5 @@
 // Real-endpoint integration test: drives the actual adapter against the
-// installed `agy_acp_server.par` over stdio. Skipped unless AGY_REAL=1 and the
+// installed `agy acp` over stdio. Skipped unless AGY_REAL=1 and the
 // endpoint exists — CI and machines without the binary are unaffected.
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
@@ -9,9 +9,9 @@ import type { HarnessEvent, SendTurnInput } from "../../core/types";
 
 const BIN =
   process.env.AGY_BIN ??
-  join(homedir(), ".local/bin/agy_acp_server.par");
+  join(homedir(), ".local/bin/agy");
 const REAL = process.env.AGY_REAL === "1" && existsSync(BIN);
-const ARGS = process.platform === "linux" ? ["--uid="] : [];
+const ARGS = ["acp"];
 
 const live = vi.hoisted(() => ({
   children: new Map<string, import("node:child_process").ChildProcess>(),

@@ -1684,11 +1684,7 @@ fn run_operation(
         _ => acp::configure(&mut command, &request)?,
     }
     command
-        .current_dir(if request.kind == Kind::Antigravity {
-            request.binary.parent().unwrap_or(&request.cwd)
-        } else {
-            &request.cwd
-        })
+        .current_dir(&request.cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

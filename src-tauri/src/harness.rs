@@ -144,12 +144,9 @@ pub struct AntigravityBinary {
     pub args: Vec<String>,
 }
 
+/// `agy acp` is the ACP server Antigravity documents for other editors.
 fn antigravity_args() -> Vec<String> {
-    if cfg!(target_os = "linux") {
-        vec!["--uid=".into()]
-    } else {
-        Vec::new()
-    }
+    vec!["acp".into()]
 }
 
 struct LiveChild {
@@ -877,7 +874,7 @@ pub fn harness_resolve_devin() -> Result<CursorBinary, String> {
         })
 }
 
-/// Antigravity's ACP server is separate from the interactive agy CLI.
+/// Antigravity's ACP server is the `agy acp` subcommand of its CLI.
 #[tauri::command(async)]
 pub fn harness_resolve_antigravity() -> Result<AntigravityBinary, String> {
     resolve_antigravity()
@@ -886,7 +883,7 @@ pub fn harness_resolve_antigravity() -> Result<AntigravityBinary, String> {
             args: antigravity_args(),
         })
         .ok_or_else(|| {
-            "Antigravity ACP server (agy_acp_server.par) not found. Install Antigravity and run `agy` once in Terminal.".into()
+            "Antigravity CLI not found. Install Antigravity and run `agy` once in Terminal.".into()
         })
 }
 
@@ -2070,7 +2067,7 @@ fn is_harness_argv_token(part: &str) -> bool {
             | "fx"
             | "hermes"
             | "devin"
-            | "agy_acp_server.par"
+            | "agy"
             | "pi"
             | "worker-server"
             | "app-server"
@@ -2355,7 +2352,7 @@ fn resolve_harness_binary_override(provider: &str, binary_path: &str) -> Result<
         "omp" => &["omp"],
         "fx" => &["fx"],
         "hermes" => &["hermes"],
-        "antigravity" => &["agy_acp_server.par"],
+        "antigravity" => &["agy"],
         "devin" => &["devin"],
         _ => {
             return Err(format!(
@@ -2782,19 +2779,18 @@ fn resolve_devin() -> Option<PathBuf> {
 }
 
 fn resolve_antigravity() -> Option<PathBuf> {
-    // The .par wrapper is a POSIX self-extracting archive — Antigravity ships
-    // no Windows ACP binary, so report the provider unavailable there instead
-    // of probing paths that can never be executable.
+    // MonoCode has only run Antigravity on macOS and Linux.
     if cfg!(windows) {
         return None;
     }
     let mut candidates = Vec::new();
     if let Some(home) = dirs_home().map(PathBuf::from) {
-        // Prefer the wrapper: it sets the server's required resource directory.
-        candidates.push(home.join(".local/bin/agy_acp_server.par"));
-        candidates.push(home.join(".local/share/agy-acp/agy_acp_server.par"));
+        candidates.push(home.join(".local/bin/agy"));
     }
-    if let Some(from_shell) = which_via_login_shell("agy_acp_server.par") {
+    #[cfg(target_os = "macos")]
+    candidates.push(PathBuf::from("/opt/homebrew/bin/agy"));
+    candidates.push(PathBuf::from("/usr/local/bin/agy"));
+    if let Some(from_shell) = which_via_login_shell("agy") {
         candidates.push(from_shell);
     }
     first_binary(candidates)
@@ -3874,8 +3870,8 @@ mod tests {
         let opencode = dir.join("opencode");
         let cursor_agent = dir.join("cursor-agent");
         let decoy = dir.join("codex.sh");
-        let antigravity = dir.join("agy_acp_server");
-        let antigravity_wrapper = dir.join("agy_acp_server.par");
+        let antigravity = dir.join("agy-cli");
+        let antigravity_wrapper = dir.join("agy");
         for path in [
             &codex,
             &opencode,
@@ -4241,33 +4237,27 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn antigravity_resolver_prefers_executable_wrapper_and_tracks_orphans() {
+    fn antigravity_resolver_skips_non_executables_and_tracks_orphans() {
         use std::os::unix::fs::PermissionsExt;
         let dir = std::env::temp_dir().join(format!("monocode-agy-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("bin")).unwrap();
-        let wrapper = dir.join("bin/agy_acp_server.par");
-        let server = dir.join("agy_acp_server.par");
-        std::fs::write(&wrapper, b"#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::write(&server, b"#!/bin/sh\nexit 0\n").unwrap();
-        std::fs::set_permissions(&server, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let candidates = vec![wrapper.clone(), server.clone()];
-        assert_eq!(first_binary(candidates.clone()), Some(server));
-        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(first_binary(candidates), Some(wrapper));
-        assert!(looks_like_harness_argv(
-            "/home/user/.local/share/agy-acp/agy_acp_server.par"
-        ));
-        assert!(!looks_like_harness_argv("agy --help"));
+        let first = dir.join("bin/agy");
+        let second = dir.join("agy");
+        std::fs::write(&first, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::write(&second, b"#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&second, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let candidates = vec![first.clone(), second.clone()];
+        assert_eq!(first_binary(candidates.clone()), Some(second));
+        std::fs::set_permissions(&first, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(first_binary(candidates), Some(first));
+        assert!(looks_like_harness_argv("/home/user/.local/bin/agy acp"));
+        assert!(!looks_like_harness_argv("agy-helper --help"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
-    fn antigravity_launch_args_match_the_platform_registry() {
-        if cfg!(target_os = "linux") {
-            assert_eq!(antigravity_args(), vec!["--uid="]);
-        } else {
-            assert!(antigravity_args().is_empty());
-        }
+    fn antigravity_launches_its_acp_subcommand() {
+        assert_eq!(antigravity_args(), vec!["acp"]);
     }
 
     #[test]
