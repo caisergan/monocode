@@ -1588,7 +1588,10 @@ fn run_operation(
                 command.args(["--tools", crate::master::CLAUDE_TOOLS]);
                 allowed.push(crate::master::CLAUDE_TOOLS);
             } else if !settings.text_only && settings.access == AccessMode::ReadOnly {
-                command.args(["--tools", "Read,Glob,Grep,Bash"]);
+                // ToolSearch keeps MCP tools deferred. Without it Claude Code
+                // sends every MCP schema up front (~500K tokens with many
+                // servers configured) on each request of the session.
+                command.args(["--tools", "Read,Glob,Grep,Bash,ToolSearch"]);
                 allowed.push("Read,Glob,Grep,Bash(git status *),Bash(git diff *),Bash(git log *),Bash(git show *),Bash(pwd),Bash(ls *),Bash(rg *)");
             }
             let app_server = (!settings.text_only)
@@ -2715,6 +2718,20 @@ mod process_tests {
                 .err()
                 .unwrap_or_else(|| "The provider never started".into())),
         }
+    }
+    #[test]
+    fn read_only_claude_keeps_tool_search_so_mcp_tools_stay_deferred() {
+        let (_tmp, mut request) = fixture("#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$MC_TEST_ARGS\"\n");
+        request.kind = Kind::Claude;
+        request.settings.access = AccessMode::ReadOnly;
+        let args = launch_args(request).unwrap_or_else(|e| panic!("{e}"));
+        let tools = args
+            .iter()
+            .position(|a| a == "--tools")
+            .and_then(|ix| args.get(ix + 1))
+            .cloned()
+            .unwrap_or_default();
+        assert!(tools.split(',').any(|t| t == "ToolSearch"), "{tools}");
     }
     #[test]
     fn master_on_claude_gets_read_tools_and_its_own_tool_only() {

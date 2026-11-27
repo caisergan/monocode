@@ -362,6 +362,13 @@ impl Conversation {
         cx.emit(SessionChanged);
         decisions
     }
+    /// A provider running a turn with no approval pending, as a lead polling
+    /// or working looks to its orchestration.
+    pub(crate) fn test_begin_turn(&mut self, cx: &mut Context<Self>) {
+        self.busy = true;
+        self.status = "Working".into();
+        cx.emit(SessionChanged);
+    }
     /// The provider reports the end of a turn the test drove by hand.
     pub(crate) fn test_end_turn(&mut self, cx: &mut Context<Self>) {
         self.busy = false;
