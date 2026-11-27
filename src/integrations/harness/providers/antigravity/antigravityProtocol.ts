@@ -12,7 +12,7 @@ import {
 } from "../../core/preview";
 import { acpAgentInfo } from "../../core/acpSubagents";
 
-export type AntigravityModeId = "default" | "auto_edit" | "yolo";
+export type AntigravityModeId = "default" | "accept-edits" | "auto" | "plan";
 
 export type AntigravityPermissionRequest = {
   title: string;
@@ -39,20 +39,15 @@ export function antigravityPromptBlocks(
   return promptBlocks(text, attachments);
 }
 
-/** The raw .par locates sibling resources relative to its process directory. */
-export function antigravitySpawnCwd(binary: string, fallback: string): string {
-  const separator = Math.max(binary.lastIndexOf("/"), binary.lastIndexOf("\\"));
-  return separator >= 0 ? binary.slice(0, separator + 1) : fallback;
-}
-
 export function antigravityModeId(
   runtimeMode: RuntimeMode,
   planning = false,
 ): AntigravityModeId {
-  // No native plan mode. Use default and deny non-read permissions on the client.
-  if (planning) return "default";
-  if (runtimeMode === "full-access") return "yolo";
-  if (runtimeMode === "auto-accept-edits") return "auto_edit";
+  // The client still denies non-read permissions while planning.
+  if (planning) return "plan";
+  // No mode skips every prompt: full access runs in auto and approves the rest.
+  if (runtimeMode === "full-access" || runtimeMode === "auto") return "auto";
+  if (runtimeMode === "auto-accept-edits") return "accept-edits";
   return "default";
 }
 
@@ -245,6 +240,25 @@ export function eventsFromAcpUpdate(params: unknown): HarnessEvent[] {
 }
 
 /** Discover models and reasoning controls from standard ACP session config. */
+/**
+ * Antigravity's ACP docs offer third-party models only to the editors they
+ * name, and MonoCode is not one of them: it keeps to Google's Gemini models.
+ */
+export function antigravityAllowsModel(id: string): boolean {
+  return id.startsWith("gemini-");
+}
+
+/** The model to run: the requested one when allowed, else a Gemini choice. */
+export function antigravityModelChoice(
+  requested: string,
+  option: SessionConfigOption | undefined,
+): string | undefined {
+  if (antigravityAllowsModel(requested)) return requested;
+  const current = typeof option?.currentValue === "string" ? option.currentValue : "";
+  if (antigravityAllowsModel(current)) return current;
+  return option?.choices?.find(antigravityAllowsModel);
+}
+
 export function modelsFromSessionNew(raw: unknown): AgentModel[] {
   const rec = asRecord(raw);
   const options = Array.isArray(rec?.configOptions) ? rec.configOptions : [];
@@ -275,7 +289,7 @@ export function modelsFromSessionNew(raw: unknown): AgentModel[] {
     const value = stringField(model ?? {}, "modelId");
     return value ? [{ value, label: String(model?.name ?? value) }] : [];
   });
-  return [...new Map(models.map(({ value, label }) => [value, {
+  return [...new Map(models.filter(({ value }) => antigravityAllowsModel(value)).map(({ value, label }) => [value, {
     id: `antigravity:${value}`,
     harness: "antigravity" as const,
     name: label,

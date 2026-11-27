@@ -1,4 +1,4 @@
-// Soak / stress integration test: drives the real `agy_acp_server.par` at LOW
+// Soak / stress integration test: drives the real `agy acp` at LOW
 // effort (gemini-3.8-flash-low) through a fleet of concurrent threads, rapid
 // queued sends, cancel/stop/forget cycles, process kills, and cwd drift —
 // simulating heavy real-world usage at ~4x the case count of the smoke suite.
@@ -11,9 +11,9 @@ import type { HarnessEvent, SendTurnInput } from "../../core/types";
 
 const BIN =
   process.env.AGY_BIN ??
-  join(homedir(), ".local/bin/agy_acp_server.par");
+  join(homedir(), ".local/bin/agy");
 const REAL = process.env.AGY_SOAK === "1" && existsSync(BIN);
-const ARGS = process.platform === "linux" ? ["--uid="] : [];
+const ARGS = ["acp"];
 const MODEL = "antigravity:gemini-3.8-flash-low";
 const LOW = { effort: "low" } as const;
 

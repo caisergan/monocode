@@ -389,7 +389,14 @@ pub fn cached_models_for(kind: Kind, account: &crate::accounts::Profile) -> Opti
         .entries
         .iter()
         .find(|(k, profile, _)| *k == kind && profile == account)
-        .map(|(_, _, models)| models.clone())
+        .map(|(_, _, models)| {
+            // A catalog saved before the model rule still lists the others.
+            models
+                .iter()
+                .filter(|m| kind.allows_model(&m.id))
+                .cloned()
+                .collect()
+        })
 }
 /// Seed an account's cached catalog, as a finished catalog query would.
 #[cfg(test)]
@@ -443,6 +450,7 @@ pub fn refresh_models_for(
         provider::devin::catalog_models(&value)
     } else if kind.is_acp() {
         let mut models = acp_models(&value);
+        models.retain(|m| kind.allows_model(&m.id));
         if kind == Kind::Hermes {
             hermes::narrow(&mut models);
         }

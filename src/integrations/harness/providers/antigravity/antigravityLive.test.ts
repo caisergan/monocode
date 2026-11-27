@@ -32,7 +32,7 @@ vi.mock("../../core/child", () => ({
     if (mock.resolveGates) {
       await new Promise<void>((resolve) => mock.resolveGates.push(resolve));
     }
-    return { path: "/fake/agy_acp_server.par", args: ["--uid="] };
+    return { path: "/fake/agy", args: ["acp"] };
   },
   spawnChild: mock.spawn,
   killChild: mock.kill,
@@ -67,8 +67,8 @@ vi.mock("../../core/child", () => ({
       const setup = {
         sessionId: "provider-session",
         configOptions: mock.setupConfigOptions ?? [
-          { id: "model", category: "model", currentValue: "m1", options: [
-            { value: "m1", name: "Model One" }, { value: "m2", name: "Model Two" },
+          { id: "model", category: "model", currentValue: "gemini-m1", options: [
+            { value: "gemini-m1", name: "Model One" }, { value: "gemini-m2", name: "Model Two" },
           ] },
           { id: "thinking", category: "thought_level", currentValue: "low", options: [
             { value: "low", name: "Low" }, { value: "high", name: "High" },
@@ -94,7 +94,7 @@ const providers = [
   { id: "antigravity", send: agy.sendAntigravityTurn, cancel: agy.cancelAntigravityTurn,
     stop: agy.stopAntigravitySession, forget: agy.forgetAntigravitySession,
     bind: agy.bindAntigravitySession, respond: agy.respondAntigravityApproval,
-    refresh: refreshAntigravityCatalog, path: "/fake/agy_acp_server.par", args: ["--uid="] as string[], plan: "default", auth: "agy` once" },
+    refresh: refreshAntigravityCatalog, path: "/fake/agy", args: ["acp"] as string[], plan: "plan", auth: "agy` once" },
 ] as const;
 
 // Each spawned generation registers under a scoped child key `thread#n`.
@@ -138,7 +138,7 @@ describe.each(providers)("$id offline ACP transport", (provider) => {
     mock.spawn.mockClear();
     mock.kill.mockClear();
     events = [];
-    input = { sessionId: "thread", cwd: "/repo", model: `${provider.id}:m1`, text: "hi",
+    input = { sessionId: "thread", cwd: "/repo", model: `${provider.id}:gemini-m1`, text: "hi",
       runtimeMode: "supervised", onEvent: (event) => events.push(event) };
   });
   afterEach(async () => {
@@ -155,7 +155,7 @@ describe.each(providers)("$id offline ACP transport", (provider) => {
       genKey,
       provider.path,
       provider.args,
-      provider.id === "antigravity" ? "/fake/" : "/repo",
+      "/repo",
       undefined,
       provider.id,
     );
@@ -257,7 +257,7 @@ describe.each(providers)("$id offline ACP transport", (provider) => {
     const first = provider.refresh();
     expect(provider.refresh()).toBe(first);
     await first;
-    expect(modelsFor(provider.id).map((model) => model.nativeId)).toEqual(["m1", "m2"]);
+    expect(modelsFor(provider.id).map((model) => model.nativeId)).toEqual(["gemini-m1", "gemini-m2"]);
     const probeId = mock.spawn.mock.calls
       .map(([id]) => id as string)
       .find((id) => id.startsWith(`monocode-${provider.id}-probe-`));
@@ -266,7 +266,7 @@ describe.each(providers)("$id offline ACP transport", (provider) => {
       probeId,
       provider.path,
       provider.args,
-      provider.id === "antigravity" ? "/fake/" : "/home/test",
+      "/home/test",
       undefined,
       provider.id,
     );
@@ -274,7 +274,7 @@ describe.each(providers)("$id offline ACP transport", (provider) => {
     expect(mock.listeners.has(probeId!)).toBe(false);
     mock.fail.add("session/new");
     await provider.refresh();
-    expect(modelsFor(provider.id).map((model) => model.nativeId)).toEqual(["m1", "m2"]);
+    expect(modelsFor(provider.id).map((model) => model.nativeId)).toEqual(["gemini-m1", "gemini-m2"]);
     expect(mock.sent.some((m) => m.method === "authenticate")).toBe(false);
   });
 
@@ -583,7 +583,7 @@ describe.each(providers)("$id offline ACP transport", (provider) => {
     mock.autoPrompt = true;
     await provider.send({
       ...input,
-      model: `${provider.id}:m2`,
+      model: `${provider.id}:gemini-m2`,
       modelSettings: { effort: "high" },
     });
     const sets = mock.sent.filter((m) => m.method === "session/set_config_option");
@@ -608,8 +608,8 @@ describe.each(providers)("$id offline ACP transport", (provider) => {
 
   it("advertises config-options support and encodes boolean options typed", async () => {
     mock.setupConfigOptions = [
-      { id: "model", category: "model", currentValue: "m1", options: [
-        { value: "m1", name: "Model One" }, { value: "m2", name: "Model Two" },
+      { id: "model", category: "model", currentValue: "gemini-m1", options: [
+        { value: "gemini-m1", name: "Model One" }, { value: "gemini-m2", name: "Model Two" },
       ] },
       { id: "fast", type: "boolean", currentValue: false },
     ];
@@ -629,9 +629,9 @@ describe.each(providers)("$id offline ACP transport", (provider) => {
     mock.autoPrompt = true;
     await provider.send({ ...input, modelSettings: { effort: "high" } });
     mock.sent.length = 0;
-    await provider.send({ ...input, model: `${provider.id}:m2` });
+    await provider.send({ ...input, model: `${provider.id}:gemini-m2` });
     expect(mock.sent.find((m) => m.method === "session/set_config_option")?.params)
-      .toMatchObject({ configId: "model", value: "m2" });
+      .toMatchObject({ configId: "model", value: "gemini-m2" });
   });
 
   it("preserves config options after a malformed config update", async () => {
@@ -750,7 +750,7 @@ describe.each(providers)("$id offline ACP transport", (provider) => {
 
   it("recycles the transport when a cancel lands during configuration", async () => {
     mock.silent.add("session/set_config_option");
-    const first = provider.send({ ...input, model: `${provider.id}:m2` });
+    const first = provider.send({ ...input, model: `${provider.id}:gemini-m2` });
     await vi.waitFor(() =>
       expect(mock.sent.some((m) => m.method === "session/set_config_option")).toBe(true),
     );

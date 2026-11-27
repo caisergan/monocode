@@ -161,7 +161,7 @@ describe("child bridge", () => {
               omp: "/opt/omp/bin/omp",
               fx: "/opt/fx/bin/fx",
               hermes: "/opt/hermes/bin/hermes",
-              antigravity: "/opt/antigravity/bin/agy_acp_server.par",
+              antigravity: "/opt/antigravity/bin/agy",
             })
           : null,
     });
@@ -184,7 +184,7 @@ describe("child bridge", () => {
       ["hermes", "/opt/hermes/bin/hermes", child.resolveHermesBinary],
       [
         "antigravity",
-        "/opt/antigravity/bin/agy_acp_server.par",
+        "/opt/antigravity/bin/agy",
         child.resolveAntigravityBinary,
       ],
     ] as const) {

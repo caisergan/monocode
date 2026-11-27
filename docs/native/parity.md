@@ -21,7 +21,7 @@ provider feature or the current revision.
 | omp | RPC | Catalog, streaming and two-turn resume (Oct 19) |
 | fx | ACP | Catalog, streaming and two-turn resume (Oct 19) |
 | Hermes Agent | ACP | Catalog; prompt blocked by upstream account credit (Oct 19) |
-| Antigravity | ACP | Protocol fixtures only; no installed server for a live check |
+| Antigravity | ACP | Live: `agy acp` 1.5.18 catalog, resumed turns, supervised approval, plan mode (provider_smoke) |
 | Devin | ACP | Catalog, streaming, two-turn resume and supervised write approval (Oct 19) |
 
 Changes to provider lifecycles on Oct 21 still need live checks, especially

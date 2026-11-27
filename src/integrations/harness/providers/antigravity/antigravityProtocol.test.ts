@@ -6,7 +6,7 @@ import * as antigravity from "./antigravityProtocol";
 const providers = [
   { id: "antigravity", protocol: antigravity, mode: antigravity.antigravityModeId,
     blocks: antigravity.antigravityPromptBlocks,
-    modes: ["default", "auto_edit", "default", "yolo"], plan: "default" },
+    modes: ["default", "accept-edits", "auto", "auto"], plan: "plan" },
 ] as const;
 
 describe.each(providers)("$id ACP protocol", ({ id, protocol, mode, blocks, modes, plan }) => {
@@ -41,7 +41,7 @@ describe.each(providers)("$id ACP protocol", ({ id, protocol, mode, blocks, mode
   it("resolves config IDs by category without selecting the provider", () => {
     const options = protocol.readConfigOptions([
       null, {}, { id: "provider", category: "model" },
-      { id: "model_picker", category: "model", currentValue: "m1" },
+      { id: "model_picker", category: "model", currentValue: "gemini-m1" },
       { id: "thinking", category: "thought_level", currentValue: "high" },
     ]);
     expect(options).toHaveLength(3);
@@ -57,7 +57,7 @@ describe.each(providers)("$id ACP protocol", ({ id, protocol, mode, blocks, mode
     const models = protocol.modelsFromSessionNew({ configOptions: [
       { id: "model", category: "model", options: [
         { group: "provider", options: [
-          { value: "m1", name: "Model One" }, { value: "m2", name: "Model Two" },
+          { value: "gemini-m1", name: "Model One" }, { value: "gemini-m2", name: "Model Two" },
         ] },
       ] },
       { id: "thinking", category: "thought_level", currentValue: "high", options: [
@@ -65,8 +65,8 @@ describe.each(providers)("$id ACP protocol", ({ id, protocol, mode, blocks, mode
         { value: "max", name: "Max" },
       ] },
     ] });
-    expect(models.map((model) => model.id)).toEqual([`${id}:m1`, `${id}:m2`]);
-    expect(models[0]).toMatchObject({ harness: id, name: "Model One", nativeId: "m1",
+    expect(models.map((model) => model.id)).toEqual([`${id}:gemini-m1`, `${id}:gemini-m2`]);
+    expect(models[0]).toMatchObject({ harness: id, name: "Model One", nativeId: "gemini-m1",
       settings: [{ id: "effort", value: "high", options: [
         { value: "low", label: "Low" }, { value: "high", label: "High" },
         { value: "max", label: "Max" },
@@ -115,5 +115,25 @@ describe.each(providers)("$id ACP protocol", ({ id, protocol, mode, blocks, mode
     expect(parse({ sessionUpdate: "plan", entries: [{ content: "Check code", status: "pending" }] }))
       .toMatchObject([{ type: "tasks.updated", items: [{ text: "Check code" }] }]);
     expect(parse({ sessionUpdate: "available_commands_update", availableCommands: [] })).toEqual([]);
+  });
+});
+
+describe("antigravity model rule", () => {
+  it("keeps third-party models out of the catalog and the turn", () => {
+    const models = antigravity.modelsFromSessionNew({
+      configOptions: [{ id: "model", category: "model", currentValue: "claude-opus-5-5", options: [
+        { value: "gemini-4-neon", name: "Gemini 4 Neon" },
+        { value: "claude-opus-5-5", name: "Claude Opus 5.5" },
+        { value: "gpt-oss-120b-medium", name: "GPT-OSS 120B" },
+      ] }],
+    });
+    expect(models.map((model) => model.nativeId)).toEqual(["gemini-4-neon"]);
+    const option = antigravity.readConfigOptions([{ id: "model", currentValue: "claude-opus-5-5",
+      options: [{ value: "claude-opus-5-5" }, { value: "gemini-4-carbon" }] }])[0];
+    expect(antigravity.antigravityModelChoice("gemini-4-neon", option)).toBe("gemini-4-neon");
+    expect(antigravity.antigravityModelChoice("claude-opus-5-5", option)).toBe("gemini-4-carbon");
+    expect(antigravity.antigravityModelChoice("", { id: "model", currentValue: "gemini-4-argon" }))
+      .toBe("gemini-4-argon");
+    expect(antigravity.antigravityModelChoice("claude-opus-5-5", { id: "model" })).toBeUndefined();
   });
 });

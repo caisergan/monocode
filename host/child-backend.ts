@@ -142,7 +142,7 @@ export class HostChildBackend implements ChildBackend {
       return {
         path: await this.resolve(provider),
         ...(provider === "antigravity"
-          ? { args: process.platform === "linux" ? ["--uid="] : [] }
+          ? { args: ["acp"] }
           : {}),
       } as T;
     }

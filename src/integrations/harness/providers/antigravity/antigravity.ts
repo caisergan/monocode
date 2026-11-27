@@ -15,8 +15,8 @@ import {
   eventsFromAcpUpdate,
   extractModelConfigId,
   antigravityModeId,
+  antigravityModelChoice,
   antigravityPromptBlocks,
-  antigravitySpawnCwd,
   permissionOptionId,
   permissionRequestFromAcp,
   readConfigOptions,
@@ -130,7 +130,7 @@ const pendingSetupByThread = new Map<
 const turnsByThread = new Map<string, Promise<void>>();
 let childSeq = 0;
 
-/** Live Antigravity adapter. Spawns `agy_acp_server.par`, not `agy acp`. */
+/** Live Antigravity adapter. Spawns `agy acp`, the CLI's ACP server. */
 export async function sendAntigravityTurn(input: SendTurnInput): Promise<void> {
   const epoch = cancelEpoch.get(input.sessionId) ?? 0;
   const cancelled = () => (cancelEpoch.get(input.sessionId) ?? 0) !== epoch;
@@ -466,7 +466,7 @@ async function startLive(input: SendTurnInput, life: number): Promise<Live> {
       childKey,
       path,
       args,
-      antigravitySpawnCwd(path, input.cwd),
+      input.cwd,
       undefined,
       "antigravity",
     );
@@ -608,10 +608,14 @@ async function applyModelSelection(
   live: Live,
   input: SendTurnInput,
 ): Promise<void> {
-  const base = nativeModelId(input.model);
   const settings = input.modelSettings ?? {};
   const modelConfigId =
     live.modelConfigId === "provider" ? "model" : live.modelConfigId;
+  const base = antigravityModelChoice(
+    nativeModelId(input.model),
+    live.configOptions.find((option) => option.id === modelConfigId),
+  );
+  if (!base) throw new Error("Antigravity offered no Gemini model for this session.");
 
   await setConfigOption(live, modelConfigId, base);
 
@@ -627,7 +631,7 @@ async function applyRuntimeMode(
   runtimeMode: RuntimeMode,
   planning = false,
 ): Promise<void> {
-  // Fail closed: a rejected downgrade must not leave a prior yolo mode active.
+  // Fail closed: a rejected downgrade must not leave a prior auto mode active.
   await live.acp
     .request(
       "session/set_mode",

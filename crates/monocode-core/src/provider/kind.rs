@@ -70,7 +70,7 @@ impl Kind {
     pub fn binary_name(self) -> &'static str {
         match self {
             Self::Cursor => "cursor-agent",
-            Self::Antigravity => "agy_acp_server.par",
+            Self::Antigravity => "agy",
             _ => self.id(),
         }
     }
@@ -79,7 +79,6 @@ impl Kind {
             Self::Grok => &[".grok/bin"],
             Self::OpenCode => &[".opencode/bin"],
             Self::Fx => &[".fx/bin"],
-            Self::Antigravity => &[".local/share/agy-acp"],
             Self::Hermes => &[
                 ".hermes/hermes-agent/venv/bin",
                 ".hermes/hermes-agent/.venv/bin",
@@ -87,6 +86,13 @@ impl Kind {
             ],
             _ => &[],
         }
+    }
+    /// Whether MonoCode may run this model on this harness. Antigravity's ACP
+    /// docs offer third-party models only to the editors they name, and
+    /// MonoCode is not one of them, so it keeps to Google's Gemini models
+    /// even when the server lists others.
+    pub fn allows_model(self, id: &str) -> bool {
+        self != Self::Antigravity || id.starts_with("gemini-")
     }
     /// Harnesses the GPUI app runs that the React app has no adapter for.
     pub fn native_only(self) -> bool {
@@ -109,7 +115,7 @@ impl Kind {
             Self::Cursor => "Cursor CLI",
             Self::Grok => "Grok Build CLI",
             Self::OpenCode => "OpenCode CLI",
-            Self::Antigravity => "Antigravity ACP server (agy_acp_server.par)",
+            Self::Antigravity => "Antigravity CLI",
             Self::Pi => "Pi CLI",
             Self::Omp => "omp CLI",
             Self::Fx => "fx CLI",
@@ -122,6 +128,9 @@ impl Kind {
     fn install_command(self) -> Option<&'static str> {
         match self {
             Self::Grok => Some("curl -fsSL https://x.ai/cli/install.sh | bash"),
+            Self::Antigravity => {
+                Some("curl -fsSL https://antigravity.google/cli/install.sh | bash")
+            }
             Self::Pi => Some("npm i -g @earendil-works/pi-coding-agent"),
             Self::Omp => Some("curl -fsSL https://omp.sh/install | sh"),
             Self::Fx => Some("curl -fsSL https://fx.sh/setup.sh | bash"),
@@ -135,7 +144,7 @@ impl Kind {
             Self::Dsh => Some(
                 "Install the DeepSeek Harness app, then add a DeepSeek API key on its Models page",
             ),
-            Self::Codex | Self::Claude | Self::Cursor | Self::OpenCode | Self::Antigravity => None,
+            Self::Codex | Self::Claude | Self::Cursor | Self::OpenCode => None,
         }
     }
     /// The same "not found" copy React uses. React only checks that a binary
@@ -173,7 +182,7 @@ mod tests {
     fn unavailable_hint_matches_the_react_copy() {
         assert_eq!(
             Kind::Antigravity.unavailable_hint(),
-            "Antigravity ACP server (agy_acp_server.par) not found. Install it, or restart MonoCode if it is already installed."
+            "Antigravity CLI not found (`curl -fsSL https://antigravity.google/cli/install.sh | bash`). Install it, or restart MonoCode if it is already installed."
         );
         assert_eq!(
             Kind::Pi.unavailable_hint(),

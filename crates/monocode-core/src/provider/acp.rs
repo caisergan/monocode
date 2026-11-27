@@ -81,10 +81,9 @@ pub(super) struct State {
 pub(super) fn configure(command: &mut Command, request: &Request) -> Result<(), String> {
     let settings = &request.settings;
     match request.kind {
+        // The ACP server Antigravity documents for editors other than its own.
         Kind::Antigravity => {
-            if cfg!(target_os = "linux") {
-                command.arg("--uid=");
-            }
+            command.arg("acp");
         }
         Kind::Grok => {
             command.arg("--no-auto-update");
@@ -503,13 +502,15 @@ impl Protocol {
         let settings = &self.request.settings;
         let planning = settings.plan || settings.access == AccessMode::ReadOnly;
         let mode = match kind {
+            // `agy acp` has no mode that skips every prompt: full access runs
+            // in auto and approves what it still asks.
             Kind::Antigravity => {
                 if planning {
-                    "default"
+                    "plan"
                 } else {
                     match settings.access {
-                        AccessMode::FullAccess => "yolo",
-                        AccessMode::AutoAcceptEdits => "auto_edit",
+                        AccessMode::FullAccess | AccessMode::Auto => "auto",
+                        AccessMode::AutoAcceptEdits => "accept-edits",
                         _ => "default",
                     }
                 }
@@ -569,7 +570,7 @@ impl Protocol {
             .as_array()
             .cloned()
             .unwrap_or_default();
-        let selected_model = self.request.model.as_ref().map(|model| {
+        let mut selected_model = self.request.model.as_ref().map(|model| {
             if kind == Kind::Devin {
                 let (model, spent) = super::devin::model_value(setup, model, settings);
                 self.acp.spent_effort = spent;
@@ -578,6 +579,28 @@ impl Protocol {
                 model.clone()
             }
         });
+        if kind == Kind::Antigravity {
+            if let Some(model) = selected_model.take_if(|model| !kind.allows_model(model)) {
+                self.acp.notices.push(Event::Status(format!(
+                    "Antigravity offers MonoCode only its Gemini models, so \"{model}\" is not used here."
+                )));
+            }
+            // The session may open on a model picked elsewhere, such as in agy.
+            let option = config.iter().find(|o| config_id(o) == "model");
+            let current = option
+                .and_then(|o| o["currentValue"].as_str())
+                .or_else(|| setup["models"]["currentModelId"].as_str());
+            if selected_model.is_none() && current.is_some_and(|m| !kind.allows_model(m)) {
+                let mut choices = Vec::new();
+                if let Some(option) = option {
+                    config_choices(&option["options"], &mut choices);
+                }
+                selected_model = choices.into_iter().find(|m| kind.allows_model(m));
+                if selected_model.is_none() {
+                    return Err("Antigravity offered no Gemini model for this session.".into());
+                }
+            }
+        }
         if let Some(model) = selected_model
             .as_ref()
             .filter(|model| {
@@ -689,7 +712,10 @@ impl Protocol {
             if matches!(config_id, "provider" | "model" | "mode") || !resolved.insert(config_id) {
                 continue;
             }
-            if matches!(kind, Kind::Devin | Kind::Hermes | Kind::Dsh) {
+            if matches!(
+                kind,
+                Kind::Antigravity | Kind::Devin | Kind::Hermes | Kind::Dsh
+            ) {
                 let mut choices = Vec::new();
                 config_choices(&option["options"], &mut choices);
                 if !choices.is_empty() && !choices.contains(&value) {
@@ -2066,7 +2092,7 @@ mod tests {
             p.acp_session(&mut out).unwrap();
             let new = last(&mut out);
             assert_eq!(new["method"], "session/new");
-            let events = p.frame(json!({"id":new["id"],"result":{"sessionId":"s","models":{"currentModelId":"m"}}}),&mut out).unwrap();
+            let events = p.frame(json!({"id":new["id"],"result":{"sessionId":"s","models":{"currentModelId":"gemini-m"}}}),&mut out).unwrap();
             assert!(events.contains(&Event::SessionId("s".into())));
             loop {
                 let request = last(&mut out);
@@ -2993,6 +3019,72 @@ mod tests {
         let events = p.frame(json!({"id":"permission","method":"session/request_permission","params":{"toolCall":{"kind":"execute"},"options":[{"kind":"allow_once","optionId":"yes"},{"kind":"reject_once","optionId":"no"}]}}),&mut out).unwrap();
         assert!(events.is_empty());
         assert_eq!(last(&mut out)["result"]["outcome"]["optionId"], "no");
+    }
+    #[test]
+    fn antigravity_uses_the_modes_agy_acp_advertises() {
+        // `agy acp` 1.5.18 advertises these modes and a select thinking level.
+        let setup = json!({"modes":{"availableModes":[{"id":"default"},{"id":"accept-edits"},{"id":"auto"},{"id":"plan"}]},
+            "configOptions":[{"id":"thought_level","category":"thought_level","type":"select","currentValue":"high",
+                "options":[{"value":"low"},{"value":"medium"},{"value":"high"},{"value":"xhigh"}]}]});
+        for (access, plan, mode) in [
+            (AccessMode::Supervised, false, "default"),
+            (AccessMode::AutoAcceptEdits, false, "accept-edits"),
+            (AccessMode::Auto, false, "auto"),
+            (AccessMode::FullAccess, false, "auto"),
+            (AccessMode::FullAccess, true, "plan"),
+            (AccessMode::ReadOnly, false, "plan"),
+        ] {
+            let mut p = protocol(Kind::Antigravity);
+            p.request.settings.access = access;
+            p.request.settings.plan = plan;
+            p.acp_options(&setup).unwrap();
+            assert_eq!(p.acp.mode, Some(mode), "{access:?} plan={plan}");
+        }
+        let mut p = protocol(Kind::Antigravity);
+        p.acp.session = "s".into();
+        p.request.settings.effort = Some("max".into());
+        p.acp_settings(&setup);
+        let set = p
+            .acp
+            .options
+            .iter()
+            .find(|(_, params)| params["configId"] == "thought_level");
+        assert_eq!(set.unwrap().1["value"], "xhigh");
+    }
+    #[test]
+    fn antigravity_runs_only_gemini_models() {
+        let setup = |current: &str| {
+            json!({"configOptions":[{"id":"model","category":"model","type":"select","currentValue":current,
+                "options":[{"value":"claude-opus-5-5"},{"value":"gemini-4-neon"},{"value":"gpt-oss-120b-medium"}]}]})
+        };
+        let model_set = |p: &Protocol| {
+            p.acp
+                .options
+                .iter()
+                .find(|(_, params)| params["configId"] == "model")
+                .map(|(_, params)| params["value"].as_str().unwrap().to_owned())
+        };
+        // A requested third-party model is refused with a notice.
+        let mut p = protocol(Kind::Antigravity);
+        p.request.model = Some("claude-opus-5-5".into());
+        p.acp_options(&setup("gemini-4-neon")).unwrap();
+        assert_eq!(model_set(&p), None);
+        assert!(
+            p.acp
+                .notices
+                .iter()
+                .any(|e| matches!(e, Event::Status(s) if s.contains("only its Gemini models")))
+        );
+        // A session opening on a third-party model is moved to Gemini.
+        let mut p = protocol(Kind::Antigravity);
+        p.acp_options(&setup("claude-opus-5-5")).unwrap();
+        assert_eq!(model_set(&p).as_deref(), Some("gemini-4-neon"));
+        // A Gemini model runs as asked.
+        let mut p = protocol(Kind::Antigravity);
+        p.request.model = Some("gemini-4-neon".into());
+        p.acp_options(&setup("claude-opus-5-5")).unwrap();
+        assert_eq!(model_set(&p).as_deref(), Some("gemini-4-neon"));
+        assert!(Kind::Claude.allows_model("claude-opus-5-5"));
     }
     #[test]
     fn sparse_permission_requests_keep_the_tool_preview() {
