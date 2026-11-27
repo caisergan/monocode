@@ -446,9 +446,12 @@ pub fn pr_create(
     let body_path = std::env::temp_dir().join(format!("monocode-pr-{stamp}.md"));
     std::fs::write(&body_path, body.trim()).map_err(|e| e.to_string())?;
     let body_file = body_path.to_string_lossy();
+    let repo = github_repo_for(&root)?;
     let mut args = vec![
         "pr",
         "create",
+        "--repo",
+        &repo,
         "--title",
         title,
         "--body-file",
@@ -1064,6 +1067,8 @@ fn pr_status_for(root: &Path) -> Option<Pr> {
         &[
             "pr",
             "list",
+            "--repo",
+            &repo,
             "--head",
             &head,
             "--json",
@@ -1083,7 +1088,15 @@ fn github_pr_head_filter(repo: &str, branch: &str) -> Option<String> {
     Some(format!("{owner}:{branch}"))
 }
 
+/// The repository this working copy pushes to. `origin` decides when it is on
+/// GitHub: in a fork that is the user's own copy, where `gh` alone would pick
+/// the parent named by `upstream` and act on the wrong pull requests.
 fn github_repo_for(root: &Path) -> Result<String, String> {
+    if let Some(slug) = git_stdout(root, &["remote", "get-url", "origin"])
+        .and_then(|url| pull_requests::slug_from_remote(&url))
+    {
+        return Ok(slug);
+    }
     let json = gh_run(root, &["repo", "view", "--json", "nameWithOwner"])?;
     #[derive(Deserialize)]
     struct View {
