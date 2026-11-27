@@ -46,7 +46,7 @@ impl Conversation {
         if self.summary.provider == "claude"
             && !self.busy
             && !self.stopping
-            && let Some(state) = prompt_cache::state(turns)
+            && let Some(state) = prompt_cache::state(turns, &self.summary.provider)
         {
             lines.push(cache_lifetime(&state, monocode_core::time::now_ms()));
         }
@@ -180,6 +180,7 @@ mod tests {
             ttl_ms: 300_000,
             last_used_at: 0,
             expires_at: 300_000,
+            estimated: false,
         };
         assert_eq!(cache_lifetime(&state, 0), "Cache expires in 4m");
         assert_eq!(
