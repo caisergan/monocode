@@ -1151,6 +1151,7 @@ impl Conversation {
                 monocode_core::context::format_tokens(usage.window.unwrap_or(0))
             )
         });
+        let cache = self.context_cache_status(cx);
         div()
             .min_w_0()
             .flex()
@@ -1228,10 +1229,14 @@ impl Conversation {
                             .debug_selector(|| "mono-context-meter".into())
                             .role(Role::Image)
                             .aria_label(format!(
-                                "{headline}{}",
+                                "{headline}{}{}",
                                 detail
                                     .as_ref()
                                     .map(|s| format!(", {s}"))
+                                    .unwrap_or_default(),
+                                cache
+                                    .as_ref()
+                                    .map(|c| format!(". {}", c.aria()))
                                     .unwrap_or_default()
                             ))
                             .flex_shrink_0()
@@ -1272,7 +1277,8 @@ impl Conversation {
                                                         .text_color(content(0.5))
                                                         .child(detail),
                                                 )
-                                            }),
+                                            })
+                                            .children(cache.map(|c| c.render())),
                                     ),
                                 )
                             }),
