@@ -663,3 +663,33 @@ fn app_launch_submission_uses_the_saved_message_identity(cx: &mut TestAppContext
         })
         .unwrap();
 }
+
+#[test]
+fn models_list_describes_only_the_harnesses_enabled_in_settings() {
+    let mut prefs = crate::settings::Preferences {
+        hidden_providers: vec!["codex".into(), "opencode".into()],
+        ..Default::default()
+    };
+    prefs
+        .project_providers
+        .entry("/work/project".into())
+        .or_default()
+        .hidden = vec!["omp".into()];
+    let ids = |project: &str| -> Vec<&'static str> {
+        enabled_harnesses(&prefs, project)
+            .into_iter()
+            .map(|kind| kind.id())
+            .collect()
+    };
+    let here = ids("/work/project");
+    assert_eq!(here.first(), Some(&"claude"));
+    for hidden in ["codex", "opencode", "omp"] {
+        assert!(!here.contains(&hidden), "{hidden} is turned off");
+    }
+    let elsewhere = ids("/work/other");
+    assert!(elsewhere.contains(&"omp") && !elsewhere.contains(&"codex"));
+    assert_eq!(
+        enabled_harnesses(&Default::default(), "/work/project").len(),
+        Kind::ALL.len()
+    );
+}
