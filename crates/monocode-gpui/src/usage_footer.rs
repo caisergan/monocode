@@ -670,7 +670,7 @@ impl UsageFooter {
         }
         cx.notify();
     }
-    /// A model group's name, the models it covers, and its limits.
+    /// A model group's name and its limits.
     fn group_section(&self, group: &usage::WindowGroup, later: bool, now: i64) -> gpui::Div {
         div()
             .flex()
@@ -680,19 +680,9 @@ impl UsageFooter {
             .child(
                 div()
                     .px_1()
-                    .child(
-                        div()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(content(0.65))
-                            .child(group.name.clone()),
-                    )
-                    .children(group.models.clone().map(|models| {
-                        div()
-                            .text_size(px(10.))
-                            .line_height(px(14.))
-                            .text_color(content(0.4))
-                            .child(models)
-                    })),
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(content(0.65))
+                    .child(group.name.clone()),
             )
             .children(group.windows.iter().map(|w| self.window_card(w, now)))
     }
