@@ -454,23 +454,16 @@ impl QuickComposer {
                 .unwrap_or_default();
             monocode_core::catalog::cached_models_for(self.kind, &account)
         }?;
-        match self.model.as_deref() {
-            Some(id) => rows
-                .iter()
-                .find(|m| m.id == id || m.alias_target.as_deref() == Some(id))
-                .cloned(),
-            None => rows
-                .iter()
-                .find(|m| m.default)
-                .or_else(|| rows.first())
-                .cloned(),
-        }
+        monocode_core::catalog::selected_model(&rows, self.model.as_deref()).cloned()
     }
+    /// The effort the picked model runs at, or the remembered one before its
+    /// catalog is known.
     fn resolved_effort(&self, cx: &App) -> Option<String> {
         let Some(model) = self.selected_catalog_model(cx) else {
             return self.effort.clone();
         };
-        resolve_effort_for_model(self.kind, self.effort.as_deref(), &model)
+        let effort = self.effort.as_deref()?;
+        monocode_core::catalog::model_effort(self.kind, effort, &model).map(str::to_owned)
     }
     fn launch(&mut self, foreground: bool, cx: &mut Context<Self>) {
         if self.picker == Some(Picker::Commands) {
@@ -1695,15 +1688,18 @@ impl QuickComposer {
             return None;
         }
         let count = model.efforts.len();
-        let selected = resolve_effort_for_model(self.kind, self.effort.as_deref(), &model)
-            .filter(|e| model.efforts.contains(e))
+        let selected = self
+            .effort
+            .as_deref()
+            .and_then(|effort| monocode_core::catalog::model_effort(self.kind, effort, &model))
             .or_else(|| {
                 model
                     .default_effort
-                    .clone()
-                    .filter(|e| model.efforts.contains(e))
+                    .as_deref()
+                    .filter(|e| model.efforts.iter().any(|level| level == e))
             })
-            .unwrap_or_else(|| model.efforts[0].clone());
+            .unwrap_or(&model.efforts[0])
+            .to_owned();
         let index = model
             .efforts
             .iter()
@@ -2196,24 +2192,6 @@ impl Render for QuickComposer {
     }
 }
 
-fn resolve_effort_for_model(
-    kind: Kind,
-    effort: Option<&str>,
-    model: &monocode_core::catalog::Model,
-) -> Option<String> {
-    if model.efforts.is_empty() {
-        return None;
-    }
-    let effort = effort?;
-    if let Some(matched) = model.efforts.iter().find(|e| e.as_str() == effort) {
-        return Some(matched.clone());
-    }
-    if kind == Kind::Hermes {
-        return None;
-    }
-    monocode_core::catalog::nearest_effort(effort, &model.efforts).map(str::to_owned)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2321,40 +2299,5 @@ mod tests {
         assert_eq!(launch.worktree_cwd, None);
         assert!(launch.foreground);
         assert_eq!(launch.access, AccessMode::FullAccess);
-    }
-
-    #[test]
-    fn effort_resolution_matches_each_models_supported_levels() {
-        let model = |id: &str, efforts: &[&str]| monocode_core::catalog::Model {
-            alias_target: None,
-            id: id.into(),
-            name: id.into(),
-            efforts: efforts.iter().map(|e| (*e).to_owned()).collect(),
-            default_effort: efforts.first().map(|e| (*e).to_owned()),
-            fast: false,
-            thinking: false,
-            default: false,
-            tiers: Vec::new(),
-            controls: Vec::new(),
-        };
-        let neon = model("gemini-4-neon", &["low", "medium", "high", "xhigh"]);
-        let carbon = model("gemini-4-carbon", &["low", "medium", "high"]);
-        let orchestrator = model("gemini-pro-orchestrator-neon", &[]);
-        assert_eq!(
-            resolve_effort_for_model(Kind::Antigravity, Some("xhigh"), &neon).as_deref(),
-            Some("xhigh")
-        );
-        assert_eq!(
-            resolve_effort_for_model(Kind::Antigravity, Some("xhigh"), &carbon).as_deref(),
-            Some("high")
-        );
-        assert_eq!(
-            resolve_effort_for_model(Kind::Antigravity, Some("xhigh"), &orchestrator),
-            None
-        );
-        assert_eq!(
-            resolve_effort_for_model(Kind::Hermes, Some("xhigh"), &carbon),
-            None
-        );
     }
 }

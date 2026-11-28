@@ -195,10 +195,7 @@ impl Conversation {
     /// The model sheet's settings as the phone names them.
     pub(crate) fn mobile_model_settings(&self) -> std::collections::HashMap<String, String> {
         let mut values = self.settings.model_settings.clone();
-        let keeps_effort_control = self
-            .model_info()
-            .is_some_and(|model| model.controls.iter().any(|c| catalog::is_effort_key(&c.id)));
-        if !keeps_effort_control {
+        if !self.model_info().is_some_and(catalog::has_effort_control) {
             values.retain(|key, _| !catalog::is_effort_key(key));
         }
         if let Some(effort) = self.effective_saved_effort() {

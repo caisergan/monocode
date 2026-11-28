@@ -270,7 +270,7 @@ const EFFORT_ORDER = [
   "ultra",
 ] as const;
 
-const EFFORT_LABELS: Record<string, string> = {
+const EFFORT_LABELS: Record<(typeof EFFORT_ORDER)[number], string> = {
   none: "None",
   minimal: "Minimal",
   low: "Low",
@@ -326,16 +326,15 @@ export function modelsFromSessionNew(raw: unknown): AgentModel[] {
   const choices = configChoices(modelOption?.options);
   const settings: ModelSetting[] = [];
   let sessionThoughtCurrent = "";
-  const thoughtLabels = new Map<string, string>();
   for (const item of options) {
     const option = asRecord(item);
     if (option?.category !== "thought_level") continue;
     sessionThoughtCurrent = String(option.currentValue ?? "");
-    const values = configChoices(option.options).map((choice) => {
-      const label = choice.value === "xhigh" ? "Extra High" : choice.label;
-      thoughtLabels.set(choice.value, label);
-      return { value: choice.value, label };
-    });
+    // agy calls xhigh "Extra"; every other surface says "Extra High".
+    const values = configChoices(option.options).map((choice) => ({
+      value: choice.value,
+      label: EFFORT_LABELS[choice.value as keyof typeof EFFORT_LABELS] ?? choice.label,
+    }));
     if (values.length < 2) continue;
     settings.push({
       id: "effort",
@@ -385,10 +384,8 @@ export function modelsFromSessionNew(raw: unknown): AgentModel[] {
       if (variants.length >= 2) {
         const ordered = EFFORT_ORDER.filter((level) => variants.includes(level));
         const current =
-          sessionThoughtCurrent && ordered.includes(sessionThoughtCurrent as (typeof EFFORT_ORDER)[number])
-            ? sessionThoughtCurrent
-            : (sessionThoughtCurrent && nearestAntigravityEffort(sessionThoughtCurrent, [...ordered])) ||
-              variants[0];
+          (sessionThoughtCurrent && nearestAntigravityEffort(sessionThoughtCurrent, ordered)) ||
+          variants[0];
         modelSettings = [{
           id: "effort",
           label: "Effort",
@@ -396,7 +393,7 @@ export function modelsFromSessionNew(raw: unknown): AgentModel[] {
           value: current,
           options: ordered.map((level) => ({
             value: level,
-            label: EFFORT_LABELS[level] ?? thoughtLabels.get(level) ?? level,
+            label: EFFORT_LABELS[level],
           })),
         }];
       } else if (exact || variants.length === 1) {

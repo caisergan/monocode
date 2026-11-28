@@ -2403,34 +2403,26 @@ fn normalize_mobile_effort(
     rows: &[monocode_core::catalog::Model],
     settings: &mut HashMap<String, String>,
 ) {
-    let active = match model_id {
-        Some(id) => rows
-            .iter()
-            .find(|m| m.id == id || m.alias_target.as_deref() == Some(id)),
-        None => rows.iter().find(|m| m.default).or_else(|| rows.first()),
-    };
-    let Some(model) = active else {
+    use monocode_core::catalog;
+    let Some(model) = catalog::selected_model(rows, model_id) else {
         return;
     };
     if model.efforts.is_empty() {
-        if !model
-            .controls
-            .iter()
-            .any(|c| monocode_core::catalog::is_effort_key(&c.id))
-        {
-            settings.retain(|key, _| !monocode_core::catalog::is_effort_key(key));
+        if !catalog::has_effort_control(model) {
+            settings.retain(|key, _| !catalog::is_effort_key(key));
         }
         return;
     }
-    if let Some(effort) = settings.get("effort").cloned()
-        && !model.efforts.iter().any(|e| e == &effort)
-    {
-        settings.retain(|key, _| !monocode_core::catalog::is_effort_key(key));
-        if kind != Kind::Hermes
-            && let Some(nearest) = monocode_core::catalog::nearest_effort(&effort, &model.efforts)
-        {
-            settings.insert("effort".into(), nearest.to_owned());
-        }
+    let Some(effort) = settings.get("effort") else {
+        return;
+    };
+    if model.efforts.contains(effort) {
+        return;
+    }
+    let nearest = catalog::model_effort(kind, effort, model).map(str::to_owned);
+    settings.retain(|key, _| !catalog::is_effort_key(key));
+    if let Some(nearest) = nearest {
+        settings.insert("effort".into(), nearest);
     }
 }
 
@@ -2723,7 +2715,12 @@ mod tests {
             ("thought_level".into(), "low".into()),
         ]
         .into();
-        normalize_mobile_effort(Kind::Antigravity, Some("gemini-4-carbon"), &rows, &mut settings);
+        normalize_mobile_effort(
+            Kind::Antigravity,
+            Some("gemini-4-carbon"),
+            &rows,
+            &mut settings,
+        );
         assert_eq!(settings.get("effort").map(String::as_str), Some("high"));
         assert!(!settings.contains_key("thought_level"));
 

@@ -879,6 +879,27 @@ describe.each(providers)("$id offline ACP transport", (provider) => {
     expect(set?.params).toMatchObject({ configId: "thought_level", value: "high" });
   });
 
+  it("sends a non-effort value the model does not list so agy can report it", async () => {
+    mock.setupConfigOptions = [
+      { id: "model", category: "model", currentValue: "gemini-4-carbon", options: [
+        { value: "gemini-4-carbon", name: "Gemini 4 Carbon" },
+      ] },
+      { id: "context", currentValue: "200k", options: [
+        { value: "200k", name: "200K" },
+      ] },
+    ];
+    mock.autoPrompt = true;
+    await provider.send({
+      ...input,
+      model: `${provider.id}:gemini-4-carbon`,
+      modelSettings: { context: "1m" },
+    });
+    const set = mock.sent.find(
+      (m) => m.method === "session/set_config_option" && m.params?.configId === "context",
+    );
+    expect(set?.params).toMatchObject({ configId: "context", value: "1m" });
+  });
+
   it("prioritizes canonical effort over stale aliases and skips model/mode overrides", async () => {
     mock.setupConfigOptions = [
       { id: "model", category: "model", currentValue: "gemini-4-carbon", options: [

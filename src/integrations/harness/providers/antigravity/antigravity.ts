@@ -686,17 +686,16 @@ async function setConfigOption(
   }
   const boolValue = value === true || value === "true";
   let resolvedValue: string | boolean = isBool ? boolValue : String(value);
+  // A level this model lacks (agy rejects xhigh on Carbon with -32602) runs at
+  // the nearest one it offers. Other values go as asked, so agy reports them.
+  const isEffort =
+    current.category === "thought_level" || isAntigravityEffortKey(configId);
   if (
     !isBool &&
-    configId !== live.modelConfigId &&
-    current.category !== "model" &&
-    current.choices &&
-    current.choices.length > 0 &&
+    isEffort &&
+    current.choices?.length &&
     !current.choices.includes(String(resolvedValue))
   ) {
-    const isEffort =
-      current.category === "thought_level" || isAntigravityEffortKey(configId);
-    if (!isEffort) return;
     const nearest = nearestAntigravityEffort(String(resolvedValue), current.choices);
     if (!nearest) return;
     resolvedValue = nearest;

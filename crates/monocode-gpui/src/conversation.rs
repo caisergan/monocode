@@ -1211,15 +1211,12 @@ impl Conversation {
         self.turn_sender = settings.message_sender.clone();
         settings.master = self.master;
         if let Some(model) = self.model_info() {
-            let keeps_effort_control = model.controls.iter().any(|c| catalog::is_effort_key(&c.id));
-            if model.efforts.is_empty() {
-                if !keeps_effort_control {
-                    settings.effort = None;
-                    settings
-                        .model_settings
-                        .retain(|key, _| !catalog::is_effort_key(key));
-                }
-            } else if settings.effort.is_some() {
+            // Send the level this model runs at, without stale aliases. A
+            // model without levels gets none, unless a control of its own sets it.
+            let has_levels = !model.efforts.is_empty();
+            if (has_levels && settings.effort.is_some())
+                || (!has_levels && !catalog::has_effort_control(model))
+            {
                 settings
                     .model_settings
                     .retain(|key, _| !catalog::is_effort_key(key));
@@ -1436,31 +1433,16 @@ impl Conversation {
                         }
                         if let Some(model) = update.model {
                             turn_model_id = Some(model.clone());
-                            let name: SharedString = this
+                            let kind = Kind::from_id(&source_provider);
+                            let name = this
                                 .catalog
                                 .iter()
                                 .find(|entry| source_selected && entry.id == model)
-                                .map(|entry| {
-                                    let name = model_display_name(
-                                        Kind::from_id(&source_provider),
-                                        &entry.id,
-                                        &entry.name,
-                                    );
-                                    name.strip_prefix("Claude ")
-                                        .unwrap_or(&name)
-                                        .to_owned()
-                                        .into()
-                                })
-                                .unwrap_or_else(|| {
-                                    let kind = Kind::from_id(&source_provider);
-                                    let name = cached_model_name(kind, Some(&model));
-                                    if kind == Kind::Claude {
-                                        name.strip_prefix("Claude ")
-                                            .map_or(name.clone(), |short| short.to_owned().into())
-                                    } else {
-                                        name
-                                    }
-                                });
+                                .map(|entry| model_display_name(kind, &entry.id, &entry.name))
+                                .unwrap_or_else(|| cached_model_name(kind, Some(&model)));
+                            let name: SharedString = name
+                                .strip_prefix("Claude ")
+                                .map_or(name.clone(), |short| short.to_owned().into());
                             if source_selected {
                                 this.resolved_model = Some(model);
                             }
@@ -2226,47 +2208,24 @@ impl Conversation {
             return Some(effort);
         };
         if model.efforts.is_empty() {
-            return model
-                .controls
-                .iter()
-                .any(|c| catalog::is_effort_key(&c.id))
-                .then_some(effort);
+            return catalog::has_effort_control(model).then_some(effort);
         }
-        if let Some(matched) = model.efforts.iter().find(|e| e.as_str() == effort) {
-            return Some(matched.as_str());
-        }
-        if Kind::from_id(&self.summary.provider) == Kind::Hermes {
-            return None;
-        }
-        catalog::nearest_effort(effort, &model.efforts)
+        catalog::model_effort(Kind::from_id(&self.summary.provider), effort, model)
     }
     fn selected_effort(&self) -> Option<&str> {
-        let raw = self.settings.effort.as_deref().or_else(|| {
-            [
-                "effort",
-                "reasoning",
-                "reasoningEffort",
-                "reasoning_effort",
-                "thought_level",
-                "thinking_level",
-                "variant",
-            ]
-            .into_iter()
-            .find_map(|key| self.settings.model_settings.get(key).map(String::as_str))
-        });
+        let raw = self
+            .settings
+            .effort
+            .as_deref()
+            .or_else(|| catalog::saved_effort(&self.settings.model_settings));
         if let Some(model) = self.model_info() {
             if model.efforts.is_empty() {
                 return None;
             }
-            if let Some(effort) = raw {
-                if let Some(matched) = model.efforts.iter().find(|e| e.as_str() == effort) {
-                    return Some(matched.as_str());
-                }
-                if Kind::from_id(&self.summary.provider) != Kind::Hermes
-                    && let Some(nearest) = catalog::nearest_effort(effort, &model.efforts)
-                {
-                    return Some(nearest);
-                }
+            if let Some(effort) = raw.and_then(|effort| {
+                catalog::model_effort(Kind::from_id(&self.summary.provider), effort, model)
+            }) {
+                return Some(effort);
             }
             return model
                 .default_effort

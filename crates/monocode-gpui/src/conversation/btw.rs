@@ -187,17 +187,8 @@ impl Btw {
                         id: accounts.selected(kind, &thread.cwd),
                         root: root.clone(),
                     };
-                    let effort = [
-                        "effort",
-                        "reasoning",
-                        "reasoningEffort",
-                        "reasoning_effort",
-                        "thought_level",
-                        "thinking_level",
-                        "variant",
-                    ]
-                    .into_iter()
-                    .find_map(|key| thread.model_settings.get(key).cloned());
+                    let effort = monocode_core::catalog::saved_effort(&thread.model_settings)
+                        .map(str::to_owned);
                     Thread {
                         id: thread.id,
                         source_turn: thread.source_turn,

@@ -23,17 +23,67 @@ pub const EFFORT_ORDER: [&str; 8] = [
     "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
 ];
 
+/// The model-setting keys providers use for the effort level, in the order a
+/// saved level is looked up.
+pub const EFFORT_KEYS: [&str; 6] = [
+    "effort",
+    "reasoningEffort",
+    "reasoning",
+    "reasoning_effort",
+    "thought_level",
+    "thinking_level",
+];
+
 /// Whether a model-setting key names a reasoning/effort control across providers.
 pub fn is_effort_key(key: &str) -> bool {
-    matches!(
-        key.trim().to_ascii_lowercase().as_str(),
-        "effort"
-            | "reasoning"
-            | "reasoningeffort"
-            | "reasoning_effort"
-            | "thought_level"
-            | "thinking_level"
-    )
+    let key = key.trim();
+    EFFORT_KEYS
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(key))
+}
+
+/// The effort level saved in `settings` under any provider's key. OpenCode
+/// keeps it as its `variant`.
+pub fn saved_effort(settings: &std::collections::HashMap<String, String>) -> Option<&str> {
+    EFFORT_KEYS
+        .iter()
+        .chain(&["variant"])
+        .find_map(|key| settings.get(*key).map(String::as_str))
+}
+
+/// The level of `model` a saved `effort` runs at: the same level, or the
+/// nearest one the model offers. Hermes fails a turn whose level its model
+/// lacks, so it gets none then. `None` too for a model without levels.
+pub fn model_effort<'a>(kind: Kind, effort: &str, model: &'a Model) -> Option<&'a str> {
+    if kind == Kind::Hermes {
+        let effort = effort.trim();
+        return model
+            .efforts
+            .iter()
+            .find(|level| level.eq_ignore_ascii_case(effort))
+            .map(String::as_str);
+    }
+    nearest_effort(effort, &model.efforts)
+}
+
+/// Whether `model` sets its effort through one of its own controls instead of
+/// a level list.
+pub fn has_effort_control(model: &Model) -> bool {
+    model
+        .controls
+        .iter()
+        .any(|control| is_effort_key(&control.id))
+}
+
+/// The row of `rows` a session's model `id` names, by its own ID or the
+/// concrete model behind an alias; with no model, the default row.
+pub fn selected_model<'a>(rows: &'a [Model], id: Option<&str>) -> Option<&'a Model> {
+    match id {
+        Some(id) => rows
+            .iter()
+            .find(|m| m.id == id || m.alias_target.as_deref() == Some(id)),
+        None => rows.iter().find(|m| m.default).or_else(|| rows.first()),
+    }
 }
 
 /// Match `value` directly (case-insensitively) or snap to the closest offered
@@ -313,11 +363,15 @@ fn migrate_saved_catalogs(mut saved: SavedCatalogs) -> SavedCatalogs {
         saved
             .local
             .retain(|entry| Kind::parse(&entry.provider) != Some(Kind::Antigravity));
-        for entry in &mut saved.remote {
-            entry
+        // A saved host catalog counts as loaded for every provider it lists,
+        // so dropping only its Antigravity models would leave an empty tab.
+        // Drop the whole catalog and let the picker ask the host again.
+        saved.remote.retain(|entry| {
+            !entry
                 .models
-                .retain(|id, _| Kind::parse(id) != Some(Kind::Antigravity));
-        }
+                .keys()
+                .any(|id| Kind::parse(id) == Some(Kind::Antigravity))
+        });
     }
     saved
 }
@@ -684,8 +738,7 @@ fn acp_models(value: &Value) -> Vec<Model> {
     let effort = configs.iter().find(|o| {
         o["id"] != "thinking"
             && o["type"] != "boolean"
-            && (o["category"] == "thought_level"
-                || o["id"].as_str().is_some_and(is_effort_key))
+            && (o["category"] == "thought_level" || o["id"].as_str().is_some_and(is_effort_key))
     });
     let mut choices = Vec::new();
     if let Some(effort) = effort {
@@ -853,12 +906,10 @@ fn narrow_antigravity_efforts(models: &mut [Model], value: &Value) {
         .find(|o| {
             o["id"] != "thinking"
                 && o["type"] != "boolean"
-                && (o["category"] == "thought_level"
-                    || o["id"].as_str().is_some_and(is_effort_key))
+                && (o["category"] == "thought_level" || o["id"].as_str().is_some_and(is_effort_key))
         })
         .and_then(|o| o["currentValue"].as_str());
-    let base_ids: std::collections::HashSet<String> =
-        models.iter().map(|m| m.id.clone()).collect();
+    let base_ids: std::collections::HashSet<String> = models.iter().map(|m| m.id.clone()).collect();
     for model in models {
         let mut variants = Vec::new();
         let mut exact = false;
@@ -1411,6 +1462,40 @@ mod tests {
     }
 
     #[test]
+    fn a_saved_effort_runs_at_a_level_the_model_offers() {
+        let with = |efforts: &[&str]| Model {
+            efforts: efforts.iter().map(|e| (*e).to_owned()).collect(),
+            ..model("m", "M")
+        };
+        let neon = with(&["low", "medium", "high", "xhigh"]);
+        let carbon = with(&["low", "medium", "high"]);
+        let orchestrator = with(&[]);
+        assert_eq!(
+            model_effort(Kind::Antigravity, "xhigh", &neon),
+            Some("xhigh")
+        );
+        assert_eq!(
+            model_effort(Kind::Antigravity, "xhigh", &carbon),
+            Some("high")
+        );
+        assert_eq!(
+            model_effort(Kind::Antigravity, "xhigh", &orchestrator),
+            None
+        );
+        assert_eq!(model_effort(Kind::Hermes, "xhigh", &carbon), None);
+        assert_eq!(model_effort(Kind::Hermes, "high", &carbon), Some("high"));
+
+        let settings: std::collections::HashMap<String, String> =
+            [("thought_level".into(), "low".into())].into();
+        assert_eq!(saved_effort(&settings), Some("low"));
+        let settings: std::collections::HashMap<String, String> =
+            [("variant".into(), "max".into())].into();
+        assert_eq!(saved_effort(&settings), Some("max"));
+        assert!(is_effort_key(" ReasoningEffort "));
+        assert!(!is_effort_key("variant"));
+    }
+
+    #[test]
     fn saved_catalog_migration_drops_legacy_antigravity_entries_only() {
         let legacy = SavedCatalogs {
             version: 0,
@@ -1426,24 +1511,33 @@ mod tests {
                     models: vec![model("gpt-5", "GPT-5")],
                 },
             ],
-            remote: vec![SavedRemote {
-                project: "remote://host/work".into(),
-                providers: vec!["antigravity".into(), "codex".into()],
-                models: [
-                    (
-                        "antigravity".into(),
-                        vec![model("gemini-4-carbon", "Carbon")],
-                    ),
-                    ("codex".into(), vec![model("gpt-5", "GPT-5")]),
-                ]
-                .into(),
-            }],
+            remote: vec![
+                SavedRemote {
+                    project: "remote://host/work".into(),
+                    providers: vec!["antigravity".into(), "codex".into()],
+                    models: [
+                        (
+                            "antigravity".into(),
+                            vec![model("gemini-4-carbon", "Carbon")],
+                        ),
+                        ("codex".into(), vec![model("gpt-5", "GPT-5")]),
+                    ]
+                    .into(),
+                },
+                SavedRemote {
+                    project: "remote://host/other".into(),
+                    providers: vec!["codex".into()],
+                    models: [("codex".into(), vec![model("gpt-5", "GPT-5")])].into(),
+                },
+            ],
         };
         let migrated = migrate_saved_catalogs(legacy);
         assert_eq!(migrated.local.len(), 1);
         assert_eq!(migrated.local[0].provider, "codex");
-        assert!(!migrated.remote[0].models.contains_key("antigravity"));
-        assert!(migrated.remote[0].models.contains_key("codex"));
+        // A host catalog with Antigravity goes whole, so the picker fetches it
+        // again instead of listing an Antigravity tab without models.
+        assert_eq!(migrated.remote.len(), 1);
+        assert_eq!(migrated.remote[0].project, "remote://host/other");
 
         let current = SavedCatalogs {
             version: SAVED_CATALOG_VERSION,

@@ -162,17 +162,7 @@ fn import_sessions(
             serde_json::from_str(&model_settings).map_err(invalid)?;
         let mut settings = Settings {
             model: native_model(&session.get::<_, String>(3)?, &provider),
-            effort: [
-                "effort",
-                "reasoning",
-                "reasoningEffort",
-                "reasoning_effort",
-                "thought_level",
-                "thinking_level",
-                "variant",
-            ]
-            .into_iter()
-            .find_map(|key| model_settings.get(key).cloned()),
+            effort: crate::catalog::saved_effort(&model_settings).map(str::to_owned),
             access: crate::agent::AccessMode::from_id(&session.get::<_, String>(5)?),
             fast: model_settings.get("fast").is_some_and(|v| v == "true"),
             service_tier: model_settings.get("serviceTier").cloned(),

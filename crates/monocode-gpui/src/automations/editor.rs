@@ -1212,51 +1212,25 @@ fn control_label(
     draft: &AutomationUpsert,
 ) -> String {
     let raw = control_value(control, draft);
-    let value: &str = if monocode_core::catalog::is_effort_key(&control.id)
-        && !control.choices.iter().any(|(v, _)| v == raw)
-    {
-        let values: Vec<String> = control.choices.iter().map(|(v, _)| v.clone()).collect();
-        monocode_core::catalog::nearest_effort(raw, &values)
-            .and_then(|matched| {
-                control
-                    .choices
-                    .iter()
-                    .find(|(v, _)| v == matched)
-                    .map(|(v, _)| v.as_str())
-            })
-            .unwrap_or(raw.as_str())
-    } else {
-        raw.as_str()
-    };
-    let label = control
-        .choices
-        .iter()
-        .find(|(v, _)| v == value)
-        .map(|(_, l)| l.as_str())
-        .unwrap_or(value);
-    match label {
-        "low" => "Low".into(),
-        "medium" => "Medium".into(),
-        "high" => "High".into(),
-        "xhigh" => "Extra high".into(),
-        "minimal" => "Minimal".into(),
-        "none" => "None".into(),
-        _ => label.to_owned(),
-    }
+    let choice = |value: &str| control.choices.iter().find(|(v, _)| v == value);
+    let label = choice(raw.as_str())
+        .or_else(|| {
+            // A level the picked model lacks runs at its nearest one.
+            if !monocode_core::catalog::is_effort_key(&control.id) {
+                return None;
+            }
+            let values: Vec<String> = control.choices.iter().map(|(v, _)| v.clone()).collect();
+            monocode_core::catalog::nearest_effort(raw, &values).and_then(choice)
+        })
+        .map_or(raw.as_str(), |(_, label)| label.as_str());
+    crate::conversation::effort_name(label)
 }
 fn control_value<'a>(
     control: &'a monocode_core::catalog::ModelControl,
     draft: &'a AutomationUpsert,
 ) -> &'a String {
     let aliases: &[&str] = if monocode_core::catalog::is_effort_key(&control.id) {
-        &[
-            "reasoningEffort",
-            "reasoning_effort",
-            "effort",
-            "reasoning",
-            "thought_level",
-            "thinking_level",
-        ]
+        &monocode_core::catalog::EFFORT_KEYS
     } else if matches!(control.id.as_str(), "serviceTier" | "service_tier") {
         &["serviceTier", "service_tier"]
     } else {
