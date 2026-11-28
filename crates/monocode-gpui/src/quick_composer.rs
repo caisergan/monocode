@@ -436,6 +436,35 @@ impl QuickComposer {
             && !matches!(self.picker, Some(Picker::Workspace | Picker::Branch))
             && (self.attachments_supported() || self.attachments.is_empty())
     }
+    fn selected_catalog_model(&self, cx: &App) -> Option<monocode_core::catalog::Model> {
+        if let Some(model) = self.models.as_ref().and_then(|models| {
+            models
+                .read(cx)
+                .catalog_model(self.kind, self.model.as_deref())
+                .cloned()
+        }) {
+            return Some(model);
+        }
+        let rows = if monocode_core::remote::parse_remote_path(&self.cwd).is_some() {
+            monocode_core::catalog::cached_remote_catalog(&self.cwd)
+                .and_then(|catalog| catalog.models.get(&self.kind).cloned())
+        } else {
+            let account = crate::accounts::get(cx)
+                .map(|center| center.read(cx).selected(self.kind, &self.cwd))
+                .unwrap_or_default();
+            monocode_core::catalog::cached_models_for(self.kind, &account)
+        }?;
+        monocode_core::catalog::selected_model(&rows, self.model.as_deref()).cloned()
+    }
+    /// The effort the picked model runs at, or the remembered one before its
+    /// catalog is known.
+    fn resolved_effort(&self, cx: &App) -> Option<String> {
+        let Some(model) = self.selected_catalog_model(cx) else {
+            return self.effort.clone();
+        };
+        let effort = self.effort.as_deref()?;
+        monocode_core::catalog::model_effort(self.kind, effort, &model).map(str::to_owned)
+    }
     fn launch(&mut self, foreground: bool, cx: &mut Context<Self>) {
         if self.picker == Some(Picker::Commands) {
             self.choose_command(self.highlight, cx);
@@ -455,7 +484,7 @@ impl QuickComposer {
             cwd: self.cwd.clone(),
             kind: self.kind,
             model: self.model.clone(),
-            effort: self.effort.clone(),
+            effort: self.resolved_effort(cx),
             fast: self.fast,
             access: self.access,
             prompt: self.prompt(cx),
@@ -1661,10 +1690,16 @@ impl QuickComposer {
         let count = model.efforts.len();
         let selected = self
             .effort
-            .clone()
-            .filter(|e| model.efforts.contains(e))
-            .or(model.default_effort.clone())
-            .unwrap_or_else(|| model.efforts[0].clone());
+            .as_deref()
+            .and_then(|effort| monocode_core::catalog::model_effort(self.kind, effort, &model))
+            .or_else(|| {
+                model
+                    .default_effort
+                    .as_deref()
+                    .filter(|e| model.efforts.iter().any(|level| level == e))
+            })
+            .unwrap_or(&model.efforts[0])
+            .to_owned();
         let index = model
             .efforts
             .iter()

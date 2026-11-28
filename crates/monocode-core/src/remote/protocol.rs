@@ -29,6 +29,7 @@ pub fn wire_model_settings(
 ) -> HashMap<String, String> {
     let mut values = settings.model_settings.clone();
     if let Some(effort) = &settings.effort {
+        values.retain(|key, _| !crate::catalog::is_effort_key(key));
         values.insert(
             if provider == "codex" {
                 "reasoningEffort"
@@ -319,5 +320,36 @@ mod tests {
             })
             .is_err());
         }
+    }
+
+    #[test]
+    fn wire_model_settings_replaces_stale_effort_aliases() {
+        let mut settings = crate::agent::Settings {
+            effort: Some("xhigh".into()),
+            ..Default::default()
+        };
+        settings
+            .model_settings
+            .insert("thought_level".into(), "low".into());
+        settings
+            .model_settings
+            .insert("reasoning".into(), "medium".into());
+        settings
+            .model_settings
+            .insert("context".into(), "1m".into());
+
+        let antigravity = wire_model_settings("antigravity", &settings);
+        assert_eq!(antigravity.get("effort").map(String::as_str), Some("xhigh"));
+        assert!(!antigravity.contains_key("thought_level"));
+        assert!(!antigravity.contains_key("reasoning"));
+        assert_eq!(antigravity.get("context").map(String::as_str), Some("1m"));
+
+        let codex = wire_model_settings("codex", &settings);
+        assert_eq!(
+            codex.get("reasoningEffort").map(String::as_str),
+            Some("xhigh")
+        );
+        assert!(!codex.contains_key("effort"));
+        assert!(!codex.contains_key("thought_level"));
     }
 }

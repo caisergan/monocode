@@ -49,6 +49,9 @@ describe.each(providers)("$id ACP protocol", ({ id, protocol, mode, blocks, mode
     expect(protocol.extractModelConfigId([])).toBe("model");
     expect(protocol.resolveSettingConfigId(options, "effort")).toBe("thinking");
     expect(protocol.resolveSettingConfigId(options, "reasoning")).toBe("thinking");
+    expect(protocol.resolveSettingConfigId(options, "reasoningEffort")).toBe("thinking");
+    expect(protocol.resolveSettingConfigId(options, "thought_level")).toBe("thinking");
+    expect(protocol.resolveSettingConfigId(options, "thinking_level")).toBe("thinking");
     expect(protocol.resolveSettingConfigId(options, "THINKING")).toBe("thinking");
     expect(protocol.resolveSettingConfigId(options, "missing")).toBeUndefined();
   });
@@ -135,5 +138,101 @@ describe("antigravity model rule", () => {
     expect(antigravity.antigravityModelChoice("", { id: "model", currentValue: "gemini-4-argon" }))
       .toBe("gemini-4-argon");
     expect(antigravity.antigravityModelChoice("claude-opus-5-5", { id: "model" })).toBeUndefined();
+  });
+
+  it("narrows per-model effort levels from availableModels and strips them on orchestrators", () => {
+    const models = antigravity.modelsFromSessionNew({
+      models: {
+        currentModelId: "gemini-4-neon-high",
+        availableModels: [
+          { modelId: "gemini-4-neon-high", name: "Gemini 4 Neon (High)" },
+          { modelId: "gemini-4-neon-xhigh", name: "Gemini 4 Neon (XHigh)" },
+          { modelId: "gemini-4-neon-medium", name: "Gemini 4 Neon (Medium)" },
+          { modelId: "gemini-4-neon-low", name: "Gemini 4 Neon (Low)" },
+          { modelId: "gemini-4-carbon-medium", name: "Gemini 4 Carbon (Medium)" },
+          { modelId: "gemini-4-carbon-high", name: "Gemini 4 Carbon (High)" },
+          { modelId: "gemini-4-carbon-low", name: "Gemini 4 Carbon (Low)" },
+          { modelId: "gemini-pro-orchestrator-neon", name: "Orchestrator (Neon)" },
+        ],
+      },
+      configOptions: [
+        {
+          id: "model",
+          category: "model",
+          currentValue: "gemini-4-neon",
+          options: [
+            { value: "gemini-4-neon", name: "Gemini 4 Neon" },
+            { value: "gemini-4-carbon", name: "Gemini 4 Carbon" },
+            { value: "gemini-pro-orchestrator-neon", name: "Orchestrator (Neon)" },
+          ],
+        },
+        {
+          id: "thought_level",
+          category: "thought_level",
+          currentValue: "xhigh",
+          options: [
+            { value: "low", name: "Low" },
+            { value: "medium", name: "Medium" },
+            { value: "high", name: "High" },
+            { value: "xhigh", name: "Extra" },
+          ],
+        },
+      ],
+    });
+    expect(models.map((m) => m.nativeId)).toEqual([
+      "gemini-4-neon",
+      "gemini-4-carbon",
+      "gemini-pro-orchestrator-neon",
+    ]);
+    expect(models[0].settings?.[0]).toEqual({
+      id: "effort",
+      label: "Effort",
+      kind: "select",
+      value: "xhigh",
+      options: [
+        { value: "low", label: "Low" },
+        { value: "medium", label: "Medium" },
+        { value: "high", label: "High" },
+        { value: "xhigh", label: "Extra High" },
+      ],
+    });
+    expect(models[1].settings?.[0]).toEqual({
+      id: "effort",
+      label: "Effort",
+      kind: "select",
+      value: "high",
+      options: [
+        { value: "low", label: "Low" },
+        { value: "medium", label: "Medium" },
+        { value: "high", label: "High" },
+      ],
+    });
+    expect(models[2].settings).toBeUndefined();
+    expect(antigravity.nearestAntigravityEffort("xhigh", ["low", "medium", "high"])).toBe("high");
+    expect(antigravity.nearestAntigravityEffort("max", ["low", "medium", "high", "xhigh"])).toBe("xhigh");
+
+    // Distinct base model ending in an effort word must not collide with shorter prefix.
+    const collided = antigravity.modelsFromSessionNew({
+      models: {
+        availableModels: [
+          { modelId: "gemini-5-pro-low", name: "Gemini 5 Pro (Low)" },
+          { modelId: "gemini-5-pro-high", name: "Gemini 5 Pro (High)" },
+          { modelId: "gemini-5-pro-max", name: "Gemini 5 Pro Max" },
+        ],
+      },
+      configOptions: [
+        {
+          id: "model",
+          category: "model",
+          currentValue: "gemini-5-pro",
+          options: [
+            { value: "gemini-5-pro", name: "Gemini 5 Pro" },
+            { value: "gemini-5-pro-max", name: "Gemini 5 Pro Max" },
+          ],
+        },
+      ],
+    });
+    expect(collided[0].settings?.[0].options.map((o) => o.value)).toEqual(["low", "high"]);
+    expect(collided[1].settings).toBeUndefined();
   });
 });

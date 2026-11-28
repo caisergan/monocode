@@ -1211,6 +1211,17 @@ impl Conversation {
         self.turn_sender = settings.message_sender.clone();
         settings.master = self.master;
         if let Some(model) = self.model_info() {
+            // Send the level this model runs at, without stale aliases. A
+            // model without levels gets none, unless a control of its own sets it.
+            let has_levels = !model.efforts.is_empty();
+            if (has_levels && settings.effort.is_some())
+                || (!has_levels && !catalog::has_effort_control(model))
+            {
+                settings
+                    .model_settings
+                    .retain(|key, _| !catalog::is_effort_key(key));
+                settings.effort = self.effective_saved_effort().map(str::to_owned);
+            }
             for control in &model.controls {
                 settings
                     .model_settings
@@ -1397,8 +1408,14 @@ impl Conversation {
                                 && pending.from == source_provider
                                 && pending.account.id == source_account
                             {
+                                pending
+                                    .model_settings
+                                    .retain(|key, _| !catalog::is_effort_key(key));
                                 pending.effort = Some(effort);
                             } else if source_selected {
+                                this.settings
+                                    .model_settings
+                                    .retain(|key, _| !catalog::is_effort_key(key));
                                 this.settings.effort = Some(effort);
                             }
                             this.save_settings(cx);
@@ -1416,24 +1433,16 @@ impl Conversation {
                         }
                         if let Some(model) = update.model {
                             turn_model_id = Some(model.clone());
-                            let name: SharedString = this
+                            let kind = Kind::from_id(&source_provider);
+                            let name = this
                                 .catalog
                                 .iter()
                                 .find(|entry| source_selected && entry.id == model)
-                                .map(|entry| {
-                                    let name = model_display_name(
-                                        Kind::from_id(&source_provider),
-                                        &entry.id,
-                                        &entry.name,
-                                    );
-                                    name.strip_prefix("Claude ")
-                                        .unwrap_or(&name)
-                                        .to_owned()
-                                        .into()
-                                })
-                                .unwrap_or_else(|| {
-                                    model_name(Kind::from_id(&source_provider), Some(&model))
-                                });
+                                .map(|entry| model_display_name(kind, &entry.id, &entry.name))
+                                .unwrap_or_else(|| cached_model_name(kind, Some(&model)));
+                            let name: SharedString = name
+                                .strip_prefix("Claude ")
+                                .map_or(name.clone(), |short| short.to_owned().into());
                             if source_selected {
                                 this.resolved_model = Some(model);
                             }
@@ -2116,7 +2125,7 @@ impl Conversation {
             self.settings.model_settings.remove("serviceTier");
         } else if let Some(setting) = id.strip_prefix("model-setting:") {
             if let Ok((key, value)) = serde_json::from_str::<(String, String)>(setting) {
-                if is_effort_key(&key)
+                if catalog::is_effort_key(&key)
                     && (!self.is_remote() || matches!(key.as_str(), "effort" | "reasoningEffort"))
                 {
                     self.set_effort_choice(&value, cx);
@@ -2177,7 +2186,7 @@ impl Conversation {
     fn set_effort_choice(&mut self, effort: &str, cx: &mut Context<Self>) {
         self.settings
             .model_settings
-            .retain(|key, _| !is_effort_key(key));
+            .retain(|key, _| !catalog::is_effort_key(key));
         self.settings.effort = (!effort.is_empty()).then(|| effort.to_owned());
         let provider = self.summary.provider.clone();
         if cx.has_global::<crate::settings::Preferences>() {
@@ -2190,26 +2199,41 @@ impl Conversation {
             });
         }
     }
+    /// The saved effort that actually applies to the active model (when loaded):
+    /// `None` for effort-less models (unless the model declares an effort control),
+    /// exact match or nearest offered choice otherwise (Hermes keeps `None` on mismatch).
+    pub(super) fn effective_saved_effort(&self) -> Option<&str> {
+        let effort = self.settings.effort.as_deref()?;
+        let Some(model) = self.model_info() else {
+            return Some(effort);
+        };
+        if model.efforts.is_empty() {
+            return catalog::has_effort_control(model).then_some(effort);
+        }
+        catalog::model_effort(Kind::from_id(&self.summary.provider), effort, model)
+    }
     fn selected_effort(&self) -> Option<&str> {
-        self.settings
+        let raw = self
+            .settings
             .effort
             .as_deref()
-            .or_else(|| {
-                [
-                    "effort",
-                    "reasoning",
-                    "reasoningEffort",
-                    "reasoning_effort",
-                    "variant",
-                ]
-                .into_iter()
-                .find_map(|key| self.settings.model_settings.get(key).map(String::as_str))
-            })
-            .or_else(|| self.model_info().and_then(|m| m.default_effort.as_deref()))
-            .or_else(|| {
-                self.model_info()
-                    .and_then(|m| m.efforts.first().map(String::as_str))
-            })
+            .or_else(|| catalog::saved_effort(&self.settings.model_settings));
+        if let Some(model) = self.model_info() {
+            if model.efforts.is_empty() {
+                return None;
+            }
+            if let Some(effort) = raw.and_then(|effort| {
+                catalog::model_effort(Kind::from_id(&self.summary.provider), effort, model)
+            }) {
+                return Some(effort);
+            }
+            return model
+                .default_effort
+                .as_deref()
+                .filter(|effort| model.efforts.iter().any(|e| e == effort))
+                .or_else(|| model.efforts.first().map(String::as_str));
+        }
+        raw
     }
     fn effort_label(&self) -> SharedString {
         effort_name(self.selected_effort().unwrap_or("default")).into()
@@ -3814,12 +3838,6 @@ pub(crate) fn remember_access(mode: AccessMode, cx: &mut gpui::App) {
         });
     }
 }
-fn is_effort_key(key: &str) -> bool {
-    matches!(
-        key,
-        "effort" | "reasoning" | "reasoningEffort" | "reasoning_effort"
-    )
-}
 pub(crate) fn preferred_effort(provider: &str, cx: &gpui::App) -> Option<String> {
     cx.try_global::<crate::settings::Preferences>()
         .and_then(|prefs| prefs.provider_efforts.get(provider).cloned())
@@ -4839,6 +4857,105 @@ mod menu_tests {
                 let next = cx.new(|cx| Conversation::new(summary, Arc::new(Mutex::new(store)), cx));
                 assert_eq!(next.read(cx).settings.effort.as_deref(), Some("xhigh"));
                 assert_eq!(next.read(cx).settings.access, AccessMode::Auto);
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn effort_label_and_checks_follow_each_models_supported_levels(cx: &mut TestAppContext) {
+        cx.update(|cx| cx.set_global(crate::settings::Preferences::default()));
+        let window = conversation(cx);
+        window
+            .update(cx, |c, _, cx| {
+                c.summary.provider = "antigravity".into();
+                c.catalog = vec![
+                    Model {
+                        alias_target: None,
+                        id: "gemini-4-neon".into(),
+                        name: "Gemini 4 Neon".into(),
+                        efforts: vec!["low".into(), "medium".into(), "high".into(), "xhigh".into()],
+                        default_effort: Some("high".into()),
+                        fast: false,
+                        thinking: false,
+                        default: true,
+                        tiers: Vec::new(),
+                        controls: Vec::new(),
+                    },
+                    Model {
+                        alias_target: None,
+                        id: "gemini-4-carbon".into(),
+                        name: "Gemini 4 Carbon".into(),
+                        efforts: vec!["low".into(), "medium".into(), "high".into()],
+                        default_effort: Some("medium".into()),
+                        fast: false,
+                        thinking: false,
+                        default: false,
+                        tiers: Vec::new(),
+                        controls: Vec::new(),
+                    },
+                    Model {
+                        alias_target: None,
+                        id: "gemini-pro-orchestrator-neon".into(),
+                        name: "Orchestrator (Neon)".into(),
+                        efforts: Vec::new(),
+                        default_effort: None,
+                        fast: false,
+                        thinking: false,
+                        default: false,
+                        tiers: Vec::new(),
+                        controls: Vec::new(),
+                    },
+                ];
+                c.model = Some("gemini-4-neon".into());
+                c.settings
+                    .model_settings
+                    .insert("thought_level".into(), "low".into());
+                c.menu_choice("effort:xhigh", cx);
+                assert_eq!(c.selected_effort(), Some("xhigh"));
+                assert_eq!(c.effective_saved_effort(), Some("xhigh"));
+                assert_eq!(c.trigger_effort_label().as_deref(), Some("Extra High"));
+                assert_eq!(
+                    c.mobile_model_settings().get("effort").map(String::as_str),
+                    Some("xhigh")
+                );
+                assert!(!c.mobile_model_settings().contains_key("thought_level"));
+                assert_eq!(c.agent_launch()["effort"], "xhigh");
+
+                // Switching to Carbon (no xhigh) snaps display, submenu check,
+                // mobile sheet, and agent launch to High.
+                c.model = Some("gemini-4-carbon".into());
+                assert_eq!(c.selected_effort(), Some("high"));
+                assert_eq!(c.effective_saved_effort(), Some("high"));
+                assert_eq!(c.trigger_effort_label().as_deref(), Some("High"));
+                assert_eq!(
+                    c.mobile_model_settings().get("effort").map(String::as_str),
+                    Some("high")
+                );
+                assert_eq!(c.agent_launch()["effort"], "high");
+                assert!(
+                    c.effort_items()
+                        .iter()
+                        .any(|item| item.id == "effort:high" && item.checked)
+                );
+
+                // Orchestrator has no effort levels, so nothing is shown or reported.
+                c.model = Some("gemini-pro-orchestrator-neon".into());
+                assert_eq!(c.selected_effort(), None);
+                assert_eq!(c.effective_saved_effort(), None);
+                assert_eq!(c.trigger_effort_label(), None);
+                assert!(!c.mobile_model_settings().contains_key("effort"));
+                assert!(c.agent_launch().get("effort").is_none());
+
+                // Switching back to Neon restores the remembered Extra High level.
+                c.model = Some("gemini-4-neon".into());
+                assert_eq!(c.selected_effort(), Some("xhigh"));
+                assert_eq!(c.effective_saved_effort(), Some("xhigh"));
+                assert_eq!(c.trigger_effort_label().as_deref(), Some("Extra High"));
+                assert_eq!(
+                    c.mobile_model_settings().get("effort").map(String::as_str),
+                    Some("xhigh")
+                );
+                assert_eq!(c.agent_launch()["effort"], "xhigh");
             })
             .unwrap();
     }

@@ -855,4 +855,76 @@ describe.each(providers)("$id offline ACP transport", (provider) => {
       mock.blockWrites = false;
     }
   });
+
+  it("clamps an unsupported effort level to the model's nearest offered level", async () => {
+    mock.setupConfigOptions = [
+      { id: "model", category: "model", currentValue: "gemini-4-carbon", options: [
+        { value: "gemini-4-carbon", name: "Gemini 4 Carbon" },
+      ] },
+      { id: "thought_level", category: "thought_level", currentValue: "low", options: [
+        { value: "low", name: "Low" },
+        { value: "medium", name: "Medium" },
+        { value: "high", name: "High" },
+      ] },
+    ];
+    mock.autoPrompt = true;
+    await provider.send({
+      ...input,
+      model: `${provider.id}:gemini-4-carbon`,
+      modelSettings: { effort: "xhigh" },
+    });
+    const set = mock.sent.find(
+      (m) => m.method === "session/set_config_option" && m.params?.configId === "thought_level",
+    );
+    expect(set?.params).toMatchObject({ configId: "thought_level", value: "high" });
+  });
+
+  it("sends a non-effort value the model does not list so agy can report it", async () => {
+    mock.setupConfigOptions = [
+      { id: "model", category: "model", currentValue: "gemini-4-carbon", options: [
+        { value: "gemini-4-carbon", name: "Gemini 4 Carbon" },
+      ] },
+      { id: "context", currentValue: "200k", options: [
+        { value: "200k", name: "200K" },
+      ] },
+    ];
+    mock.autoPrompt = true;
+    await provider.send({
+      ...input,
+      model: `${provider.id}:gemini-4-carbon`,
+      modelSettings: { context: "1m" },
+    });
+    const set = mock.sent.find(
+      (m) => m.method === "session/set_config_option" && m.params?.configId === "context",
+    );
+    expect(set?.params).toMatchObject({ configId: "context", value: "1m" });
+  });
+
+  it("prioritizes canonical effort over stale aliases and skips model/mode overrides", async () => {
+    mock.setupConfigOptions = [
+      { id: "model", category: "model", currentValue: "gemini-4-carbon", options: [
+        { value: "gemini-4-carbon", name: "Gemini 4 Carbon" },
+        { value: "gemini-4-neon", name: "Gemini 4 Neon" },
+      ] },
+      { id: "thought_level", category: "thought_level", currentValue: "medium", options: [
+        { value: "low", name: "Low" },
+        { value: "medium", name: "Medium" },
+        { value: "high", name: "High" },
+      ] },
+    ];
+    mock.autoPrompt = true;
+    await provider.send({
+      ...input,
+      model: `${provider.id}:gemini-4-carbon`,
+      modelSettings: {
+        thought_level: "low",
+        effort: "xhigh",
+        model: "gemini-4-neon",
+        mode: "plan",
+      },
+    });
+    const configCalls = mock.sent.filter((m) => m.method === "session/set_config_option");
+    expect(configCalls).toHaveLength(1);
+    expect(configCalls[0].params).toMatchObject({ configId: "thought_level", value: "high" });
+  });
 });

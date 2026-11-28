@@ -259,6 +259,65 @@ export function antigravityModelChoice(
   return option?.choices?.find(antigravityAllowsModel);
 }
 
+const EFFORT_ORDER = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+] as const;
+
+const EFFORT_LABELS: Record<(typeof EFFORT_ORDER)[number], string> = {
+  none: "None",
+  minimal: "Minimal",
+  low: "Low",
+  medium: "Medium",
+  high: "High",
+  xhigh: "Extra High",
+  max: "Max",
+  ultra: "Ultra",
+};
+
+const EFFORT_KEYS = new Set([
+  "effort",
+  "reasoning",
+  "reasoningeffort",
+  "reasoning_effort",
+  "thought_level",
+  "thinking_level",
+]);
+
+export function isAntigravityEffortKey(key: string): boolean {
+  return EFFORT_KEYS.has(key.trim().toLowerCase());
+}
+
+export function nearestAntigravityEffort(
+  value: string,
+  choices: string[],
+): string | undefined {
+  const needle = value.trim().toLowerCase();
+  const exact = choices.find((choice) => choice.toLowerCase() === needle);
+  if (exact) return exact;
+  const requested = EFFORT_ORDER.indexOf(
+    needle as (typeof EFFORT_ORDER)[number],
+  );
+  if (requested < 0) return undefined;
+  let best: { distance: number; choice: string } | undefined;
+  for (let i = 0; i < EFFORT_ORDER.length; i++) {
+    const level = EFFORT_ORDER[i];
+    const matched = choices.find((choice) => choice.toLowerCase() === level);
+    if (!matched) continue;
+    const distance = Math.abs(i - requested);
+    if (!best || distance < best.distance) {
+      best = { distance, choice: matched };
+    }
+  }
+  return best?.choice;
+}
+
 export function modelsFromSessionNew(raw: unknown): AgentModel[] {
   const rec = asRecord(raw);
   const options = Array.isArray(rec?.configOptions) ? rec.configOptions : [];
@@ -266,36 +325,89 @@ export function modelsFromSessionNew(raw: unknown): AgentModel[] {
   const modelOption = options.map(asRecord).find((item) => item?.id === modelId);
   const choices = configChoices(modelOption?.options);
   const settings: ModelSetting[] = [];
+  let sessionThoughtCurrent = "";
   for (const item of options) {
     const option = asRecord(item);
     if (option?.category !== "thought_level") continue;
-    const values = configChoices(option.options);
+    sessionThoughtCurrent = String(option.currentValue ?? "");
+    // agy calls xhigh "Extra"; every other surface says "Extra High".
+    const values = configChoices(option.options).map((choice) => ({
+      value: choice.value,
+      label: EFFORT_LABELS[choice.value as keyof typeof EFFORT_LABELS] ?? choice.label,
+    }));
     if (values.length < 2) continue;
-    const current = String(option.currentValue ?? "");
     settings.push({
       id: "effort",
       label: "Effort",
       kind: "select",
-      value: values.some((choice) => choice.value === current)
-        ? current : values[0].value,
+      value: values.some((choice) => choice.value === sessionThoughtCurrent)
+        ? sessionThoughtCurrent : values[0].value,
       options: values,
     });
   }
   const legacy = asRecord(rec?.models);
   const available = Array.isArray(legacy?.availableModels)
     ? legacy.availableModels : [];
+  const availableIds = available.flatMap((item) => {
+    const model = asRecord(item);
+    const value =
+      stringField(model ?? {}, "modelId") ??
+      stringField(model ?? {}, "id") ??
+      stringField(model ?? {}, "value");
+    return value ? [value] : [];
+  });
   const models = choices.length > 0 ? choices : available.flatMap((item) => {
     const model = asRecord(item);
     const value = stringField(model ?? {}, "modelId");
     return value ? [{ value, label: String(model?.name ?? value) }] : [];
   });
-  return [...new Map(models.filter(({ value }) => antigravityAllowsModel(value)).map(({ value, label }) => [value, {
-    id: `antigravity:${value}`,
-    harness: "antigravity" as const,
-    name: label,
-    nativeId: value,
-    ...(settings.length > 0 ? { settings } : {}),
-  }])).values()];
+  const narrowFromAvailable = choices.length > 0 && availableIds.length > 0;
+  const baseIds = new Set(models.map(({ value }) => value));
+  return [...new Map(models.filter(({ value }) => antigravityAllowsModel(value)).map(({ value, label }) => {
+    let modelSettings = settings;
+    if (narrowFromAvailable) {
+      const variants: string[] = [];
+      let exact = false;
+      for (const avail of availableIds) {
+        if (avail === value) {
+          exact = true;
+        } else if (!baseIds.has(avail) && avail.startsWith(`${value}-`)) {
+          const suffix = avail.slice(value.length + 1);
+          if (
+            EFFORT_ORDER.includes(suffix as (typeof EFFORT_ORDER)[number]) &&
+            !variants.includes(suffix)
+          ) {
+            variants.push(suffix);
+          }
+        }
+      }
+      if (variants.length >= 2) {
+        const ordered = EFFORT_ORDER.filter((level) => variants.includes(level));
+        const current =
+          (sessionThoughtCurrent && nearestAntigravityEffort(sessionThoughtCurrent, ordered)) ||
+          variants[0];
+        modelSettings = [{
+          id: "effort",
+          label: "Effort",
+          kind: "select",
+          value: current,
+          options: ordered.map((level) => ({
+            value: level,
+            label: EFFORT_LABELS[level],
+          })),
+        }];
+      } else if (exact || variants.length === 1) {
+        modelSettings = [];
+      }
+    }
+    return [value, {
+      id: `antigravity:${value}`,
+      harness: "antigravity" as const,
+      name: label,
+      nativeId: value,
+      ...(modelSettings.length > 0 ? { settings: modelSettings } : {}),
+    }];
+  })).values()];
 }
 
 function configChoices(raw: unknown): ModelSettingChoice[] {
@@ -359,12 +471,12 @@ export function resolveSettingConfigId(
   const needle = settingId.trim().toLowerCase();
   const exact = options.find((option) => option.id.toLowerCase() === needle);
   if (exact) return exact.id;
-  if (needle === "effort" || needle === "reasoning") {
+  if (isAntigravityEffortKey(needle)) {
     return options.find(
       (option) =>
-        option.id === "effort" ||
-        option.id === "reasoning" ||
-        option.category === "thought_level",
+        option.type !== "boolean" &&
+        (isAntigravityEffortKey(option.id) ||
+          option.category === "thought_level"),
     )?.id;
   }
   if (needle === "fast" || needle === "fastmode" || needle === "fast_mode") {

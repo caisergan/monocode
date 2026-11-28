@@ -87,11 +87,7 @@ fn host_settings(project: &RemoteProject, host: &Value) -> Settings {
         .cloned()
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
-    settings.effort = settings
-        .model_settings
-        .get("reasoningEffort")
-        .or_else(|| settings.model_settings.get("effort"))
-        .cloned();
+    settings.effort = crate::catalog::saved_effort(&settings.model_settings).map(str::to_owned);
     settings.fast = settings
         .model_settings
         .get("fast")

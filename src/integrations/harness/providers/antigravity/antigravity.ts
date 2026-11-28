@@ -17,6 +17,8 @@ import {
   antigravityModeId,
   antigravityModelChoice,
   antigravityPromptBlocks,
+  isAntigravityEffortKey,
+  nearestAntigravityEffort,
   permissionOptionId,
   permissionRequestFromAcp,
   readConfigOptions,
@@ -619,9 +621,25 @@ async function applyModelSelection(
 
   await setConfigOption(live, modelConfigId, base);
 
-  for (const [settingId, value] of Object.entries(settings)) {
+  // Order canonical `effort` ahead of legacy aliases and apply each target
+  // configId at most once so stale aliases cannot overwrite explicit effort or
+  // touch `model` / `mode` / `provider`.
+  const applied = new Set<string>([
+    modelConfigId,
+    live.modelConfigId,
+    "provider",
+    "model",
+    "mode",
+  ]);
+  const entries = Object.entries(settings).sort(([a], [b]) => {
+    const aCanonical = a.trim().toLowerCase() === "effort" ? 0 : 1;
+    const bCanonical = b.trim().toLowerCase() === "effort" ? 0 : 1;
+    return aCanonical - bCanonical;
+  });
+  for (const [settingId, value] of entries) {
     const configId = resolveSettingConfigId(live.configOptions, settingId);
-    if (!configId || configId === "provider") continue;
+    if (!configId || applied.has(configId)) continue;
+    applied.add(configId);
     await setConfigOption(live, configId, value);
   }
 }
@@ -667,15 +685,30 @@ async function setConfigOption(
     return;
   }
   const boolValue = value === true || value === "true";
+  let resolvedValue: string | boolean = isBool ? boolValue : String(value);
+  // A level this model lacks (agy rejects xhigh on Carbon with -32602) runs at
+  // the nearest one it offers. Other values go as asked, so agy reports them.
+  const isEffort =
+    current.category === "thought_level" || isAntigravityEffortKey(configId);
+  if (
+    !isBool &&
+    isEffort &&
+    current.choices?.length &&
+    !current.choices.includes(String(resolvedValue))
+  ) {
+    const nearest = nearestAntigravityEffort(String(resolvedValue), current.choices);
+    if (!nearest) return;
+    resolvedValue = nearest;
+  }
   const already = isBool
-    ? current.currentValue === boolValue
-    : String(current.currentValue ?? "") === String(value);
+    ? current.currentValue === resolvedValue
+    : String(current.currentValue ?? "") === String(resolvedValue);
   if (already) return;
 
   const params: Record<string, unknown> = {
     sessionId: live.acpSessionId,
     configId,
-    value: isBool ? boolValue : String(value),
+    value: resolvedValue,
   };
   if (isBool) params.type = "boolean";
   const result = await live.acp.request<SessionSetupResult>(

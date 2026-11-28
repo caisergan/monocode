@@ -487,6 +487,9 @@ impl Protocol {
                 stdin,
             )
         } else {
+            if let Some(model) = self.acp_reported_model() {
+                self.acp.notices.push(Event::Model(model));
+            }
             if self.request.kind == Kind::Hermes {
                 self.hermes_turn_begins();
             }
@@ -499,6 +502,48 @@ impl Protocol {
                 stdin,
             )
         }
+    }
+    /// The active catalog model id once configuration settles. Prefer the
+    /// `model` config option over legacy `models.currentModelId` (Antigravity
+    /// reports the effort-suffixed slug `gemini-4-neon-high` in `currentModelId`
+    /// while `configOptions` carries the catalog id `gemini-4-neon`). Devin maps
+    /// family ids to variant values in `configOptions`, so it keeps the legacy field.
+    fn acp_reported_model(&self) -> Option<String> {
+        if self.request.kind != Kind::Devin {
+            if let Some(model) = model_config_option(&self.acp.setup)
+                .and_then(|option| option["currentValue"].as_str())
+                .filter(|model| !model.is_empty())
+            {
+                return Some(model.to_owned());
+            }
+        }
+        self.acp.setup["models"]["currentModelId"]
+            .as_str()
+            .filter(|model| !model.is_empty())
+            .map(|model| self.acp_normalize_model(model))
+    }
+    /// Map an Antigravity effort-suffixed legacy model id (`gemini-4-neon-high`)
+    /// back to its advertised base catalog id (`gemini-4-neon`) when present.
+    fn acp_normalize_model(&self, model: &str) -> String {
+        if self.request.kind != Kind::Antigravity {
+            return model.to_owned();
+        }
+        let Some(option) = model_config_option(&self.acp.setup) else {
+            return model.to_owned();
+        };
+        let mut choices = Vec::new();
+        config_choices(&option["options"], &mut choices);
+        if choices.iter().any(|choice| choice == model) {
+            return model.to_owned();
+        }
+        if let Some((base, suffix)) = model.rsplit_once('-') {
+            if crate::catalog::EFFORT_ORDER.contains(&suffix)
+                && choices.iter().any(|choice| choice == base)
+            {
+                return base.to_owned();
+            }
+        }
+        model.to_owned()
     }
     fn acp_options(&mut self, setup: &Value) -> Result<(), String> {
         let kind = self.request.kind;
@@ -569,10 +614,6 @@ impl Protocol {
         {
             self.acp.mode = Some(mode);
         }
-        let config = setup["configOptions"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
         let mut selected_model = self.request.model.as_ref().map(|model| {
             if kind == Kind::Devin {
                 let (model, spent) = super::devin::model_value(setup, model, settings);
@@ -589,7 +630,7 @@ impl Protocol {
                 )));
             }
             // The session may open on a model picked elsewhere, such as in agy.
-            let option = config.iter().find(|o| config_id(o) == "model");
+            let option = model_config_option(setup);
             let current = option
                 .and_then(|o| o["currentValue"].as_str())
                 .or_else(|| setup["models"]["currentModelId"].as_str());
@@ -614,11 +655,7 @@ impl Protocol {
                     || setup["models"]["currentModelId"].as_str() != Some(model.as_str())
             })
         {
-            if let Some(option) = config.iter().find(|o| config_id(o) == "model").or_else(|| {
-                config
-                    .iter()
-                    .find(|o| o["category"] == "model" && config_id(o) != "provider")
-            }) {
+            if let Some(option) = model_config_option(setup) {
                 let mut choices = Vec::new();
                 config_choices(&option["options"], &mut choices);
                 if kind != Kind::Devin
@@ -660,9 +697,10 @@ impl Protocol {
         let settings = &self.request.settings;
         let mut selected = settings.model_settings.clone();
         if let Some(effort) = &settings.effort {
-            selected
-                .entry("effort".into())
-                .or_insert_with(|| effort.clone());
+            // `settings.effort` is authoritative: drop any stale effort alias
+            // from `model_settings` so HashMap iteration order cannot override it.
+            selected.retain(|key, _| !crate::catalog::is_effort_key(key));
+            selected.insert("effort".into(), effort.clone());
         }
         selected
             .entry("fast".into())
@@ -697,15 +735,16 @@ impl Protocol {
             .as_array()
             .cloned()
             .unwrap_or_default();
+        // Order deterministically with canonical `effort` ahead of any legacy
+        // effort aliases so conflicting keys resolve identically every turn.
+        let mut entries: Vec<(String, String)> = selected.into_iter().collect();
+        entries.sort_by(|(a, _), (b, _)| (a != "effort", a).cmp(&(b != "effort", b)));
         let mut resolved = std::collections::HashSet::new();
-        for (id, mut value) in selected {
+        for (id, mut value) in entries {
             if kind == Kind::Devin && id == "fast" {
                 continue;
             }
-            if kind == Kind::Devin
-                && self.acp.spent_effort
-                && matches!(id.as_str(), "effort" | "reasoning")
-            {
+            if kind == Kind::Devin && self.acp.spent_effort && crate::catalog::is_effort_key(&id) {
                 continue;
             }
             let Some(option) = setting_option(&config, &id) else {
@@ -740,8 +779,8 @@ impl Protocol {
                     }
                     let nearest = if reset {
                         Some(value.clone())
-                    } else if matches!(id.as_str(), "effort" | "reasoning" | "reasoning_effort") {
-                        nearest_effort(&value, &choices)
+                    } else if crate::catalog::is_effort_key(&id) {
+                        crate::catalog::nearest_effort(&value, &choices).map(str::to_owned)
                     } else {
                         None
                     };
@@ -1276,9 +1315,6 @@ impl Protocol {
                         .hermes
                         .opened(self.acp.stage == Stage::New && !self.acp.forking);
                     events.push(Event::SessionId(self.acp.session.clone()));
-                    if let Some(model) = result["models"]["currentModelId"].as_str() {
-                        events.push(Event::Model(model.into()));
-                    }
                     self.acp_options(result)?;
                     self.acp_next(stdin)?;
                 }
@@ -1286,6 +1322,23 @@ impl Protocol {
             Stage::Configure => {
                 if result["configOptions"].is_array() {
                     self.acp.setup["configOptions"] = result["configOptions"].clone();
+                } else if self.acp.pending_method == "session/set_config_option" {
+                    if let (Some(id), Some(options)) = (
+                        self.acp.pending_params["configId"].as_str(),
+                        self.acp.setup["configOptions"].as_array_mut(),
+                    ) {
+                        if let Some(option) = options.iter_mut().find(|o| config_id(o) == id) {
+                            option["currentValue"] = self.acp.pending_params["value"].clone();
+                        }
+                    }
+                }
+                if self.acp.pending_method == "session/set_model" {
+                    if let Some(model) = self.acp.pending_params["modelId"].as_str() {
+                        if !self.acp.setup["models"].is_object() {
+                            self.acp.setup["models"] = json!({});
+                        }
+                        self.acp.setup["models"]["currentModelId"] = model.into();
+                    }
                 }
                 if self.acp.pending_method == "session/set_mode"
                     && self.acp.setup["modes"].is_object()
@@ -1517,7 +1570,11 @@ impl Protocol {
             }
             "current_model_update" => {
                 if let Some(model) = update["currentModelId"].as_str() {
-                    events.push(Event::Model(model.into()));
+                    if self.acp.setup["models"].is_object() {
+                        self.acp.setup["models"]["currentModelId"] = model.into();
+                    }
+                    let model = self.acp_normalize_model(model);
+                    events.push(Event::Model(model));
                 }
             }
             "config_option_update" | "config_options_update" => {
@@ -1710,6 +1767,17 @@ fn config_id(option: &Value) -> &str {
         .or_else(|| option["configId"].as_str())
         .unwrap_or("")
 }
+fn model_config_option(setup: &Value) -> Option<&Value> {
+    let options = setup["configOptions"].as_array()?;
+    options
+        .iter()
+        .find(|o| config_id(o) == "model")
+        .or_else(|| {
+            options
+                .iter()
+                .find(|o| o["category"] == "model" && config_id(o) != "provider")
+        })
+}
 fn setting_option<'a>(options: &'a [Value], setting: &str) -> Option<&'a Value> {
     let setting = setting.trim().to_lowercase();
     options
@@ -1718,20 +1786,15 @@ fn setting_option<'a>(options: &'a [Value], setting: &str) -> Option<&'a Value> 
         .or_else(|| {
             options.iter().find(|option| {
                 let id = config_id(option);
-                match setting.as_str() {
-                    "effort" | "reasoning" => {
-                        matches!(
-                            id,
-                            "effort"
-                                | "reasoning"
-                                | "reasoning_effort"
-                                | "thought_level"
-                                | "thinking_level"
-                        ) || (option["category"] == "thought_level" && id != "thinking")
+                if crate::catalog::is_effort_key(&setting) {
+                    crate::catalog::is_effort_key(id)
+                        || (option["category"] == "thought_level" && id != "thinking")
+                } else {
+                    match setting.as_str() {
+                        "fast" | "fastmode" => id.to_lowercase().contains("fast"),
+                        "context" | "contextwindow" => matches!(id, "context" | "context_size"),
+                        _ => false,
                     }
-                    "fast" | "fastmode" => id.to_lowercase().contains("fast"),
-                    "context" | "contextwindow" => matches!(id, "context" | "context_size"),
-                    _ => false,
                 }
             })
         })
@@ -1785,18 +1848,6 @@ fn dsh_tool_kind(name: &str) -> &'static str {
         "todo_write" => "think",
         _ => "other",
     }
-}
-fn nearest_effort(value: &str, choices: &[String]) -> Option<String> {
-    let order = [
-        "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
-    ];
-    let requested = order.iter().position(|effort| *effort == value)?;
-    order
-        .iter()
-        .enumerate()
-        .filter(|(_, effort)| choices.iter().any(|choice| choice == **effort))
-        .min_by_key(|(index, _)| index.abs_diff(requested))
-        .map(|(_, effort)| (*effort).into())
 }
 
 fn background_dispatch(update: &Value) -> Option<BackgroundDispatch> {
@@ -3167,6 +3218,166 @@ mod tests {
         p.acp_options(&setup("claude-opus-5-5")).unwrap();
         assert_eq!(model_set(&p).as_deref(), Some("gemini-4-neon"));
         assert!(Kind::Claude.allows_model("claude-opus-5-5"));
+    }
+    #[test]
+    fn antigravity_reports_configured_catalog_model_not_legacy_suffixed_id() {
+        let mut p = protocol(Kind::Antigravity);
+        p.request.settings.effort = Some("xhigh".into());
+        p.request.settings.access = AccessMode::FullAccess;
+        // Stale effort in model_settings must not override settings.effort.
+        p.request
+            .settings
+            .model_settings
+            .insert("effort".into(), "low".into());
+        p.request
+            .settings
+            .model_settings
+            .insert("thought_level".into(), "medium".into());
+        let mut out = Vec::new();
+        p.acp_session(&mut out).unwrap();
+        let new = last(&mut out);
+        let setup_events = p
+            .frame(
+                json!({
+                    "id": new["id"],
+                    "result": {
+                        "sessionId": "s",
+                        "models": {"currentModelId": "gemini-4-neon-high"},
+                        "modes": {"currentModeId": "default", "availableModes": [{"id":"default"},{"id":"auto"}]},
+                        "configOptions": [
+                            {"id":"model","category":"model","type":"select","currentValue":"gemini-4-neon",
+                                "options":[{"value":"gemini-4-neon"},{"value":"gemini-4-carbon"}]},
+                            {"id":"thought_level","category":"thought_level","type":"select","currentValue":"high",
+                                "options":[{"value":"low"},{"value":"medium"},{"value":"high"},{"value":"xhigh"}]}
+                        ]
+                    }
+                }),
+                &mut out,
+            )
+            .unwrap();
+        // Legacy `gemini-4-neon-high` must never leak before configure settles.
+        assert!(!setup_events.iter().any(|e| matches!(e, Event::Model(_))));
+
+        let set_effort = last(&mut out);
+        assert_eq!(set_effort["method"], "session/set_config_option");
+        assert_eq!(set_effort["params"]["configId"], "thought_level");
+        assert_eq!(set_effort["params"]["value"], "xhigh");
+        p.frame(
+            json!({
+                "id": set_effort["id"],
+                "result": {
+                    "configOptions": [
+                        {"id":"model","category":"model","type":"select","currentValue":"gemini-4-neon",
+                            "options":[{"value":"gemini-4-neon"},{"value":"gemini-4-carbon"}]},
+                        {"id":"thought_level","category":"thought_level","type":"select","currentValue":"xhigh",
+                            "options":[{"value":"low"},{"value":"medium"},{"value":"high"},{"value":"xhigh"}]}
+                    ]
+                }
+            }),
+            &mut out,
+        )
+        .unwrap();
+
+        let set_mode = last(&mut out);
+        assert_eq!(set_mode["method"], "session/set_mode");
+        assert_eq!(set_mode["params"]["modeId"], "auto");
+        let events = p
+            .frame(json!({"id": set_mode["id"], "result": {}}), &mut out)
+            .unwrap();
+        assert_eq!(last(&mut out)["method"], "session/prompt");
+        assert!(
+            events.contains(&Event::Model("gemini-4-neon".into())),
+            "expected catalog id gemini-4-neon, got {events:?}"
+        );
+        assert!(!events.contains(&Event::Model("gemini-4-neon-high".into())));
+
+        // A live current_model_update with a suffixed slug normalizes to the base id.
+        let update_events = p
+            .frame(
+                json!({
+                    "method": "session/update",
+                    "params": {
+                        "sessionId": "s",
+                        "update": {"sessionUpdate": "current_model_update", "currentModelId": "gemini-4-neon-xhigh"}
+                    }
+                }),
+                &mut out,
+            )
+            .unwrap();
+        assert_eq!(update_events, vec![Event::Model("gemini-4-neon".into())]);
+    }
+    #[test]
+    fn antigravity_model_switch_reports_new_model_and_clamps_effort() {
+        let mut p = protocol(Kind::Antigravity);
+        p.request.model = Some("gemini-4-carbon".into());
+        p.request.settings.effort = Some("xhigh".into());
+        p.request.settings.access = AccessMode::Supervised;
+        let mut out = Vec::new();
+        p.acp_session(&mut out).unwrap();
+        let new = last(&mut out);
+        p.frame(
+            json!({
+                "id": new["id"],
+                "result": {
+                    "sessionId": "s",
+                    "models": {"currentModelId": "gemini-4-neon-high"},
+                    "modes": {"currentModeId": "default", "availableModes": [{"id":"default"}]},
+                    "configOptions": [
+                        {"id":"model","category":"model","type":"select","currentValue":"gemini-4-neon",
+                            "options":[{"value":"gemini-4-neon"},{"value":"gemini-4-carbon"}]},
+                        {"id":"thought_level","category":"thought_level","type":"select","currentValue":"low",
+                            "options":[{"value":"low"},{"value":"medium"},{"value":"high"},{"value":"xhigh"}]}
+                    ]
+                }
+            }),
+            &mut out,
+        )
+        .unwrap();
+        let set_model = last(&mut out);
+        assert_eq!(set_model["method"], "session/set_config_option");
+        assert_eq!(set_model["params"]["configId"], "model");
+        assert_eq!(set_model["params"]["value"], "gemini-4-carbon");
+        p.frame(
+            json!({
+                "id": set_model["id"],
+                "result": {
+                    "configOptions": [
+                        {"id":"model","category":"model","type":"select","currentValue":"gemini-4-carbon",
+                            "options":[{"value":"gemini-4-neon"},{"value":"gemini-4-carbon"}]},
+                        {"id":"thought_level","category":"thought_level","type":"select","currentValue":"low",
+                            "options":[{"value":"low"},{"value":"medium"},{"value":"high"}]}
+                    ]
+                }
+            }),
+            &mut out,
+        )
+        .unwrap();
+        let set_effort = last(&mut out);
+        assert_eq!(set_effort["method"], "session/set_config_option");
+        assert_eq!(set_effort["params"]["configId"], "thought_level");
+        assert_eq!(set_effort["params"]["value"], "high");
+        p.frame(
+            json!({
+                "id": set_effort["id"],
+                "result": {
+                    "configOptions": [
+                        {"id":"model","category":"model","type":"select","currentValue":"gemini-4-carbon",
+                            "options":[{"value":"gemini-4-neon"},{"value":"gemini-4-carbon"}]},
+                        {"id":"thought_level","category":"thought_level","type":"select","currentValue":"high",
+                            "options":[{"value":"low"},{"value":"medium"},{"value":"high"}]}
+                    ]
+                }
+            }),
+            &mut out,
+        )
+        .unwrap();
+        let set_mode = last(&mut out);
+        assert_eq!(set_mode["method"], "session/set_mode");
+        let events = p
+            .frame(json!({"id": set_mode["id"], "result": {}}), &mut out)
+            .unwrap();
+        assert_eq!(last(&mut out)["method"], "session/prompt");
+        assert!(events.contains(&Event::Model("gemini-4-carbon".into())));
     }
     #[test]
     fn sparse_permission_requests_keep_the_tool_preview() {
