@@ -239,8 +239,13 @@ fn cache() -> &'static Mutex<CatalogCache> {
 /// Catalogs are kept on disk so a restart doesn't query every CLI again.
 /// Only a refresh, a CLI update or a sign-in replaces one.
 static SAVED: OnceLock<std::path::PathBuf> = OnceLock::new();
+/// Bump when a catalog parser change requires refreshing previously saved
+/// provider entries (currently Antigravity's per-model effort levels).
+const SAVED_CATALOG_VERSION: u32 = 1;
 #[derive(Serialize, Deserialize, Default)]
 struct SavedCatalogs {
+    #[serde(default)]
+    version: u32,
     #[serde(default)]
     local: Vec<SavedLocal>,
     #[serde(default)]
@@ -274,6 +279,9 @@ pub fn persist_in(path: std::path::PathBuf) {
             let Some(kind) = Kind::parse(&entry.provider) else {
                 continue;
             };
+            if saved.version < SAVED_CATALOG_VERSION && kind == Kind::Antigravity {
+                continue;
+            }
             if entry.models.is_empty()
                 || cache
                     .entries
@@ -333,7 +341,11 @@ fn save() {
                 .collect(),
         })
         .collect();
-    let Ok(bytes) = serde_json::to_vec(&SavedCatalogs { local, remote }) else {
+    let Ok(bytes) = serde_json::to_vec(&SavedCatalogs {
+        version: SAVED_CATALOG_VERSION,
+        local,
+        remote,
+    }) else {
         return;
     };
     // Written beside and renamed, so a crash never leaves half a file.
@@ -450,6 +462,9 @@ pub fn refresh_models_for(
         provider::devin::catalog_models(&value)
     } else if kind.is_acp() {
         let mut models = acp_models(&value);
+        if kind == Kind::Antigravity {
+            narrow_antigravity_efforts(&mut models, &value);
+        }
         models.retain(|m| kind.allows_model(&m.id));
         if kind == Kind::Hermes {
             hermes::narrow(&mut models);
@@ -765,6 +780,102 @@ fn acp_models(value: &Value) -> Vec<Model> {
             Some(model)
         })
         .collect()
+}
+/// `agy acp`'s `configOptions.thought_level` only reflects the model active at
+/// `session/new`, while `models.availableModels` lists every valid `(model, effort)`
+/// variant in default order (and lists effort-less models such as Orchestrators
+/// without a suffix). Narrow each model's effort list from `availableModels` when
+/// both are present so models without `xhigh` or without thinking levels never
+/// inherit another model's options.
+fn narrow_antigravity_efforts(models: &mut [Model], value: &Value) {
+    const ORDER: [&str; 8] = [
+        "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+    ];
+    let has_config_models = value["configOptions"].as_array().is_some_and(|configs| {
+        configs
+            .iter()
+            .any(|o| o["id"] == "model" || (o["category"] == "model" && o["id"] != "provider"))
+    });
+    if !has_config_models {
+        return;
+    }
+    let mut avail_rows = Vec::new();
+    leaves(&value["models"]["availableModels"], &mut avail_rows);
+    let available: Vec<&str> = avail_rows
+        .into_iter()
+        .filter_map(|row| {
+            row.as_str()
+                .or_else(|| row["modelId"].as_str())
+                .or_else(|| row["id"].as_str())
+                .or_else(|| row["value"].as_str())
+        })
+        .collect();
+    if available.is_empty() {
+        return;
+    }
+    let session_thought = value["configOptions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|o| {
+            o["id"] != "thinking"
+                && o["type"] != "boolean"
+                && (o["category"] == "thought_level"
+                    || matches!(
+                        o["id"].as_str(),
+                        Some(
+                            "thought_level"
+                                | "effort"
+                                | "reasoning"
+                                | "reasoning_effort"
+                                | "thinking_level"
+                        )
+                    ))
+        })
+        .and_then(|o| o["currentValue"].as_str());
+    for model in models {
+        let mut variants = Vec::new();
+        let mut exact = false;
+        for id in &available {
+            if *id == model.id {
+                exact = true;
+            } else if let Some(suffix) = id
+                .strip_prefix(&model.id)
+                .and_then(|rest| rest.strip_prefix('-'))
+            {
+                if ORDER.contains(&suffix) && !variants.contains(&suffix) {
+                    variants.push(suffix);
+                }
+            }
+        }
+        if variants.len() >= 2 {
+            let ordered: Vec<String> = ORDER
+                .iter()
+                .filter(|level| variants.contains(level))
+                .map(|level| (*level).to_owned())
+                .collect();
+            let default = session_thought
+                .and_then(|cur| {
+                    if ordered.iter().any(|e| e == cur) {
+                        Some(cur.to_owned())
+                    } else {
+                        let requested = ORDER.iter().position(|e| *e == cur)?;
+                        ORDER
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, e)| ordered.iter().any(|o| o == *e))
+                            .min_by_key(|(ix, _)| ix.abs_diff(requested))
+                            .map(|(_, e)| (*e).to_owned())
+                    }
+                })
+                .or_else(|| variants.first().map(|e| (*e).to_owned()));
+            model.efforts = ordered;
+            model.default_effort = default;
+        } else if exact || variants.len() == 1 {
+            model.efforts.clear();
+            model.default_effort = None;
+        }
+    }
 }
 fn fx_models(value: &Value) -> Vec<Model> {
     value
@@ -1094,6 +1205,7 @@ mod tests {
         std::fs::write(
             &path,
             serde_json::to_vec(&SavedCatalogs {
+                version: SAVED_CATALOG_VERSION,
                 local: vec![SavedLocal {
                     provider: "pi".into(),
                     account: account.clone(),
@@ -1193,5 +1305,69 @@ mod tests {
         assert_eq!(rows[0].controls.len(), 2);
         assert_eq!(rows[0].controls[0].current, "false");
         assert_eq!(rows[0].controls[1].choices[1], ("1m".into(), "1M".into()));
+    }
+    #[test]
+    fn antigravity_narrows_per_model_efforts_from_available_models() {
+        let payload = json!({
+            "models": {
+                "currentModelId": "gemini-4-neon-high",
+                "availableModels": [
+                    {"modelId":"gemini-4-neon-high","name":"Gemini 4 Neon (High)"},
+                    {"modelId":"gemini-4-neon-xhigh","name":"Gemini 4 Neon (XHigh)"},
+                    {"modelId":"gemini-4-neon-medium","name":"Gemini 4 Neon (Medium)"},
+                    {"modelId":"gemini-4-neon-low","name":"Gemini 4 Neon (Low)"},
+                    {"modelId":"gemini-4-carbon-medium","name":"Gemini 4 Carbon (Medium)"},
+                    {"modelId":"gemini-4-carbon-high","name":"Gemini 4 Carbon (High)"},
+                    {"modelId":"gemini-4-carbon-low","name":"Gemini 4 Carbon (Low)"},
+                    {"modelId":"gemini-pro-orchestrator-neon","name":"Orchestrator (Neon)"},
+                    {"modelId":"gemini-3.8-flash-high","name":"Gemini 3.8 Flash (High)"},
+                    {"modelId":"gemini-3.8-flash-medium","name":"Gemini 3.8 Flash (Medium)"},
+                    {"modelId":"gemini-3.8-flash-low","name":"Gemini 3.8 Flash (Low)"}
+                ]
+            },
+            "configOptions": [
+                {"id":"model","category":"model","currentValue":"gemini-4-neon","options":[
+                    {"value":"gemini-4-neon","name":"Gemini 4 Neon"},
+                    {"value":"gemini-4-carbon","name":"Gemini 4 Carbon"},
+                    {"value":"gemini-pro-orchestrator-neon","name":"Orchestrator (Neon)"},
+                    {"value":"gemini-3.8-flash","name":"Gemini 3.8 Flash"}
+                ]},
+                {"id":"thought_level","category":"thought_level","type":"select","currentValue":"xhigh","options":[
+                    {"value":"low","name":"Low"},
+                    {"value":"medium","name":"Medium"},
+                    {"value":"high","name":"High"},
+                    {"value":"xhigh","name":"Extra"}
+                ]}
+            ]
+        });
+        let mut rows = acp_models(&payload);
+        narrow_antigravity_efforts(&mut rows, &payload);
+        assert_eq!(rows[0].efforts, vec!["low", "medium", "high", "xhigh"]);
+        assert_eq!(rows[0].default_effort.as_deref(), Some("xhigh"));
+        assert_eq!(rows[1].efforts, vec!["low", "medium", "high"]);
+        assert_eq!(rows[1].default_effort.as_deref(), Some("high"));
+        assert!(rows[2].efforts.is_empty());
+        assert_eq!(rows[2].default_effort, None);
+        assert_eq!(rows[3].efforts, vec!["low", "medium", "high"]);
+        assert_eq!(rows[3].default_effort.as_deref(), Some("high"));
+
+        // Even when session/new opens on an effort-less Orchestrator (so
+        // configOptions omits thought_level), Neon and Carbon still get their levels.
+        let mut orchestrator_payload = payload.clone();
+        orchestrator_payload["configOptions"] = json!([
+            {"id":"model","category":"model","currentValue":"gemini-pro-orchestrator-neon","options":[
+                {"value":"gemini-4-neon","name":"Gemini 4 Neon"},
+                {"value":"gemini-4-carbon","name":"Gemini 4 Carbon"},
+                {"value":"gemini-pro-orchestrator-neon","name":"Orchestrator (Neon)"}
+            ]}
+        ]);
+        let mut rows = acp_models(&orchestrator_payload);
+        narrow_antigravity_efforts(&mut rows, &orchestrator_payload);
+        assert_eq!(rows[0].efforts, vec!["low", "medium", "high", "xhigh"]);
+        assert_eq!(rows[0].default_effort.as_deref(), Some("high"));
+        assert_eq!(rows[1].efforts, vec!["low", "medium", "high"]);
+        assert_eq!(rows[1].default_effort.as_deref(), Some("medium"));
+        assert!(rows[2].efforts.is_empty());
+        assert_eq!(rows[2].default_effort, None);
     }
 }

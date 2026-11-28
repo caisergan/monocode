@@ -136,4 +136,76 @@ describe("antigravity model rule", () => {
       .toBe("gemini-4-argon");
     expect(antigravity.antigravityModelChoice("claude-opus-5-5", { id: "model" })).toBeUndefined();
   });
+
+  it("narrows per-model effort levels from availableModels and strips them on orchestrators", () => {
+    const models = antigravity.modelsFromSessionNew({
+      models: {
+        currentModelId: "gemini-4-neon-high",
+        availableModels: [
+          { modelId: "gemini-4-neon-high", name: "Gemini 4 Neon (High)" },
+          { modelId: "gemini-4-neon-xhigh", name: "Gemini 4 Neon (XHigh)" },
+          { modelId: "gemini-4-neon-medium", name: "Gemini 4 Neon (Medium)" },
+          { modelId: "gemini-4-neon-low", name: "Gemini 4 Neon (Low)" },
+          { modelId: "gemini-4-carbon-medium", name: "Gemini 4 Carbon (Medium)" },
+          { modelId: "gemini-4-carbon-high", name: "Gemini 4 Carbon (High)" },
+          { modelId: "gemini-4-carbon-low", name: "Gemini 4 Carbon (Low)" },
+          { modelId: "gemini-pro-orchestrator-neon", name: "Orchestrator (Neon)" },
+        ],
+      },
+      configOptions: [
+        {
+          id: "model",
+          category: "model",
+          currentValue: "gemini-4-neon",
+          options: [
+            { value: "gemini-4-neon", name: "Gemini 4 Neon" },
+            { value: "gemini-4-carbon", name: "Gemini 4 Carbon" },
+            { value: "gemini-pro-orchestrator-neon", name: "Orchestrator (Neon)" },
+          ],
+        },
+        {
+          id: "thought_level",
+          category: "thought_level",
+          currentValue: "xhigh",
+          options: [
+            { value: "low", name: "Low" },
+            { value: "medium", name: "Medium" },
+            { value: "high", name: "High" },
+            { value: "xhigh", name: "Extra" },
+          ],
+        },
+      ],
+    });
+    expect(models.map((m) => m.nativeId)).toEqual([
+      "gemini-4-neon",
+      "gemini-4-carbon",
+      "gemini-pro-orchestrator-neon",
+    ]);
+    expect(models[0].settings?.[0]).toEqual({
+      id: "effort",
+      label: "Effort",
+      kind: "select",
+      value: "xhigh",
+      options: [
+        { value: "low", label: "Low" },
+        { value: "medium", label: "Medium" },
+        { value: "high", label: "High" },
+        { value: "xhigh", label: "Extra High" },
+      ],
+    });
+    expect(models[1].settings?.[0]).toEqual({
+      id: "effort",
+      label: "Effort",
+      kind: "select",
+      value: "high",
+      options: [
+        { value: "low", label: "Low" },
+        { value: "medium", label: "Medium" },
+        { value: "high", label: "High" },
+      ],
+    });
+    expect(models[2].settings).toBeUndefined();
+    expect(antigravity.nearestAntigravityEffort("xhigh", ["low", "medium", "high"])).toBe("high");
+    expect(antigravity.nearestAntigravityEffort("max", ["low", "medium", "high", "xhigh"])).toBe("xhigh");
+  });
 });

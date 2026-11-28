@@ -17,6 +17,7 @@ import {
   antigravityModeId,
   antigravityModelChoice,
   antigravityPromptBlocks,
+  nearestAntigravityEffort,
   permissionOptionId,
   permissionRequestFromAcp,
   readConfigOptions,
@@ -667,15 +668,35 @@ async function setConfigOption(
     return;
   }
   const boolValue = value === true || value === "true";
+  let resolvedValue: string | boolean = isBool ? boolValue : String(value);
+  if (
+    !isBool &&
+    configId !== live.modelConfigId &&
+    current.category !== "model" &&
+    current.choices &&
+    current.choices.length > 0 &&
+    !current.choices.includes(String(resolvedValue))
+  ) {
+    const isEffort =
+      current.category === "thought_level" ||
+      configId === "effort" ||
+      configId === "reasoning" ||
+      configId === "thought_level" ||
+      configId === "thinking_level";
+    if (!isEffort) return;
+    const nearest = nearestAntigravityEffort(String(resolvedValue), current.choices);
+    if (!nearest) return;
+    resolvedValue = nearest;
+  }
   const already = isBool
-    ? current.currentValue === boolValue
-    : String(current.currentValue ?? "") === String(value);
+    ? current.currentValue === resolvedValue
+    : String(current.currentValue ?? "") === String(resolvedValue);
   if (already) return;
 
   const params: Record<string, unknown> = {
     sessionId: live.acpSessionId,
     configId,
-    value: isBool ? boolValue : String(value),
+    value: resolvedValue,
   };
   if (isBool) params.type = "boolean";
   const result = await live.acp.request<SessionSetupResult>(

@@ -855,4 +855,27 @@ describe.each(providers)("$id offline ACP transport", (provider) => {
       mock.blockWrites = false;
     }
   });
+
+  it("clamps an unsupported effort level to the model's nearest offered level", async () => {
+    mock.setupConfigOptions = [
+      { id: "model", category: "model", currentValue: "gemini-4-carbon", options: [
+        { value: "gemini-4-carbon", name: "Gemini 4 Carbon" },
+      ] },
+      { id: "thought_level", category: "thought_level", currentValue: "low", options: [
+        { value: "low", name: "Low" },
+        { value: "medium", name: "Medium" },
+        { value: "high", name: "High" },
+      ] },
+    ];
+    mock.autoPrompt = true;
+    await provider.send({
+      ...input,
+      model: `${provider.id}:gemini-4-carbon`,
+      modelSettings: { effort: "xhigh" },
+    });
+    const set = mock.sent.find(
+      (m) => m.method === "session/set_config_option" && m.params?.configId === "thought_level",
+    );
+    expect(set?.params).toMatchObject({ configId: "thought_level", value: "high" });
+  });
 });
