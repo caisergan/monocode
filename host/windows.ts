@@ -54,7 +54,8 @@ export async function runPowerShell(script: string): Promise<string> {
         maxBuffer: 128 * 1024,
       },
       (error, stdout, stderr) => {
-        if (error) reject(new Error(powershellErrorText(stderr) || error.message));
+        if (error)
+          reject(new Error(powershellErrorText(stderr) || error.message));
         else resolve(stdout);
       },
     );
@@ -87,7 +88,12 @@ export function windowsTaskScript(
   options: WindowsServiceOptions,
   path: string,
 ): string {
-  const runner = `$ErrorActionPreference = 'Continue'\n$env:PATH = ${psQuote(path)}\n& ${psQuote(options.executable)} ${[options.entry, "serve", "--data-dir", options.directory, "--port", String(options.port)].map(psQuote).join(" ")} >> ${psQuote(join(options.directory, "host.log"))} 2>&1\nexit $LASTEXITCODE`;
+  // An SSH session on Windows starts with only the machine PATH, so `path`
+  // misses the user's own PATH, where per-user installers (Codex, agy, npm's
+  // global folder) add their directories. Read both from the registry each
+  // time the task starts, so a CLI installed later appears after a restart.
+  const launchPath = `((@(${psQuote(path)} -split ';') + ([Environment]::GetEnvironmentVariable('Path', 'User') -split ';') + ([Environment]::GetEnvironmentVariable('Path', 'Machine') -split ';')) | Where-Object { $_ } | Select-Object -Unique) -join ';'`;
+  const runner = `$ErrorActionPreference = 'Continue'\n$env:PATH = ${launchPath}\n& ${psQuote(options.executable)} ${[options.entry, "serve", "--data-dir", options.directory, "--port", String(options.port)].map(psQuote).join(" ")} >> ${psQuote(join(options.directory, "host.log"))} 2>&1\nexit $LASTEXITCODE`;
   const runnerPath = join(options.directory, "service.ps1");
   const launcher = `$ErrorActionPreference = 'Stop'; try { & ([ScriptBlock]::Create([IO.File]::ReadAllText(${psQuote(runnerPath)}))) } catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }`;
   const taskArgs = ["-WindowStyle", "Hidden", ...powershellArgs(launcher)].join(
