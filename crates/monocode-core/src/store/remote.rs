@@ -87,11 +87,16 @@ fn host_settings(project: &RemoteProject, host: &Value) -> Settings {
         .cloned()
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
-    settings.effort = settings
-        .model_settings
-        .get("reasoningEffort")
-        .or_else(|| settings.model_settings.get("effort"))
-        .cloned();
+    settings.effort = [
+        "reasoningEffort",
+        "effort",
+        "reasoning",
+        "reasoning_effort",
+        "thought_level",
+        "thinking_level",
+    ]
+    .into_iter()
+    .find_map(|key| settings.model_settings.get(key).cloned());
     settings.fast = settings
         .model_settings
         .get("fast")

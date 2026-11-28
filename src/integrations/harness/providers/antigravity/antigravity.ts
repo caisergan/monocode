@@ -17,6 +17,7 @@ import {
   antigravityModeId,
   antigravityModelChoice,
   antigravityPromptBlocks,
+  isAntigravityEffortKey,
   nearestAntigravityEffort,
   permissionOptionId,
   permissionRequestFromAcp,
@@ -620,9 +621,25 @@ async function applyModelSelection(
 
   await setConfigOption(live, modelConfigId, base);
 
-  for (const [settingId, value] of Object.entries(settings)) {
+  // Order canonical `effort` ahead of legacy aliases and apply each target
+  // configId at most once so stale aliases cannot overwrite explicit effort or
+  // touch `model` / `mode` / `provider`.
+  const applied = new Set<string>([
+    modelConfigId,
+    live.modelConfigId,
+    "provider",
+    "model",
+    "mode",
+  ]);
+  const entries = Object.entries(settings).sort(([a], [b]) => {
+    const aCanonical = a.trim().toLowerCase() === "effort" ? 0 : 1;
+    const bCanonical = b.trim().toLowerCase() === "effort" ? 0 : 1;
+    return aCanonical - bCanonical;
+  });
+  for (const [settingId, value] of entries) {
     const configId = resolveSettingConfigId(live.configOptions, settingId);
-    if (!configId || configId === "provider") continue;
+    if (!configId || applied.has(configId)) continue;
+    applied.add(configId);
     await setConfigOption(live, configId, value);
   }
 }
@@ -678,11 +695,7 @@ async function setConfigOption(
     !current.choices.includes(String(resolvedValue))
   ) {
     const isEffort =
-      current.category === "thought_level" ||
-      configId === "effort" ||
-      configId === "reasoning" ||
-      configId === "thought_level" ||
-      configId === "thinking_level";
+      current.category === "thought_level" || isAntigravityEffortKey(configId);
     if (!isEffort) return;
     const nearest = nearestAntigravityEffort(String(resolvedValue), current.choices);
     if (!nearest) return;

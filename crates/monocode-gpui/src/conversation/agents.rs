@@ -134,7 +134,7 @@ impl Conversation {
     /// provider reported it, the concrete model behind an alias.
     pub(crate) fn agent_launch(&self) -> Value {
         let mut value = json!({"runtimeMode": self.settings.access.id()});
-        if let Some(effort) = &self.settings.effort {
+        if let Some(effort) = self.effective_saved_effort() {
             value["effort"] = json!(effort);
         }
         if let Some(resolved) = self

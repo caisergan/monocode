@@ -281,21 +281,38 @@ const EFFORT_LABELS: Record<string, string> = {
   ultra: "Ultra",
 };
 
+const EFFORT_KEYS = new Set([
+  "effort",
+  "reasoning",
+  "reasoningeffort",
+  "reasoning_effort",
+  "thought_level",
+  "thinking_level",
+]);
+
+export function isAntigravityEffortKey(key: string): boolean {
+  return EFFORT_KEYS.has(key.trim().toLowerCase());
+}
+
 export function nearestAntigravityEffort(
   value: string,
   choices: string[],
 ): string | undefined {
+  const needle = value.trim().toLowerCase();
+  const exact = choices.find((choice) => choice.toLowerCase() === needle);
+  if (exact) return exact;
   const requested = EFFORT_ORDER.indexOf(
-    value.trim().toLowerCase() as (typeof EFFORT_ORDER)[number],
+    needle as (typeof EFFORT_ORDER)[number],
   );
   if (requested < 0) return undefined;
   let best: { distance: number; choice: string } | undefined;
   for (let i = 0; i < EFFORT_ORDER.length; i++) {
     const level = EFFORT_ORDER[i];
-    if (!choices.includes(level)) continue;
+    const matched = choices.find((choice) => choice.toLowerCase() === level);
+    if (!matched) continue;
     const distance = Math.abs(i - requested);
     if (!best || distance < best.distance) {
-      best = { distance, choice: level };
+      best = { distance, choice: matched };
     }
   }
   return best?.choice;
@@ -346,6 +363,7 @@ export function modelsFromSessionNew(raw: unknown): AgentModel[] {
     return value ? [{ value, label: String(model?.name ?? value) }] : [];
   });
   const narrowFromAvailable = choices.length > 0 && availableIds.length > 0;
+  const baseIds = new Set(models.map(({ value }) => value));
   return [...new Map(models.filter(({ value }) => antigravityAllowsModel(value)).map(({ value, label }) => {
     let modelSettings = settings;
     if (narrowFromAvailable) {
@@ -354,7 +372,7 @@ export function modelsFromSessionNew(raw: unknown): AgentModel[] {
       for (const avail of availableIds) {
         if (avail === value) {
           exact = true;
-        } else if (avail.startsWith(`${value}-`)) {
+        } else if (!baseIds.has(avail) && avail.startsWith(`${value}-`)) {
           const suffix = avail.slice(value.length + 1);
           if (
             EFFORT_ORDER.includes(suffix as (typeof EFFORT_ORDER)[number]) &&
@@ -456,12 +474,12 @@ export function resolveSettingConfigId(
   const needle = settingId.trim().toLowerCase();
   const exact = options.find((option) => option.id.toLowerCase() === needle);
   if (exact) return exact.id;
-  if (needle === "effort" || needle === "reasoning") {
+  if (isAntigravityEffortKey(needle)) {
     return options.find(
       (option) =>
-        option.id === "effort" ||
-        option.id === "reasoning" ||
-        option.category === "thought_level",
+        option.type !== "boolean" &&
+        (isAntigravityEffortKey(option.id) ||
+          option.category === "thought_level"),
     )?.id;
   }
   if (needle === "fast" || needle === "fastmode" || needle === "fast_mode") {

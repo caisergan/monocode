@@ -49,6 +49,9 @@ describe.each(providers)("$id ACP protocol", ({ id, protocol, mode, blocks, mode
     expect(protocol.extractModelConfigId([])).toBe("model");
     expect(protocol.resolveSettingConfigId(options, "effort")).toBe("thinking");
     expect(protocol.resolveSettingConfigId(options, "reasoning")).toBe("thinking");
+    expect(protocol.resolveSettingConfigId(options, "reasoningEffort")).toBe("thinking");
+    expect(protocol.resolveSettingConfigId(options, "thought_level")).toBe("thinking");
+    expect(protocol.resolveSettingConfigId(options, "thinking_level")).toBe("thinking");
     expect(protocol.resolveSettingConfigId(options, "THINKING")).toBe("thinking");
     expect(protocol.resolveSettingConfigId(options, "missing")).toBeUndefined();
   });
@@ -207,5 +210,29 @@ describe("antigravity model rule", () => {
     expect(models[2].settings).toBeUndefined();
     expect(antigravity.nearestAntigravityEffort("xhigh", ["low", "medium", "high"])).toBe("high");
     expect(antigravity.nearestAntigravityEffort("max", ["low", "medium", "high", "xhigh"])).toBe("xhigh");
+
+    // Distinct base model ending in an effort word must not collide with shorter prefix.
+    const collided = antigravity.modelsFromSessionNew({
+      models: {
+        availableModels: [
+          { modelId: "gemini-5-pro-low", name: "Gemini 5 Pro (Low)" },
+          { modelId: "gemini-5-pro-high", name: "Gemini 5 Pro (High)" },
+          { modelId: "gemini-5-pro-max", name: "Gemini 5 Pro Max" },
+        ],
+      },
+      configOptions: [
+        {
+          id: "model",
+          category: "model",
+          currentValue: "gemini-5-pro",
+          options: [
+            { value: "gemini-5-pro", name: "Gemini 5 Pro" },
+            { value: "gemini-5-pro-max", name: "Gemini 5 Pro Max" },
+          ],
+        },
+      ],
+    });
+    expect(collided[0].settings?.[0].options.map((o) => o.value)).toEqual(["low", "high"]);
+    expect(collided[1].settings).toBeUndefined();
   });
 });

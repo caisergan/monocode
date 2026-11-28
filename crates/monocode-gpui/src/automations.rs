@@ -684,12 +684,10 @@ impl Automations {
                 {
                     this.model_controls = model.controls.clone();
                     if !model.efforts.is_empty()
-                        && !this.model_controls.iter().any(|c| {
-                            matches!(
-                                c.id.as_str(),
-                                "reasoningEffort" | "reasoning_effort" | "effort" | "reasoning"
-                            )
-                        })
+                        && !this
+                            .model_controls
+                            .iter()
+                            .any(|c| monocode_core::catalog::is_effort_key(&c.id))
                     {
                         this.model_controls
                             .push(monocode_core::catalog::ModelControl {

@@ -1211,20 +1211,19 @@ impl Conversation {
         self.turn_sender = settings.message_sender.clone();
         settings.master = self.master;
         if let Some(model) = self.model_info() {
+            let keeps_effort_control = model.controls.iter().any(|c| catalog::is_effort_key(&c.id));
             if model.efforts.is_empty() {
-                if !model.controls.iter().any(|c| is_effort_key(&c.id)) {
+                if !keeps_effort_control {
                     settings.effort = None;
-                    settings.model_settings.retain(|key, _| !is_effort_key(key));
+                    settings
+                        .model_settings
+                        .retain(|key, _| !catalog::is_effort_key(key));
                 }
-            } else if let Some(effort) = settings.effort.as_deref()
-                && !model.efforts.iter().any(|e| e == effort)
-            {
-                settings.model_settings.retain(|key, _| !is_effort_key(key));
-                settings.effort = if Kind::from_id(&self.summary.provider) == Kind::Hermes {
-                    None
-                } else {
-                    nearest_model_effort(effort, &model.efforts).map(str::to_owned)
-                };
+            } else if settings.effort.is_some() {
+                settings
+                    .model_settings
+                    .retain(|key, _| !catalog::is_effort_key(key));
+                settings.effort = self.effective_saved_effort().map(str::to_owned);
             }
             for control in &model.controls {
                 settings
@@ -1412,8 +1411,14 @@ impl Conversation {
                                 && pending.from == source_provider
                                 && pending.account.id == source_account
                             {
+                                pending
+                                    .model_settings
+                                    .retain(|key, _| !catalog::is_effort_key(key));
                                 pending.effort = Some(effort);
                             } else if source_selected {
+                                this.settings
+                                    .model_settings
+                                    .retain(|key, _| !catalog::is_effort_key(key));
                                 this.settings.effort = Some(effort);
                             }
                             this.save_settings(cx);
@@ -2138,7 +2143,7 @@ impl Conversation {
             self.settings.model_settings.remove("serviceTier");
         } else if let Some(setting) = id.strip_prefix("model-setting:") {
             if let Ok((key, value)) = serde_json::from_str::<(String, String)>(setting) {
-                if is_effort_key(&key)
+                if catalog::is_effort_key(&key)
                     && (!self.is_remote() || matches!(key.as_str(), "effort" | "reasoningEffort"))
                 {
                     self.set_effort_choice(&value, cx);
@@ -2199,7 +2204,7 @@ impl Conversation {
     fn set_effort_choice(&mut self, effort: &str, cx: &mut Context<Self>) {
         self.settings
             .model_settings
-            .retain(|key, _| !is_effort_key(key));
+            .retain(|key, _| !catalog::is_effort_key(key));
         self.settings.effort = (!effort.is_empty()).then(|| effort.to_owned());
         let provider = self.summary.provider.clone();
         if cx.has_global::<crate::settings::Preferences>() {
@@ -2211,6 +2216,29 @@ impl Conversation {
                 }
             });
         }
+    }
+    /// The saved effort that actually applies to the active model (when loaded):
+    /// `None` for effort-less models (unless the model declares an effort control),
+    /// exact match or nearest offered choice otherwise (Hermes keeps `None` on mismatch).
+    pub(super) fn effective_saved_effort(&self) -> Option<&str> {
+        let effort = self.settings.effort.as_deref()?;
+        let Some(model) = self.model_info() else {
+            return Some(effort);
+        };
+        if model.efforts.is_empty() {
+            return model
+                .controls
+                .iter()
+                .any(|c| catalog::is_effort_key(&c.id))
+                .then_some(effort);
+        }
+        if let Some(matched) = model.efforts.iter().find(|e| e.as_str() == effort) {
+            return Some(matched.as_str());
+        }
+        if Kind::from_id(&self.summary.provider) == Kind::Hermes {
+            return None;
+        }
+        catalog::nearest_effort(effort, &model.efforts)
     }
     fn selected_effort(&self) -> Option<&str> {
         let raw = self.settings.effort.as_deref().or_else(|| {
@@ -2235,7 +2263,7 @@ impl Conversation {
                     return Some(matched.as_str());
                 }
                 if Kind::from_id(&self.summary.provider) != Kind::Hermes
-                    && let Some(nearest) = nearest_model_effort(effort, &model.efforts)
+                    && let Some(nearest) = catalog::nearest_effort(effort, &model.efforts)
                 {
                     return Some(nearest);
                 }
@@ -3851,34 +3879,6 @@ pub(crate) fn remember_access(mode: AccessMode, cx: &mut gpui::App) {
         });
     }
 }
-fn is_effort_key(key: &str) -> bool {
-    matches!(
-        key,
-        "effort"
-            | "reasoning"
-            | "reasoningEffort"
-            | "reasoning_effort"
-            | "thought_level"
-            | "thinking_level"
-    )
-}
-fn nearest_model_effort<'a>(value: &str, choices: &'a [String]) -> Option<&'a str> {
-    const ORDER: [&str; 8] = [
-        "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
-    ];
-    let requested = ORDER.iter().position(|effort| *effort == value)?;
-    ORDER
-        .iter()
-        .enumerate()
-        .filter_map(|(index, effort)| {
-            choices
-                .iter()
-                .find(|choice| choice.as_str() == *effort)
-                .map(|choice| (index.abs_diff(requested), choice.as_str()))
-        })
-        .min_by_key(|(distance, _)| *distance)
-        .map(|(_, choice)| choice)
-}
 pub(crate) fn preferred_effort(provider: &str, cx: &gpui::App) -> Option<String> {
     cx.try_global::<crate::settings::Preferences>()
         .and_then(|prefs| prefs.provider_efforts.get(provider).cloned())
@@ -4948,29 +4948,55 @@ mod menu_tests {
                     },
                 ];
                 c.model = Some("gemini-4-neon".into());
+                c.settings
+                    .model_settings
+                    .insert("thought_level".into(), "low".into());
                 c.menu_choice("effort:xhigh", cx);
                 assert_eq!(c.selected_effort(), Some("xhigh"));
+                assert_eq!(c.effective_saved_effort(), Some("xhigh"));
                 assert_eq!(c.trigger_effort_label().as_deref(), Some("Extra High"));
+                assert_eq!(
+                    c.mobile_model_settings().get("effort").map(String::as_str),
+                    Some("xhigh")
+                );
+                assert!(!c.mobile_model_settings().contains_key("thought_level"));
+                assert_eq!(c.agent_launch()["effort"], "xhigh");
 
-                // Switching to Carbon (no xhigh) snaps display and submenu check to High.
+                // Switching to Carbon (no xhigh) snaps display, submenu check,
+                // mobile sheet, and agent launch to High.
                 c.model = Some("gemini-4-carbon".into());
                 assert_eq!(c.selected_effort(), Some("high"));
+                assert_eq!(c.effective_saved_effort(), Some("high"));
                 assert_eq!(c.trigger_effort_label().as_deref(), Some("High"));
+                assert_eq!(
+                    c.mobile_model_settings().get("effort").map(String::as_str),
+                    Some("high")
+                );
+                assert_eq!(c.agent_launch()["effort"], "high");
                 assert!(
                     c.effort_items()
                         .iter()
                         .any(|item| item.id == "effort:high" && item.checked)
                 );
 
-                // Orchestrator has no effort levels, so nothing is shown.
+                // Orchestrator has no effort levels, so nothing is shown or reported.
                 c.model = Some("gemini-pro-orchestrator-neon".into());
                 assert_eq!(c.selected_effort(), None);
+                assert_eq!(c.effective_saved_effort(), None);
                 assert_eq!(c.trigger_effort_label(), None);
+                assert!(!c.mobile_model_settings().contains_key("effort"));
+                assert!(c.agent_launch().get("effort").is_none());
 
                 // Switching back to Neon restores the remembered Extra High level.
                 c.model = Some("gemini-4-neon".into());
                 assert_eq!(c.selected_effort(), Some("xhigh"));
+                assert_eq!(c.effective_saved_effort(), Some("xhigh"));
                 assert_eq!(c.trigger_effort_label().as_deref(), Some("Extra High"));
+                assert_eq!(
+                    c.mobile_model_settings().get("effort").map(String::as_str),
+                    Some("xhigh")
+                );
+                assert_eq!(c.agent_launch()["effort"], "xhigh");
             })
             .unwrap();
     }

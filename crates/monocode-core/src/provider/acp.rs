@@ -510,18 +510,7 @@ impl Protocol {
     /// family ids to variant values in `configOptions`, so it keeps the legacy field.
     fn acp_reported_model(&self) -> Option<String> {
         if self.request.kind != Kind::Devin {
-            if let Some(model) = self.acp.setup["configOptions"]
-                .as_array()
-                .and_then(|options| {
-                    options
-                        .iter()
-                        .find(|o| config_id(o) == "model")
-                        .or_else(|| {
-                            options
-                                .iter()
-                                .find(|o| o["category"] == "model" && config_id(o) != "provider")
-                        })
-                })
+            if let Some(model) = model_config_option(&self.acp.setup)
                 .and_then(|option| option["currentValue"].as_str())
                 .filter(|model| !model.is_empty())
             {
@@ -539,19 +528,7 @@ impl Protocol {
         if self.request.kind != Kind::Antigravity {
             return model.to_owned();
         }
-        let Some(option) = self.acp.setup["configOptions"]
-            .as_array()
-            .and_then(|options| {
-                options
-                    .iter()
-                    .find(|o| config_id(o) == "model")
-                    .or_else(|| {
-                        options
-                            .iter()
-                            .find(|o| o["category"] == "model" && config_id(o) != "provider")
-                    })
-            })
-        else {
+        let Some(option) = model_config_option(&self.acp.setup) else {
             return model.to_owned();
         };
         let mut choices = Vec::new();
@@ -560,7 +537,9 @@ impl Protocol {
             return model.to_owned();
         }
         if let Some((base, suffix)) = model.rsplit_once('-') {
-            if EFFORT_LEVELS.contains(&suffix) && choices.iter().any(|choice| choice == base) {
+            if crate::catalog::EFFORT_ORDER.contains(&suffix)
+                && choices.iter().any(|choice| choice == base)
+            {
                 return base.to_owned();
             }
         }
@@ -635,10 +614,6 @@ impl Protocol {
         {
             self.acp.mode = Some(mode);
         }
-        let config = setup["configOptions"]
-            .as_array()
-            .cloned()
-            .unwrap_or_default();
         let mut selected_model = self.request.model.as_ref().map(|model| {
             if kind == Kind::Devin {
                 let (model, spent) = super::devin::model_value(setup, model, settings);
@@ -655,7 +630,7 @@ impl Protocol {
                 )));
             }
             // The session may open on a model picked elsewhere, such as in agy.
-            let option = config.iter().find(|o| config_id(o) == "model");
+            let option = model_config_option(setup);
             let current = option
                 .and_then(|o| o["currentValue"].as_str())
                 .or_else(|| setup["models"]["currentModelId"].as_str());
@@ -680,11 +655,7 @@ impl Protocol {
                     || setup["models"]["currentModelId"].as_str() != Some(model.as_str())
             })
         {
-            if let Some(option) = config.iter().find(|o| config_id(o) == "model").or_else(|| {
-                config
-                    .iter()
-                    .find(|o| o["category"] == "model" && config_id(o) != "provider")
-            }) {
+            if let Some(option) = model_config_option(setup) {
                 let mut choices = Vec::new();
                 config_choices(&option["options"], &mut choices);
                 if kind != Kind::Devin
@@ -728,7 +699,7 @@ impl Protocol {
         if let Some(effort) = &settings.effort {
             // `settings.effort` is authoritative: drop any stale effort alias
             // from `model_settings` so HashMap iteration order cannot override it.
-            selected.retain(|key, _| !is_effort_setting(key));
+            selected.retain(|key, _| !crate::catalog::is_effort_key(key));
             selected.insert("effort".into(), effort.clone());
         }
         selected
@@ -764,12 +735,16 @@ impl Protocol {
             .as_array()
             .cloned()
             .unwrap_or_default();
+        // Order deterministically with canonical `effort` ahead of any legacy
+        // effort aliases so conflicting keys resolve identically every turn.
+        let mut entries: Vec<(String, String)> = selected.into_iter().collect();
+        entries.sort_by(|(a, _), (b, _)| (a != "effort", a).cmp(&(b != "effort", b)));
         let mut resolved = std::collections::HashSet::new();
-        for (id, mut value) in selected {
+        for (id, mut value) in entries {
             if kind == Kind::Devin && id == "fast" {
                 continue;
             }
-            if kind == Kind::Devin && self.acp.spent_effort && is_effort_setting(&id) {
+            if kind == Kind::Devin && self.acp.spent_effort && crate::catalog::is_effort_key(&id) {
                 continue;
             }
             let Some(option) = setting_option(&config, &id) else {
@@ -804,8 +779,8 @@ impl Protocol {
                     }
                     let nearest = if reset {
                         Some(value.clone())
-                    } else if is_effort_setting(&id) {
-                        nearest_effort(&value, &choices)
+                    } else if crate::catalog::is_effort_key(&id) {
+                        crate::catalog::nearest_effort(&value, &choices).map(str::to_owned)
                     } else {
                         None
                     };
@@ -1792,6 +1767,17 @@ fn config_id(option: &Value) -> &str {
         .or_else(|| option["configId"].as_str())
         .unwrap_or("")
 }
+fn model_config_option(setup: &Value) -> Option<&Value> {
+    let options = setup["configOptions"].as_array()?;
+    options
+        .iter()
+        .find(|o| config_id(o) == "model")
+        .or_else(|| {
+            options
+                .iter()
+                .find(|o| o["category"] == "model" && config_id(o) != "provider")
+        })
+}
 fn setting_option<'a>(options: &'a [Value], setting: &str) -> Option<&'a Value> {
     let setting = setting.trim().to_lowercase();
     options
@@ -1800,25 +1786,15 @@ fn setting_option<'a>(options: &'a [Value], setting: &str) -> Option<&'a Value> 
         .or_else(|| {
             options.iter().find(|option| {
                 let id = config_id(option);
-                match setting.as_str() {
-                    "effort"
-                    | "reasoning"
-                    | "reasoningeffort"
-                    | "reasoning_effort"
-                    | "thought_level"
-                    | "thinking_level" => {
-                        matches!(
-                            id,
-                            "effort"
-                                | "reasoning"
-                                | "reasoning_effort"
-                                | "thought_level"
-                                | "thinking_level"
-                        ) || (option["category"] == "thought_level" && id != "thinking")
+                if crate::catalog::is_effort_key(&setting) {
+                    crate::catalog::is_effort_key(id)
+                        || (option["category"] == "thought_level" && id != "thinking")
+                } else {
+                    match setting.as_str() {
+                        "fast" | "fastmode" => id.to_lowercase().contains("fast"),
+                        "context" | "contextwindow" => matches!(id, "context" | "context_size"),
+                        _ => false,
                     }
-                    "fast" | "fastmode" => id.to_lowercase().contains("fast"),
-                    "context" | "contextwindow" => matches!(id, "context" | "context_size"),
-                    _ => false,
                 }
             })
         })
@@ -1872,29 +1848,6 @@ fn dsh_tool_kind(name: &str) -> &'static str {
         "todo_write" => "think",
         _ => "other",
     }
-}
-const EFFORT_LEVELS: [&str; 8] = [
-    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
-];
-fn is_effort_setting(key: &str) -> bool {
-    matches!(
-        key.trim().to_ascii_lowercase().as_str(),
-        "effort"
-            | "reasoning"
-            | "reasoningeffort"
-            | "reasoning_effort"
-            | "thought_level"
-            | "thinking_level"
-    )
-}
-fn nearest_effort(value: &str, choices: &[String]) -> Option<String> {
-    let requested = EFFORT_LEVELS.iter().position(|effort| *effort == value)?;
-    EFFORT_LEVELS
-        .iter()
-        .enumerate()
-        .filter(|(_, effort)| choices.iter().any(|choice| choice == **effort))
-        .min_by_key(|(index, _)| index.abs_diff(requested))
-        .map(|(_, effort)| (*effort).into())
 }
 
 fn background_dispatch(update: &Value) -> Option<BackgroundDispatch> {

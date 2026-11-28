@@ -17,6 +17,51 @@ use std::{
 
 const CATALOG_BYTES: usize = 2 * 1024 * 1024;
 
+/// Ordered effort / reasoning levels from lowest to highest, shared across
+/// catalog parsing, ACP clamping, and composer pickers.
+pub const EFFORT_ORDER: [&str; 8] = [
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+];
+
+/// Whether a model-setting key names a reasoning/effort control across providers.
+pub fn is_effort_key(key: &str) -> bool {
+    matches!(
+        key.trim().to_ascii_lowercase().as_str(),
+        "effort"
+            | "reasoning"
+            | "reasoningeffort"
+            | "reasoning_effort"
+            | "thought_level"
+            | "thinking_level"
+    )
+}
+
+/// Match `value` directly (case-insensitively) or snap to the closest offered
+/// choice along `EFFORT_ORDER`.
+pub fn nearest_effort<'a>(value: &str, choices: &'a [String]) -> Option<&'a str> {
+    let needle = value.trim();
+    if let Some(exact) = choices
+        .iter()
+        .find(|choice| choice.eq_ignore_ascii_case(needle))
+    {
+        return Some(exact.as_str());
+    }
+    let requested = EFFORT_ORDER
+        .iter()
+        .position(|effort| effort.eq_ignore_ascii_case(needle))?;
+    EFFORT_ORDER
+        .iter()
+        .enumerate()
+        .filter_map(|(index, effort)| {
+            choices
+                .iter()
+                .find(|choice| choice.eq_ignore_ascii_case(effort))
+                .map(|choice| (index.abs_diff(requested), choice.as_str()))
+        })
+        .min_by_key(|(distance, _)| *distance)
+        .map(|(_, choice)| choice)
+}
+
 /// Installed providers and their project-specific catalogs on a remote host.
 /// The host owns discovery, credentials, catalog caching, and model defaults.
 #[derive(Clone)]
@@ -263,13 +308,28 @@ struct SavedRemote {
     providers: Vec<String>,
     models: std::collections::BTreeMap<String, Vec<Model>>,
 }
+fn migrate_saved_catalogs(mut saved: SavedCatalogs) -> SavedCatalogs {
+    if saved.version < SAVED_CATALOG_VERSION {
+        saved
+            .local
+            .retain(|entry| Kind::parse(&entry.provider) != Some(Kind::Antigravity));
+        for entry in &mut saved.remote {
+            entry
+                .models
+                .retain(|id, _| Kind::parse(id) != Some(Kind::Antigravity));
+        }
+    }
+    saved
+}
 /// Load the catalogs saved at `path` and keep saving there. Catalogs already
 /// fetched in this run win over saved ones.
 pub fn persist_in(path: std::path::PathBuf) {
-    let saved: SavedCatalogs = std::fs::read(&path)
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default();
+    let saved: SavedCatalogs = migrate_saved_catalogs(
+        std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default(),
+    );
     if SAVED.set(path).is_err() {
         return;
     }
@@ -279,9 +339,6 @@ pub fn persist_in(path: std::path::PathBuf) {
             let Some(kind) = Kind::parse(&entry.provider) else {
                 continue;
             };
-            if saved.version < SAVED_CATALOG_VERSION && kind == Kind::Antigravity {
-                continue;
-            }
             if entry.models.is_empty()
                 || cache
                     .entries
@@ -628,16 +685,7 @@ fn acp_models(value: &Value) -> Vec<Model> {
         o["id"] != "thinking"
             && o["type"] != "boolean"
             && (o["category"] == "thought_level"
-                || matches!(
-                    o["id"].as_str(),
-                    Some(
-                        "thought_level"
-                            | "effort"
-                            | "reasoning"
-                            | "reasoning_effort"
-                            | "thinking_level"
-                    )
-                ))
+                || o["id"].as_str().is_some_and(is_effort_key))
     });
     let mut choices = Vec::new();
     if let Some(effort) = effort {
@@ -684,10 +732,7 @@ fn acp_models(value: &Value) -> Vec<Model> {
                 o["id"] != "thinking"
                     && o["type"] != "boolean"
                     && (o["category"] == "thought_level"
-                        || matches!(
-                            o["id"].as_str(),
-                            Some("reasoning" | "effort" | "reasoning_effort")
-                        ))
+                        || o["id"].as_str().is_some_and(is_effort_key))
             });
             let mut row_choices = Vec::new();
             if let Some(option) = row_effort {
@@ -722,18 +767,9 @@ fn acp_models(value: &Value) -> Vec<Model> {
                 .iter()
                 .filter_map(|option| {
                     let id = option["id"].as_str()?;
-                    if matches!(
-                        id,
-                        "model"
-                            | "provider"
-                            | "mode"
-                            | "fast"
-                            | "effort"
-                            | "reasoning"
-                            | "reasoning_effort"
-                            | "thought_level"
-                            | "thinking_level"
-                    ) || matches!(option["category"].as_str(), Some("model" | "mode"))
+                    if matches!(id, "model" | "provider" | "mode" | "fast")
+                        || is_effort_key(id)
+                        || matches!(option["category"].as_str(), Some("model" | "mode"))
                         || (option["category"] == "thought_level" && id != "thinking")
                     {
                         return None;
@@ -788,9 +824,6 @@ fn acp_models(value: &Value) -> Vec<Model> {
 /// both are present so models without `xhigh` or without thinking levels never
 /// inherit another model's options.
 fn narrow_antigravity_efforts(models: &mut [Model], value: &Value) {
-    const ORDER: [&str; 8] = [
-        "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
-    ];
     let has_config_models = value["configOptions"].as_array().is_some_and(|configs| {
         configs
             .iter()
@@ -821,53 +854,36 @@ fn narrow_antigravity_efforts(models: &mut [Model], value: &Value) {
             o["id"] != "thinking"
                 && o["type"] != "boolean"
                 && (o["category"] == "thought_level"
-                    || matches!(
-                        o["id"].as_str(),
-                        Some(
-                            "thought_level"
-                                | "effort"
-                                | "reasoning"
-                                | "reasoning_effort"
-                                | "thinking_level"
-                        )
-                    ))
+                    || o["id"].as_str().is_some_and(is_effort_key))
         })
         .and_then(|o| o["currentValue"].as_str());
+    let base_ids: std::collections::HashSet<String> =
+        models.iter().map(|m| m.id.clone()).collect();
     for model in models {
         let mut variants = Vec::new();
         let mut exact = false;
         for id in &available {
             if *id == model.id {
                 exact = true;
-            } else if let Some(suffix) = id
-                .strip_prefix(&model.id)
-                .and_then(|rest| rest.strip_prefix('-'))
-            {
-                if ORDER.contains(&suffix) && !variants.contains(&suffix) {
-                    variants.push(suffix);
+            } else if !base_ids.contains(*id) {
+                if let Some(suffix) = id
+                    .strip_prefix(&model.id)
+                    .and_then(|rest| rest.strip_prefix('-'))
+                {
+                    if EFFORT_ORDER.contains(&suffix) && !variants.contains(&suffix) {
+                        variants.push(suffix);
+                    }
                 }
             }
         }
         if variants.len() >= 2 {
-            let ordered: Vec<String> = ORDER
+            let ordered: Vec<String> = EFFORT_ORDER
                 .iter()
                 .filter(|level| variants.contains(level))
                 .map(|level| (*level).to_owned())
                 .collect();
             let default = session_thought
-                .and_then(|cur| {
-                    if ordered.iter().any(|e| e == cur) {
-                        Some(cur.to_owned())
-                    } else {
-                        let requested = ORDER.iter().position(|e| *e == cur)?;
-                        ORDER
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, e)| ordered.iter().any(|o| o == *e))
-                            .min_by_key(|(ix, _)| ix.abs_diff(requested))
-                            .map(|(_, e)| (*e).to_owned())
-                    }
-                })
+                .and_then(|cur| nearest_effort(cur, &ordered).map(str::to_owned))
                 .or_else(|| variants.first().map(|e| (*e).to_owned()));
             model.efforts = ordered;
             model.default_effort = default;
@@ -1369,5 +1385,85 @@ mod tests {
         assert_eq!(rows[1].default_effort.as_deref(), Some("medium"));
         assert!(rows[2].efforts.is_empty());
         assert_eq!(rows[2].default_effort, None);
+
+        // A distinct base model whose id happens to end with an effort word
+        // (e.g. `gemini-5-pro-max`) must not be misread as an effort suffix of
+        // `gemini-5-pro`.
+        let collision_payload = json!({
+            "models": {
+                "availableModels": [
+                    {"modelId":"gemini-5-pro-low","name":"Gemini 5 Pro (Low)"},
+                    {"modelId":"gemini-5-pro-high","name":"Gemini 5 Pro (High)"},
+                    {"modelId":"gemini-5-pro-max","name":"Gemini 5 Pro Max"}
+                ]
+            },
+            "configOptions": [
+                {"id":"model","category":"model","currentValue":"gemini-5-pro","options":[
+                    {"value":"gemini-5-pro","name":"Gemini 5 Pro"},
+                    {"value":"gemini-5-pro-max","name":"Gemini 5 Pro Max"}
+                ]}
+            ]
+        });
+        let mut rows = acp_models(&collision_payload);
+        narrow_antigravity_efforts(&mut rows, &collision_payload);
+        assert_eq!(rows[0].efforts, vec!["low", "high"]);
+        assert!(rows[1].efforts.is_empty());
+    }
+
+    #[test]
+    fn saved_catalog_migration_drops_legacy_antigravity_entries_only() {
+        let legacy = SavedCatalogs {
+            version: 0,
+            local: vec![
+                SavedLocal {
+                    provider: "antigravity".into(),
+                    account: crate::accounts::Profile::default(),
+                    models: vec![model("gemini-4-carbon", "Carbon")],
+                },
+                SavedLocal {
+                    provider: "codex".into(),
+                    account: crate::accounts::Profile::default(),
+                    models: vec![model("gpt-5", "GPT-5")],
+                },
+            ],
+            remote: vec![SavedRemote {
+                project: "remote://host/work".into(),
+                providers: vec!["antigravity".into(), "codex".into()],
+                models: [
+                    (
+                        "antigravity".into(),
+                        vec![model("gemini-4-carbon", "Carbon")],
+                    ),
+                    ("codex".into(), vec![model("gpt-5", "GPT-5")]),
+                ]
+                .into(),
+            }],
+        };
+        let migrated = migrate_saved_catalogs(legacy);
+        assert_eq!(migrated.local.len(), 1);
+        assert_eq!(migrated.local[0].provider, "codex");
+        assert!(!migrated.remote[0].models.contains_key("antigravity"));
+        assert!(migrated.remote[0].models.contains_key("codex"));
+
+        let current = SavedCatalogs {
+            version: SAVED_CATALOG_VERSION,
+            local: vec![SavedLocal {
+                provider: "antigravity".into(),
+                account: crate::accounts::Profile::default(),
+                models: vec![model("gemini-4-carbon", "Carbon")],
+            }],
+            remote: vec![SavedRemote {
+                project: "remote://host/work".into(),
+                providers: vec!["antigravity".into()],
+                models: [(
+                    "antigravity".into(),
+                    vec![model("gemini-4-carbon", "Carbon")],
+                )]
+                .into(),
+            }],
+        };
+        let kept = migrate_saved_catalogs(current);
+        assert_eq!(kept.local.len(), 1);
+        assert!(kept.remote[0].models.contains_key("antigravity"));
     }
 }

@@ -756,12 +756,7 @@ impl Automations {
             .then(|| {
                 self.model_controls
                     .iter()
-                    .find(|control| {
-                        matches!(
-                            control.id.as_str(),
-                            "effort" | "reasoning_effort" | "reasoningEffort" | "reasoning"
-                        )
-                    })
+                    .find(|control| monocode_core::catalog::is_effort_key(&control.id))
                     .map(|control| control_label(control, draft))
             })
             .flatten();
@@ -1216,33 +1211,56 @@ fn control_label(
     control: &monocode_core::catalog::ModelControl,
     draft: &AutomationUpsert,
 ) -> String {
-    let value = control_value(control, draft);
+    let raw = control_value(control, draft);
+    let value: &str = if monocode_core::catalog::is_effort_key(&control.id)
+        && !control.choices.iter().any(|(v, _)| v == raw)
+    {
+        let values: Vec<String> = control.choices.iter().map(|(v, _)| v.clone()).collect();
+        monocode_core::catalog::nearest_effort(raw, &values)
+            .and_then(|matched| {
+                control
+                    .choices
+                    .iter()
+                    .find(|(v, _)| v == matched)
+                    .map(|(v, _)| v.as_str())
+            })
+            .unwrap_or(raw.as_str())
+    } else {
+        raw.as_str()
+    };
     let label = control
         .choices
         .iter()
         .find(|(v, _)| v == value)
-        .map(|(_, l)| l)
+        .map(|(_, l)| l.as_str())
         .unwrap_or(value);
-    match label.as_str() {
+    match label {
         "low" => "Low".into(),
         "medium" => "Medium".into(),
         "high" => "High".into(),
         "xhigh" => "Extra high".into(),
         "minimal" => "Minimal".into(),
         "none" => "None".into(),
-        _ => label.clone(),
+        _ => label.to_owned(),
     }
 }
 fn control_value<'a>(
     control: &'a monocode_core::catalog::ModelControl,
     draft: &'a AutomationUpsert,
 ) -> &'a String {
-    let aliases: &[&str] = match control.id.as_str() {
-        "reasoningEffort" | "reasoning_effort" | "effort" | "reasoning" => {
-            &["reasoningEffort", "reasoning_effort", "effort", "reasoning"]
-        }
-        "serviceTier" | "service_tier" => &["serviceTier", "service_tier"],
-        _ => &[],
+    let aliases: &[&str] = if monocode_core::catalog::is_effort_key(&control.id) {
+        &[
+            "reasoningEffort",
+            "reasoning_effort",
+            "effort",
+            "reasoning",
+            "thought_level",
+            "thinking_level",
+        ]
+    } else if matches!(control.id.as_str(), "serviceTier" | "service_tier") {
+        &["serviceTier", "service_tier"]
+    } else {
+        &[]
     };
     aliases
         .iter()
@@ -1251,18 +1269,24 @@ fn control_value<'a>(
         .unwrap_or(&control.current)
 }
 fn set_control_value(draft: &mut AutomationUpsert, key: String, value: String) {
-    let (canonical, aliases): (&str, &[&str]) = match key.as_str() {
-        "reasoningEffort" | "reasoning_effort" | "effort" | "reasoning" => (
-            "reasoningEffort",
-            &["reasoningEffort", "reasoning_effort", "effort", "reasoning"],
-        ),
-        "serviceTier" | "service_tier" => ("serviceTier", &["serviceTier", "service_tier"]),
-        _ => (key.as_str(), &[]),
-    };
-    for alias in aliases {
-        draft.model_settings.remove(*alias);
+    if monocode_core::catalog::is_effort_key(&key) {
+        draft
+            .model_settings
+            .retain(|k, _| !monocode_core::catalog::is_effort_key(k));
+        draft
+            .model_settings
+            .insert("reasoningEffort".to_string(), value);
+        return;
     }
-    draft.model_settings.insert(canonical.to_string(), value);
+    if matches!(key.as_str(), "serviceTier" | "service_tier") {
+        draft.model_settings.remove("serviceTier");
+        draft.model_settings.remove("service_tier");
+        draft
+            .model_settings
+            .insert("serviceTier".to_string(), value);
+        return;
+    }
+    draft.model_settings.insert(key, value);
 }
 fn gmt_offset() -> String {
     let minutes = Local::now().offset().local_minus_utc() / 60;

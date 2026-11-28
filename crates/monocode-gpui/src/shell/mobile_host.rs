@@ -1979,17 +1979,18 @@ impl Shell {
                 .filter(|k| monocode_core::provider::resolve(*k).is_some())
                 .collect();
             let mut current_model = mobile_catalog::model_id(kind, model.as_deref());
+            let mut settings = settings;
             let models: Vec<Value> = profiles
                 .iter()
                 .filter(|(k, _)| harnesses.contains(k))
                 .flat_map(|(k, profile)| {
                     let rows = monocode_core::catalog::models_for(*k, profile).unwrap_or_default();
                     if *k == kind {
-                        current_model = mobile_catalog::current_model_id(kind, model.as_deref(), &rows);
+                        current_model =
+                            mobile_catalog::current_model_id(kind, model.as_deref(), &rows);
+                        normalize_mobile_effort(kind, model.as_deref(), &rows, &mut settings);
                     }
-                    rows
-                        .into_iter()
-                        .map(move |m| catalog_model(*k, m))
+                    rows.into_iter().map(move |m| catalog_model(*k, m))
                 })
                 .collect();
             let mut current = json!({
@@ -2383,6 +2384,7 @@ fn model_settings(params: &Value) -> HashMap<String, String> {
 fn mobile_settings_of(settings: &Settings) -> HashMap<String, String> {
     let mut values = settings.model_settings.clone();
     if let Some(effort) = &settings.effort {
+        values.retain(|key, _| !monocode_core::catalog::is_effort_key(key));
         values.insert("effort".into(), effort.clone());
     }
     values.insert("fast".into(), settings.fast.to_string());
@@ -2392,12 +2394,44 @@ fn mobile_settings_of(settings: &Settings) -> HashMap<String, String> {
     values
 }
 
-fn title_case(value: &str) -> String {
-    let mut chars = value.chars();
-    chars
-        .next()
-        .map(|first| first.to_uppercase().chain(chars).collect())
-        .unwrap_or_default()
+/// Align the phone's reported effort with the active catalog model's supported
+/// levels (snapping unsupported levels to the nearest choice, or clearing for
+/// effort-less models such as Antigravity Orchestrators).
+fn normalize_mobile_effort(
+    kind: Kind,
+    model_id: Option<&str>,
+    rows: &[monocode_core::catalog::Model],
+    settings: &mut HashMap<String, String>,
+) {
+    let active = match model_id {
+        Some(id) => rows
+            .iter()
+            .find(|m| m.id == id || m.alias_target.as_deref() == Some(id)),
+        None => rows.iter().find(|m| m.default).or_else(|| rows.first()),
+    };
+    let Some(model) = active else {
+        return;
+    };
+    if model.efforts.is_empty() {
+        if !model
+            .controls
+            .iter()
+            .any(|c| monocode_core::catalog::is_effort_key(&c.id))
+        {
+            settings.retain(|key, _| !monocode_core::catalog::is_effort_key(key));
+        }
+        return;
+    }
+    if let Some(effort) = settings.get("effort").cloned()
+        && !model.efforts.iter().any(|e| e == &effort)
+    {
+        settings.retain(|key, _| !monocode_core::catalog::is_effort_key(key));
+        if kind != Kind::Hermes
+            && let Some(nearest) = monocode_core::catalog::nearest_effort(&effort, &model.efforts)
+        {
+            settings.insert("effort".into(), nearest.to_owned());
+        }
+    }
 }
 
 /// A catalog model as the phone's model sheet lists it, with its settings.
@@ -2415,7 +2449,7 @@ fn catalog_model(kind: Kind, model: monocode_core::catalog::Model) -> Value {
             "label": "Reasoning",
             "kind": "select",
             "value": model.default_effort.clone().or_else(|| model.efforts.first().cloned()).unwrap_or_default(),
-            "options": model.efforts.iter().map(|e| json!({"value": e, "label": title_case(e)})).collect::<Vec<_>>(),
+            "options": model.efforts.iter().map(|e| json!({"value": e, "label": crate::conversation::effort_name(e)})).collect::<Vec<_>>(),
         }));
     }
     if model.fast {
@@ -2628,7 +2662,7 @@ mod tests {
             alias_target: None,
             id: "claude-opus-5-5".into(),
             name: "Claude Opus 5.5".into(),
-            efforts: vec!["high".into()],
+            efforts: vec!["high".into(), "xhigh".into()],
             default_effort: Some("high".into()),
             fast: true,
             thinking: false,
@@ -2652,10 +2686,54 @@ mod tests {
         assert_eq!(choice["id"], "claude:opus-5-5");
         assert_eq!(choice["name"], "Claude Opus 5.5");
         assert_eq!(choice["settings"][0]["value"], "high");
+        assert_eq!(choice["settings"][0]["options"][1]["label"], "Extra High");
         assert_eq!(
             monocode_core::store::native_model(choice["id"].as_str().unwrap(), "claude").as_deref(),
             Some("claude-opus-5-5")
         );
+
+        let rows = vec![
+            monocode_core::catalog::Model {
+                alias_target: None,
+                id: "gemini-4-carbon".into(),
+                name: "Gemini 4 Carbon".into(),
+                efforts: vec!["low".into(), "medium".into(), "high".into()],
+                default_effort: Some("medium".into()),
+                fast: false,
+                thinking: false,
+                default: true,
+                tiers: vec![],
+                controls: vec![],
+            },
+            monocode_core::catalog::Model {
+                alias_target: None,
+                id: "gemini-pro-orchestrator-neon".into(),
+                name: "Orchestrator (Neon)".into(),
+                efforts: vec![],
+                default_effort: None,
+                fast: false,
+                thinking: false,
+                default: false,
+                tiers: vec![],
+                controls: vec![],
+            },
+        ];
+        let mut settings: HashMap<String, String> = [
+            ("effort".into(), "xhigh".into()),
+            ("thought_level".into(), "low".into()),
+        ]
+        .into();
+        normalize_mobile_effort(Kind::Antigravity, Some("gemini-4-carbon"), &rows, &mut settings);
+        assert_eq!(settings.get("effort").map(String::as_str), Some("high"));
+        assert!(!settings.contains_key("thought_level"));
+
+        normalize_mobile_effort(
+            Kind::Antigravity,
+            Some("gemini-pro-orchestrator-neon"),
+            &rows,
+            &mut settings,
+        );
+        assert!(!settings.contains_key("effort"));
     }
 
     #[test]

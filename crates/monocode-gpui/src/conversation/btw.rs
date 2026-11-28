@@ -192,6 +192,8 @@ impl Btw {
                         "reasoning",
                         "reasoningEffort",
                         "reasoning_effort",
+                        "thought_level",
+                        "thinking_level",
                         "variant",
                     ]
                     .into_iter()
@@ -929,7 +931,7 @@ impl Btw {
                 {
                     thread.model = target.model;
                     thread.effort = target.effort;
-                    thread.model_settings.extend(target.settings);
+                    thread.model_settings = target.settings;
                     this.save(cx);
                     this.refresh(cx);
                 }

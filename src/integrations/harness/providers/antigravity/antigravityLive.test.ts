@@ -878,4 +878,32 @@ describe.each(providers)("$id offline ACP transport", (provider) => {
     );
     expect(set?.params).toMatchObject({ configId: "thought_level", value: "high" });
   });
+
+  it("prioritizes canonical effort over stale aliases and skips model/mode overrides", async () => {
+    mock.setupConfigOptions = [
+      { id: "model", category: "model", currentValue: "gemini-4-carbon", options: [
+        { value: "gemini-4-carbon", name: "Gemini 4 Carbon" },
+        { value: "gemini-4-neon", name: "Gemini 4 Neon" },
+      ] },
+      { id: "thought_level", category: "thought_level", currentValue: "medium", options: [
+        { value: "low", name: "Low" },
+        { value: "medium", name: "Medium" },
+        { value: "high", name: "High" },
+      ] },
+    ];
+    mock.autoPrompt = true;
+    await provider.send({
+      ...input,
+      model: `${provider.id}:gemini-4-carbon`,
+      modelSettings: {
+        thought_level: "low",
+        effort: "xhigh",
+        model: "gemini-4-neon",
+        mode: "plan",
+      },
+    });
+    const configCalls = mock.sent.filter((m) => m.method === "session/set_config_option");
+    expect(configCalls).toHaveLength(1);
+    expect(configCalls[0].params).toMatchObject({ configId: "thought_level", value: "high" });
+  });
 });
