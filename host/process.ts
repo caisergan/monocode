@@ -10,6 +10,39 @@ const npmEntries: Record<string, string> = {
   claude: "node_modules/@anthropic-ai/claude-code/cli.js",
 };
 
+/** npm packages behind a Windows `.cmd` launcher whose entry moves between
+ * releases (Pi's went from `dist/cli.js` to `dist/bundle/cli.js`), so it is
+ * read from the package's own `bin` field. */
+const piPackages = [
+  "@earendil-works/pi-coding-agent",
+  "@mariozechner/pi-coding-agent",
+];
+const npmPackages: Record<string, string[]> = {
+  pi: piPackages,
+  "pi-coding-agent": piPackages,
+};
+
+/** The script an npm `.cmd` launcher in `directory` runs, if it is known. */
+async function npmEntry(
+  directory: string,
+  name: string,
+): Promise<string | undefined> {
+  if (npmEntries[name]) return join(directory, npmEntries[name]);
+  for (const pkg of npmPackages[name] ?? []) {
+    const root = join(directory, "node_modules", ...pkg.split("/"));
+    try {
+      const { bin } = JSON.parse(
+        await readFile(join(root, "package.json"), "utf8"),
+      ) as { bin?: string | Record<string, string> };
+      const entry = typeof bin === "string" ? bin : (bin?.[name] ?? bin?.pi);
+      if (entry) return join(root, entry);
+    } catch {
+      /* not installed from this package; try the next one */
+    }
+  }
+  return undefined;
+}
+
 const binaryNames: Record<RemoteProvider, string[]> = {
   codex: ["codex"],
   claude: ["claude"],
@@ -170,8 +203,6 @@ export async function resolveProvider(
   provider: RemoteProvider,
 ): Promise<string> {
   const windows = process.platform === "win32";
-  if (windows && provider === "antigravity")
-    throw new Error("Antigravity ACP is not available on Windows");
   for (const directory of providerDirectories(provider)) {
     if (!directory) continue;
     for (const name of binaryNames[provider]) {
@@ -208,10 +239,9 @@ export async function providerLaunch(
   platform = process.platform,
 ): Promise<{ command: string; args: string[] }> {
   if (platform === "win32" && /\.(cmd|bat)$/i.test(command)) {
-    const provider = basename(command, extname(command)).toLowerCase();
-    const relative = npmEntries[provider];
-    if (!relative) throw new Error("Unsupported Windows provider launcher");
-    const entry = join(dirname(command), relative);
+    const name = basename(command, extname(command)).toLowerCase();
+    const entry = await npmEntry(dirname(command), name);
+    if (!entry) throw new Error("Unsupported Windows provider launcher");
     if (!(await stat(entry)).isFile())
       throw new Error("Missing npm provider entry point");
     return { command: process.execPath, args: [entry, ...args] };

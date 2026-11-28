@@ -62,6 +62,76 @@ it("runs npm provider entry points directly with literal arguments and bundled N
   ).rejects.toThrow("Unsupported");
 });
 
+it.each([
+  ["@earendil-works/pi-coding-agent", "dist/bundle/cli.js"],
+  ["@mariozechner/pi-coding-agent", "dist/cli.js"],
+])(
+  "runs Pi's npm launcher through the entry its %s package names",
+  async (pkg, bin) => {
+    const directory = temporary();
+    const root = join(directory, "node_modules", pkg);
+    mkdirSync(join(root, bin, ".."), { recursive: true });
+    writeFileSync(
+      join(root, "package.json"),
+      JSON.stringify({ name: pkg, bin: { pi: bin } }),
+    );
+    writeFileSync(
+      join(root, bin),
+      "console.log(JSON.stringify(process.argv.slice(2)))",
+    );
+    for (const name of ["pi", "pi-coding-agent"]) {
+      const launch = await providerLaunch(
+        join(directory, `${name}.cmd`),
+        ["--mode", "rpc"],
+        "win32",
+      );
+      expect(launch).toEqual({
+        command: process.execPath,
+        args: [join(root, bin), "--mode", "rpc"],
+      });
+    }
+    expect(
+      JSON.parse(
+        execFileSync(process.execPath, [join(root, bin), "a b"], {
+          encoding: "utf8",
+        }),
+      ),
+    ).toEqual(["a b"]);
+  },
+);
+
+it("rejects a Pi launcher whose package names no entry", async () => {
+  const directory = temporary();
+  const root = join(directory, "node_modules/@earendil-works/pi-coding-agent");
+  mkdirSync(root, { recursive: true });
+  writeFileSync(
+    join(root, "package.json"),
+    JSON.stringify({ name: "@earendil-works/pi-coding-agent" }),
+  );
+  await expect(
+    providerLaunch(join(directory, "pi.cmd"), [], "win32"),
+  ).rejects.toThrow("Unsupported");
+});
+
+it("adds the user's and machine's registry PATH when the task starts", () => {
+  const script = windowsTaskScript(
+    {
+      directory: "C:\\Host",
+      executable: "C:\\Runtime\\node.exe",
+      entry: "C:\\Runtime\\host.mjs",
+      port: 3774,
+    },
+    "C:\\Runtime;C:\\Windows",
+  );
+  expect(script).toContain(
+    "[Environment]::GetEnvironmentVariable(''Path'', ''User'')",
+  );
+  expect(script).toContain(
+    "[Environment]::GetEnvironmentVariable(''Path'', ''Machine'')",
+  );
+  expect(script).toContain("(@(''C:\\Runtime;C:\\Windows'' -split '';'')");
+});
+
 it("uses an unlimited, unelevated per-user task and preserves literal paths", () => {
   const options = {
     directory: "C:\\Users\\Nick's $PC\\.monocode-host",
